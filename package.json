@@ -1,6 +1,6 @@
 {
   "name": "smallcode",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "AI coding agent optimized for small LLMs (≤20B parameters)",
   "main": "src/api/index.js",
   "bin": {

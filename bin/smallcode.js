@@ -103,7 +103,7 @@ let tokenTracker = null;
 // Fullscreen TUI reference for streaming (set when fullscreen mode is active)
 let _fullscreenRef = null;
 
-const VERSION = '0.5.0';
+const VERSION = '0.5.1';
 const LOGO = `
   ⚡ SmallCode v${VERSION}
   AI coding agent for small LLMs
