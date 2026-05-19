@@ -19,6 +19,12 @@ on:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+# Release job needs contents: write to create GitHub Releases.
+# Default GITHUB_TOKEN on forks may not have auto-generated release notes API access,
+# so we omit generate_release_notes and rely on manual release notes editing.
+permissions:
+  contents: write
+
 jobs:
   build:
     name: Build (${{ matrix.os }})
@@ -92,4 +98,3 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: smallcode-*.tar.gz
-          generate_release_notes: true
