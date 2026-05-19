@@ -93,7 +93,7 @@ let tokenTracker = null;
 // Fullscreen TUI reference for streaming (set when fullscreen mode is active)
 let _fullscreenRef = null;
 
-const VERSION = '0.4.13';
+const VERSION = '0.4.14';
 const LOGO = `
   ⚡ SmallCode v${VERSION}
   AI coding agent for small LLMs
@@ -848,7 +848,7 @@ async function executeTool(name, args) {
         return { result: trimmed || '(no output)', command };
       } catch (e) {
         const output = (e.stdout || '') + (e.stderr || '');
-        const exitReason = e.status === null ? 'Timed out (killed after 30s)' : `Exit code ${e.status}`;
+        const exitReason = (e.status === null || e.status === undefined) ? 'Timed out (killed after 30s)' : `Exit code ${e.status}`;
         // Verbose: show error output
         if (flags.verbose && _fullscreenRef && output.trim()) {
           const lines = output.split('\n').slice(0, 8);
@@ -979,7 +979,7 @@ async function executeTool(name, args) {
         } catch (e) {
           cmdError = true;
           const errOut = (e.stdout || '') + (e.stderr || e.message || '');
-          output += `\n$ ${args.command}\n${e.status === null ? 'TIMED OUT' : 'EXIT CODE ' + (e.status || 1)} — FAILED:\n${errOut.slice(0, 2000)}`;
+          output += `\n$ ${args.command}\n${(e.status === null || e.status === undefined) ? 'TIMED OUT' : 'EXIT CODE ' + (e.status || 1)} — FAILED:\n${errOut.slice(0, 2000)}`;
         }
       }
       return { result: output, action: 'Created', path: args.path, lines, error: cmdError ? `Command failed: ${args.command}` : null };
@@ -1021,7 +1021,7 @@ async function executeTool(name, args) {
         return { result: output.slice(0, 3000) || '(completed with no output)', command: args.command };
       } catch (e) {
         const errOut = (e.stdout || '') + (e.stderr || e.message || '');
-        const exitReason = e.status === null ? 'Timed out (killed after 30s)' : `Exit code ${e.status || 1}`;
+        const exitReason = (e.status === null || e.status === undefined) ? 'Timed out (killed after 30s)' : `Exit code ${e.status || 1}`;
         return { result: `${exitReason.toUpperCase()} — FAILED:\n${errOut.slice(0, 2500)}`, error: `Command failed: ${exitReason}`, command: args.command };
       }
     }

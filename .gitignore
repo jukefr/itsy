@@ -58,3 +58,5 @@ desktop.ini
 # MarrowScript source (internal, not shipped)
 *.marrow
 marrow.toml
+
+.test-runs/

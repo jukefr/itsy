@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.4.14] - 2026-05-18
+
+### Fixed
+- **"Exit code undefined" display bug** — When `execSync` throws without a status code (e.g. EPERM, ENOENT), the error message now correctly shows "Timed out" instead of "Exit code undefined".
+
 ## [0.4.13] - 2026-05-18
 
 ### Fixed

@@ -1,8 +1,8 @@
 # SmallCode default configuration
 
 [model]
-provider = "ollama"
-name = "qwen2.5-coder-14b"
+provider = "openai"
+name = "huihui-gemma-4-e4b-it-abliterated"
 # context_length = 32768
 # tool_format = "hermes"
 
