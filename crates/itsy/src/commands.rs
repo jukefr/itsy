@@ -467,6 +467,20 @@ fn cmd_trace(ctx: &CommandCtx, rest: &[&str]) -> String {
                                 let n = tool_calls.as_ref().map(|t| t.len()).unwrap_or(0);
                                 out.push_str(&format!("    ✎ model response ({n} tool calls)\n"));
                             }
+                            ChatRequest { message_count, tool_count, .. } => {
+                                out.push_str(&format!(
+                                    "    → chat request ({message_count} msgs, {tool_count} tools)\n"
+                                ));
+                            }
+                            Classification { task_type, tool_category, confidence, .. } => {
+                                let cat = tool_category.as_deref().unwrap_or("·");
+                                out.push_str(&format!(
+                                    "    🧭 routed → task={task_type} cat={cat} (conf {confidence:.2})\n"
+                                ));
+                            }
+                            Error { scope, message, .. } => {
+                                out.push_str(&format!("    ✗ error [{scope}]: {message}\n"));
+                            }
                         }
                     }
                     out.push('\n');

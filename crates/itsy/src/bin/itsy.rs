@@ -603,6 +603,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
         }
     };
 
+
     // Align `task_type` with the routing decision. If the router says
     // `respond`, treat the task as an explanation so downstream guards
     // (system prompt, badger loops, plan tracker) don't try to coerce
@@ -612,6 +613,16 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
     } else {
         task_type_initial
     };
+
+    // Record the routing decision so failures can be replayed with
+    // full context. We rerun the deterministic router here purely to
+    // capture the confidence score for the trace.
+    let cls_for_log = itsy::runtime::tool_router::classify_tool_category(&user_msg);
+    session.trace.lock().record_classification(
+        task_type,
+        stage2_category.as_deref(),
+        cls_for_log.confidence,
+    );
 
     // 6) Maybe pre-compact the history before the first call.
     {
@@ -681,7 +692,20 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             system_prompt,
         };
 
+        // Forensic snapshot of the request body about to be sent. Lets a
+        // smarter model later replay the call from the trace JSON.
+        session.trace.lock().record_chat_request(
+            &cfg.model.name,
+            &chat_ctx.system_prompt,
+            &json!(chat_ctx.conversation),
+            &json!(chat_ctx.tools),
+        );
+
         let Some(data) = chat_completion(&chat_ctx).await else {
+            session
+                .trace
+                .lock()
+                .record_error("chat_completion", "no response from model");
             println!("  \x1b[31m✗ No response from model\x1b[0m");
             break;
         };
@@ -1834,10 +1858,19 @@ async fn main() -> Result<()> {
     itsy::interrupt::install();
     let cli = Cli::parse();
 
+    // Non-interactive modes never run the wizard: CI, `-p "..."`, `--eval`,
+    // `--mcp`, and `--print-system-prompt` all need to be scriptable.
+    let non_interactive = cli.prompt.is_some()
+        || cli.eval.is_some()
+        || cli.mcp
+        || cli.print_system_prompt
+        || cli.non_interactive
+        || !std::io::IsTerminal::is_terminal(&std::io::stdin());
+
     // First-launch / explicit `--init`: run the interactive wizard before
     // anything else. The wizard writes ~/.config/itsy/config.toml so the
     // rest of `main` can boot normally on subsequent runs.
-    if cli.init || itsy::init_wizard::is_first_launch() {
+    if cli.init || (itsy::init_wizard::is_first_launch() && !non_interactive) {
         match itsy::init_wizard::run() {
             Ok(_) => {
                 if cli.init {

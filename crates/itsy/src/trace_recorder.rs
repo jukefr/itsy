@@ -43,6 +43,40 @@ pub enum TraceStep {
         errors: Vec<String>,
         timestamp: u128,
     },
+    /// Snapshot of the request body about to be sent. Captures everything
+    /// needed to re-run the call against a smarter model later.
+    #[serde(rename = "chat_request")]
+    ChatRequest {
+        model: String,
+        #[serde(rename = "messageCount")]
+        message_count: usize,
+        #[serde(rename = "toolCount")]
+        tool_count: usize,
+        #[serde(rename = "systemPrompt")]
+        system_prompt: String,
+        messages: Value,
+        tools: Value,
+        timestamp: u128,
+    },
+    /// Failure recorded inside the agent loop (chat-completion errors,
+    /// classifier panics, escalation refusals, ...).
+    #[serde(rename = "error")]
+    Error {
+        scope: String,
+        message: String,
+        timestamp: u128,
+    },
+    /// What the deterministic tool router + task classifier picked for
+    /// this user message.
+    #[serde(rename = "classification")]
+    Classification {
+        #[serde(rename = "taskType")]
+        task_type: String,
+        #[serde(rename = "toolCategory")]
+        tool_category: Option<String>,
+        confidence: f64,
+        timestamp: u128,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -183,6 +217,71 @@ impl TraceRecorder {
                 file_path: file_path.to_string(),
                 passed,
                 errors: truncated_errors,
+                timestamp: now_ms(),
+            });
+        }
+    }
+
+    /// Capture a snapshot of the request body about to be sent. The
+    /// `messages` and `tools` Values are redacted before being stored.
+    pub fn record_chat_request(
+        &mut self,
+        model: &str,
+        system_prompt: &str,
+        messages: &Value,
+        tools: &Value,
+    ) {
+        if !self.recording {
+            return;
+        }
+        let msg_count = messages.as_array().map(|a| a.len()).unwrap_or(0);
+        let tool_count = tools.as_array().map(|a| a.len()).unwrap_or(0);
+        let messages_safe = redact_value(messages);
+        let tools_safe = redact_value(tools);
+        let system_safe = redact_string(system_prompt);
+        if let Some(t) = self.current.as_mut() {
+            t.steps.push(TraceStep::ChatRequest {
+                model: model.to_string(),
+                message_count: msg_count,
+                tool_count,
+                system_prompt: truncate(&system_safe, 8000),
+                messages: messages_safe,
+                tools: tools_safe,
+                timestamp: now_ms(),
+            });
+        }
+    }
+
+    /// Record an internal error (chat-completion failure, classifier
+    /// panic, escalation refusal, …) with a free-form `scope` label.
+    pub fn record_error(&mut self, scope: &str, message: &str) {
+        if !self.recording {
+            return;
+        }
+        if let Some(t) = self.current.as_mut() {
+            t.steps.push(TraceStep::Error {
+                scope: scope.to_string(),
+                message: truncate(&redact_string(message), 2000),
+                timestamp: now_ms(),
+            });
+        }
+    }
+
+    /// Record the routing decision (task type, tool category, confidence).
+    pub fn record_classification(
+        &mut self,
+        task_type: &str,
+        tool_category: Option<&str>,
+        confidence: f64,
+    ) {
+        if !self.recording {
+            return;
+        }
+        if let Some(t) = self.current.as_mut() {
+            t.steps.push(TraceStep::Classification {
+                task_type: task_type.to_string(),
+                tool_category: tool_category.map(String::from),
+                confidence,
                 timestamp: now_ms(),
             });
         }
