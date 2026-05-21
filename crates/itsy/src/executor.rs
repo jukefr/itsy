@@ -302,7 +302,7 @@ async fn exec_bash(args: &Value, cwd: &Path, ctx: &ExecCtx<'_>) -> Value {
     let persistent = std::env::var("ITSY_SHELL_PERSIST").ok().as_deref() != Some("false");
     if persistent {
         let shell = get_shell(ShellOptions { cwd: cwd.to_path_buf(), ..Default::default() });
-        let result = shell.run(&command);
+        let result = shell.run(&command).await;
         let max_output = if ctx.config.context.detected_window < 64_000 { 1500 } else { 3000 };
         let trimmed = trim_output(&result.stdout, max_output);
         if result.timed_out {

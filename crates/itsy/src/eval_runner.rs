@@ -1,0 +1,239 @@
+//! Prompt evaluation runner — `--eval <suite>` CLI mode. Three built-in
+//! suites: classify_accuracy, tool_selection, response_quality. Mirrors
+//! `bin/eval_runner.js`.
+
+use once_cell::sync::Lazy;
+use serde::Serialize;
+use serde_json::Value;
+
+use crate::Config;
+
+#[derive(Debug, Clone)]
+pub struct ClassifyCase {
+    pub input: &'static str,
+    pub expected: &'static str,
+    pub tolerance: &'static [&'static str],
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolCase {
+    pub input: &'static str,
+    pub expected_tool: &'static str,
+}
+
+#[derive(Debug, Clone)]
+pub struct QualityCase {
+    pub input: &'static str,
+    pub check: &'static str, // "length>50" or "contains:foo|bar"
+    pub desc: &'static str,
+}
+
+pub static CLASSIFY_ACCURACY: Lazy<Vec<ClassifyCase>> = Lazy::new(|| {
+    vec![
+        ClassifyCase { input: "fix the typo in main.ts", expected: "coding", tolerance: &["coding", "editing", "refactoring"] },
+        ClassifyCase { input: "explain what this function does", expected: "explanation", tolerance: &["explanation"] },
+        ClassifyCase { input: "refactor the database module", expected: "editing", tolerance: &["editing", "coding", "refactoring"] },
+        ClassifyCase { input: "write unit tests for auth", expected: "coding", tolerance: &["coding"] },
+        ClassifyCase { input: "deploy to production", expected: "shell", tolerance: &["shell", "coding"] },
+        ClassifyCase { input: "what is dependency injection?", expected: "explanation", tolerance: &["explanation"] },
+        ClassifyCase { input: "add error handling to the API", expected: "coding", tolerance: &["coding"] },
+        ClassifyCase { input: "why is the build failing?", expected: "debugging", tolerance: &["debugging"] },
+        ClassifyCase { input: "rename getUserData to fetchUser", expected: "editing", tolerance: &["editing", "coding", "refactoring"] },
+        ClassifyCase { input: "create a new React component", expected: "coding", tolerance: &["coding"] },
+    ]
+});
+
+pub static TOOL_SELECTION: Lazy<Vec<ToolCase>> = Lazy::new(|| {
+    vec![
+        ToolCase { input: "read the contents of package.json", expected_tool: "read_file" },
+        ToolCase { input: "find all uses of useState", expected_tool: "search" },
+        ToolCase { input: "create a new file called utils.ts", expected_tool: "write_file" },
+        ToolCase { input: "run the test suite", expected_tool: "bash" },
+        ToolCase { input: "change the function name from foo to bar", expected_tool: "patch" },
+        ToolCase { input: "list all files in the project", expected_tool: "list_projects" },
+        ToolCase { input: "search for the error message", expected_tool: "search" },
+        ToolCase { input: "install a new package", expected_tool: "bash" },
+    ]
+});
+
+pub static RESPONSE_QUALITY: Lazy<Vec<QualityCase>> = Lazy::new(|| {
+    vec![
+        QualityCase { input: "explain closures in javascript", check: "length>50", desc: "response should be substantial" },
+        QualityCase { input: "fix: const x = 1; x = 2;", check: "contains:const|let", desc: "should suggest const→let" },
+        QualityCase { input: "2 + 2", check: "contains:4", desc: "basic math" },
+    ]
+});
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CaseResult {
+    pub input: String,
+    pub passed: bool,
+    pub got: String,
+    pub expected: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SuiteResult {
+    pub suite: String,
+    pub name: String,
+    pub total: usize,
+    pub passed: usize,
+    pub failed: usize,
+    pub score: String,
+    pub cases: Vec<CaseResult>,
+}
+
+pub struct EvalRunner<'a> {
+    pub config: &'a Config,
+    pub results: Vec<SuiteResult>,
+}
+
+impl<'a> EvalRunner<'a> {
+    pub fn new(config: &'a Config) -> Self {
+        Self { config, results: Vec::new() }
+    }
+
+    /// Run the classify_accuracy suite (deterministic — no model call).
+    pub fn run_classify(&mut self) -> SuiteResult {
+        let mut cases = Vec::new();
+        let mut passed = 0;
+        let mut failed = 0;
+        for c in CLASSIFY_ACCURACY.iter() {
+            let got = crate::governor::classify_task(c.input);
+            let ok = c.tolerance.contains(&got);
+            if ok { passed += 1 } else { failed += 1 }
+            cases.push(CaseResult {
+                input: c.input.into(),
+                passed: ok,
+                got: got.into(),
+                expected: Some(c.expected.into()),
+            });
+        }
+        let total = CLASSIFY_ACCURACY.len();
+        let score = format!("{passed}/{total} ({}%)", passed * 100 / total.max(1));
+        let r = SuiteResult {
+            suite: "classify_accuracy".into(),
+            name: "Task Classification Accuracy".into(),
+            total,
+            passed,
+            failed,
+            score,
+            cases,
+        };
+        self.results.push(r.clone());
+        r
+    }
+
+    /// Run the tool_selection suite — requires a `chat_fn` that sends a
+    /// message to the model and returns its first tool call name.
+    pub async fn run_tool_selection<F, Fut>(&mut self, mut chat_fn: F) -> SuiteResult
+    where
+        F: FnMut(&Config, &str) -> Fut,
+        Fut: std::future::Future<Output = Option<String>>,
+    {
+        let mut cases = Vec::new();
+        let mut passed = 0;
+        let mut failed = 0;
+        for c in TOOL_SELECTION.iter() {
+            let got = chat_fn(self.config, c.input).await.unwrap_or_else(|| "(no tool)".into());
+            let ok = got == c.expected_tool;
+            if ok { passed += 1 } else { failed += 1 }
+            cases.push(CaseResult {
+                input: c.input.into(),
+                passed: ok,
+                got,
+                expected: Some(c.expected_tool.into()),
+            });
+        }
+        let total = TOOL_SELECTION.len();
+        let score = format!("{passed}/{total} ({}%)", passed * 100 / total.max(1));
+        let r = SuiteResult {
+            suite: "tool_selection".into(),
+            name: "Tool Selection Quality".into(),
+            total,
+            passed,
+            failed,
+            score,
+            cases,
+        };
+        self.results.push(r.clone());
+        r
+    }
+
+    /// Run the response_quality suite — requires a `chat_fn` that returns
+    /// the model's text reply.
+    pub async fn run_response_quality<F, Fut>(&mut self, mut chat_fn: F) -> SuiteResult
+    where
+        F: FnMut(&Config, &str) -> Fut,
+        Fut: std::future::Future<Output = Option<String>>,
+    {
+        let mut cases = Vec::new();
+        let mut passed = 0;
+        let mut failed = 0;
+        for c in RESPONSE_QUALITY.iter() {
+            let content = chat_fn(self.config, c.input).await.unwrap_or_default();
+            let ok = if let Some(rest) = c.check.strip_prefix("length>") {
+                rest.parse::<usize>().map(|n| content.len() > n).unwrap_or(false)
+            } else if let Some(rest) = c.check.strip_prefix("contains:") {
+                let needles: Vec<&str> = rest.split('|').collect();
+                let lc = content.to_lowercase();
+                needles.iter().any(|n| lc.contains(n))
+            } else {
+                false
+            };
+            if ok { passed += 1 } else { failed += 1 }
+            cases.push(CaseResult {
+                input: c.input.into(),
+                passed: ok,
+                got: content.chars().take(100).collect(),
+                expected: Some(c.desc.into()),
+            });
+        }
+        let total = RESPONSE_QUALITY.len();
+        let score = format!("{passed}/{total} ({}%)", passed * 100 / total.max(1));
+        let r = SuiteResult {
+            suite: "response_quality".into(),
+            name: "Response Quality".into(),
+            total,
+            passed,
+            failed,
+            score,
+            cases,
+        };
+        self.results.push(r.clone());
+        r
+    }
+}
+
+/// Pretty-print a suite result with ANSI colours.
+pub fn format_results(r: &SuiteResult) -> String {
+    let mut lines = vec![
+        format!("  {}", r.name),
+        format!("  Score: {}", r.score),
+        format!("  {}", "─".repeat(40)),
+    ];
+    for c in &r.cases {
+        let (mark, color) = if c.passed { ("✓", "\x1b[32m") } else { ("✗", "\x1b[31m") };
+        let exp = c.expected.as_deref().map(|e| format!(" (exp: {e})")).unwrap_or_default();
+        let input_short: String = c.input.chars().take(50).collect();
+        lines.push(format!("  {color}{mark}\x1b[0m {input_short} → {}{exp}", c.got));
+    }
+    lines.join("\n")
+}
+
+/// Look up a suite by name. Returns an error string with available names.
+pub fn known_suite(name: &str) -> Result<&'static str, String> {
+    match name {
+        "classify_accuracy" => Ok("classify_accuracy"),
+        "tool_selection" => Ok("tool_selection"),
+        "response_quality" => Ok("response_quality"),
+        other => Err(format!(
+            "Unknown suite: {other}. Available: classify_accuracy, tool_selection, response_quality"
+        )),
+    }
+}
+
+// Surface a richer value type when called from CLI paths that need it.
+pub fn suite_to_value(r: &SuiteResult) -> Value {
+    serde_json::to_value(r).unwrap_or(Value::Null)
+}

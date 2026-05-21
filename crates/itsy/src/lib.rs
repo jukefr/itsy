@@ -23,14 +23,19 @@
 
 pub mod adapters;
 pub mod api;
+pub mod bonescript_guide;
+pub mod cognition_adapter;
 pub mod commands;
 pub mod compiled;
 pub mod config;
 pub mod escalation;
+pub mod eval_runner;
 pub mod executor;
+pub mod features_adapter;
 pub mod fullscreen;
 pub mod governor;
 pub mod knowledge;
+pub mod loops_adapter;
 pub mod lsp;
 pub mod mcp_bridge;
 pub mod memory;
@@ -39,8 +44,10 @@ pub mod model_client;
 pub mod plugins;
 pub mod security;
 pub mod session;
+pub mod token_monitor;
 pub mod tools;
 pub mod tools_impl;
+pub mod trace_recorder;
 pub mod tui;
 
 pub use config::Config;

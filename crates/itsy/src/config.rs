@@ -235,11 +235,32 @@ pub fn load_config(flags: &Flags) -> Config {
     if let Some(b) = flags.endpoint.clone().or_else(|| flags.base_url.clone()) {
         config.model.base_url = b;
     }
+    // Normalise: prepend http:// if the URL lacks a scheme. `reqwest` and our
+    // SSRF guard both refuse `host:port/path` URLs without one.
+    config.model.base_url = normalize_base_url(&config.model.base_url);
     if flags.classic {
         config.tui.classic = true;
     }
 
     config
+}
+
+/// Prepend `http://` if the URL string lacks a scheme. Trims a trailing
+/// slash so `host:port/v1/` and `host:port/v1` are equivalent. Falls back
+/// to the input unchanged when it already has a scheme.
+pub fn normalize_base_url(raw: &str) -> String {
+    let trimmed = raw.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return "http://localhost:1234/v1".to_string();
+    }
+    let has_scheme = trimmed.starts_with("http://")
+        || trimmed.starts_with("https://")
+        || trimmed.starts_with("unix://");
+    if has_scheme {
+        trimmed.to_string()
+    } else {
+        format!("http://{trimmed}")
+    }
 }
 
 fn extract_value(line: &str) -> Option<String> {

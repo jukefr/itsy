@@ -194,15 +194,28 @@ fn pathdiff(target: &Path, base: &Path) -> Option<String> {
 // ─── Shell escaping ─────────────────────────────────────────────────────────
 
 pub fn escape_shell_arg(value: &str) -> String {
-    if value.contains('\0') {
-        // Matches the JS version's throw. Callers must guard before this.
-        return String::new();
-    }
+    // The JS version throws on NUL; we instead strip NUL bytes so a single
+    // malformed input can't silently collapse an arg into "" and shift the
+    // meaning of a command. NUL is never valid in a POSIX shell argument
+    // anyway.
+    let cleaned: String = value.chars().filter(|c| *c != '\0').collect();
     if cfg!(windows) {
-        format!("\"{}\"", value.replace('"', "\"\""))
+        // CMD: wrap in double quotes, double internal double-quotes.
+        format!("\"{}\"", cleaned.replace('"', "\"\""))
     } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
+        // POSIX: single-quote, escape any embedded single quote with '\\''
+        format!("'{}'", cleaned.replace('\'', "'\\''"))
     }
+}
+
+/// Strict variant that mirrors the JS `escapeShellArg` semantics: returns an
+/// `Err` if `value` contains a NUL byte. Useful where callers want to surface
+/// the input error explicitly rather than rely on the lenient strip.
+pub fn try_escape_shell_arg(value: &str) -> Result<String, &'static str> {
+    if value.contains('\0') {
+        return Err("shell argument contains NUL byte");
+    }
+    Ok(escape_shell_arg(value))
 }
 
 pub fn build_command(base: &str, trusted: &[&str], user_args: &[&str]) -> String {
