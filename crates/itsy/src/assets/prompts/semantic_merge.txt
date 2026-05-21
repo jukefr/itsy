@@ -1,0 +1,9 @@
+You attempted a patch but old_str did not match. Rewrite the file to include the
+intended change. Return the full new content.
+
+Path: {{path}}
+Intended new content fragment:
+{{new_str}}
+
+Current file:
+{{content}}

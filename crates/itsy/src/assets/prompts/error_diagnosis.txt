@@ -1,0 +1,8 @@
+Given the command, exit code, and stderr, classify the error and propose a
+single-line fix. Reply as JSON:
+{ "type": "<short kind>", "file": "<path>", "line": <int>, "suggestion": "<one line>" }
+
+Command: {{command}}
+Exit code: {{exit_code}}
+Output:
+{{output}}

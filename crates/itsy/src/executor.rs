@@ -1,0 +1,837 @@
+//! Dispatches the 18+ built-in tools and forwards
+//! plugin/MCP calls through the registered adapters.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::Arc;
+
+use anyhow::Result;
+use parking_lot::Mutex;
+use serde_json::{json, Value};
+
+use crate::config::Flags;
+use crate::mcp_bridge::McpBridge;
+use crate::memory::MemoryStore;
+use crate::security::{
+    build_command, escape_shell_arg, redact_string, safe_resolve_path, sanitize_tool_output,
+    strip_ansi, PathOptions,
+};
+use crate::session::file_state::get_file_state_tracker;
+use crate::session::snapshot::get_snapshot_manager;
+use crate::tools_impl::file_tree::format_smart_listing;
+use crate::tools_impl::mcp_client::McpClient;
+use crate::tools_impl::read_tracker::get_read_tracker;
+use crate::tools_impl::shell_session::{get_shell, ShellOptions};
+use crate::tools_impl::web_browse::{web_fetch, web_search};
+use crate::Config;
+
+/// Shared execution context handed to [`execute_tool`].
+pub struct ExecCtx<'a> {
+    pub config: &'a Config,
+    pub flags: &'a Flags,
+    pub memory: Arc<Mutex<MemoryStore>>,
+    pub mcp_bridge: Option<Arc<McpBridge>>,
+    pub mcp_client: Option<Arc<McpClient>>,
+    pub fullscreen: Option<Arc<crate::fullscreen::Fullscreen>>,
+}
+
+const MAX_CONTENT_CHARS: usize = 8000;
+
+pub async fn execute_tool(name: &str, mut args: Value, ctx: &ExecCtx<'_>) -> Value {
+    sanitize_args(&mut args);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    match name {
+        "read_file" => exec_read_file(&args, &cwd).await,
+        "write_file" => exec_write_file(&args, &cwd, ctx).await,
+        "append_file" => exec_append_file(&args, &cwd).await,
+        "patch" => exec_patch(&args, &cwd, ctx).await,
+        "bash" => exec_bash(&args, &cwd, ctx).await,
+        "search" => exec_search(&args, &cwd).await,
+        "find_files" => exec_find_files(&args, &cwd).await,
+        "list_projects" => exec_list_projects(ctx, &cwd).await,
+        "graph_search" => exec_graph_search(&args, ctx, &cwd).await,
+        "explain_symbol" => exec_explain_symbol(&args, ctx, &cwd).await,
+        "read_and_patch" => exec_read_and_patch(&args, &cwd).await,
+        "create_and_run" => exec_create_and_run(&args, &cwd).await,
+        "find_and_read" => exec_find_and_read(&args, &cwd).await,
+        "search_and_read" => exec_search_and_read(&args, &cwd).await,
+        "run" => exec_run(&args, &cwd).await,
+        "memory_load" | "memory_remember" | "memory_list" | "memory_forget" => {
+            exec_memory(name, &args, ctx).await
+        }
+        "bone_compile" => exec_bone_compile(&args, &cwd).await,
+        "bone_check" => exec_bone_check(&args, &cwd).await,
+        "web_search" => exec_web_search(&args).await,
+        "web_fetch" => exec_web_fetch(&args).await,
+        "select_category" => {
+            let cat = args.get("category").and_then(|v| v.as_str()).unwrap_or("read");
+            json!({"result": format!("Category: {cat}. Proceed with your tool call."), "category": cat})
+        }
+        _ => {
+            if let Some(mcp) = &ctx.mcp_client {
+                if mcp.is_mcp_tool(name) {
+                    return match mcp.call_tool(name, args).await {
+                        Ok(v) => json!({"result": v}),
+                        Err(e) => json!({"error": e.to_string()}),
+                    };
+                }
+            }
+            json!({"error": format!("Unknown tool: {name}")})
+        }
+    }
+}
+
+fn sanitize_args(args: &mut Value) {
+    if let Some(obj) = args.as_object_mut() {
+        for (_, v) in obj.iter_mut() {
+            if let Some(s) = v.as_str() {
+                *v = Value::String(strip_ansi(s));
+            }
+        }
+    }
+}
+
+async fn exec_read_file(args: &Value, cwd: &Path) -> Value {
+    let Some(path) = args.get("path").and_then(|v| v.as_str()) else {
+        return json!({"error": "read_file rejected: path missing"});
+    };
+    let safe = match safe_resolve_path(path, cwd, PathOptions::default()) {
+        Ok(s) => s,
+        Err(e) => return json!({"error": format!("read_file rejected: {e}")}),
+    };
+    if !safe.full_path.exists() {
+        return json!({"error": format!("File not found: {path}")});
+    }
+    let read_tracker = get_read_tracker();
+    read_tracker.record_read(&safe.full_path, cwd);
+    let content = match fs::read_to_string(&safe.full_path) {
+        Ok(c) => c,
+        Err(e) => return json!({"error": e.to_string()}),
+    };
+    let lines: Vec<&str> = content.split('\n').collect();
+    let total = lines.len();
+    let start = args.get("start_line").and_then(|v| v.as_u64()).map(|n| n.saturating_sub(1) as usize).unwrap_or(0);
+    let end = args.get("end_line").and_then(|v| v.as_u64()).map(|n| n as usize).unwrap_or(total);
+    let slice = &lines[start.min(total)..end.min(total)];
+    let safe_slice: Vec<String> = slice.iter().map(|l| sanitize_tool_output(l)).collect();
+    let numbered: String = safe_slice
+        .iter()
+        .enumerate()
+        .map(|(i, l)| format!("{:>4}│ {l}", start + i + 1))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if args.get("start_line").is_none() && args.get("end_line").is_none() {
+        match get_file_state_tracker().record(&safe.full_path, &content) {
+            crate::session::file_state::RecordResult::Unchanged => {
+                return json!({"result": format!("{path} ({total} lines — unchanged since last read, no diff)")});
+            }
+            crate::session::file_state::RecordResult::Diff { diff, full_length } => {
+                return json!({"result": format!("{path} changes since last read ({full_length} lines total):\n{}", sanitize_tool_output(&diff))});
+            }
+            _ => {}
+        }
+    }
+    json!({"result": format!("{path} ({total} lines):\n{numbered}")})
+}
+
+async fn exec_write_file(args: &Value, cwd: &Path, ctx: &ExecCtx<'_>) -> Value {
+    let Some(path) = args.get("path").and_then(|v| v.as_str()) else {
+        return json!({"error": "write_file rejected: path missing"});
+    };
+    let safe = match safe_resolve_path(path, cwd, PathOptions::default()) {
+        Ok(s) => s,
+        Err(e) => return json!({"error": format!("write_file rejected: {e}")}),
+    };
+    let tracker = get_read_tracker();
+    let guard = tracker.check_write(&safe.full_path, cwd);
+    if !guard.ok {
+        return json!({"error": guard.reason});
+    }
+    if let Some(dir) = safe.full_path.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+    if content.len() > MAX_CONTENT_CHARS {
+        return json!({
+            "error": format!(
+                "write_file: content too large ({} lines / {}KB). llama.cpp cannot parse tool calls larger than ~8KB. \
+                 Strategy: write a skeleton file first (imports + empty function stubs), \
+                 then use multiple patch calls to fill in each section. Keep each write_file under 60 lines.",
+                content.split('\n').count(),
+                content.len() / 1024,
+            )
+        });
+    }
+    let existed = safe.full_path.exists();
+    let old_content = if existed { fs::read_to_string(&safe.full_path).ok() } else { None };
+    get_snapshot_manager(cwd.to_path_buf()).note(&safe.full_path, old_content.clone());
+    if let Err(e) = fs::write(&safe.full_path, content) {
+        return json!({"error": e.to_string()});
+    }
+    tracker.record_write(&safe.full_path, cwd);
+    get_file_state_tracker().record_write(&safe.full_path, content);
+    let lines = content.split('\n').count();
+    let action = if existed { "Updated" } else { "Created" };
+    if let (Some(old), Some(fs_ref)) = (old_content, &ctx.fullscreen) {
+        let old_preview = old.split('\n').take(5).collect::<Vec<_>>().join("\n");
+        let new_preview = content.split('\n').take(5).collect::<Vec<_>>().join("\n");
+        fs_ref.add_diff(path, &(old_preview + "\n..."), &(new_preview + "\n..."), 1);
+    }
+    json!({"result": format!("{action} {path} ({lines} lines)"), "action": action, "path": path, "lines": lines})
+}
+
+async fn exec_append_file(args: &Value, cwd: &Path) -> Value {
+    let Some(path) = args.get("path").and_then(|v| v.as_str()) else {
+        return json!({"error": "append_file rejected: path missing"});
+    };
+    let safe = match safe_resolve_path(path, cwd, PathOptions::default()) {
+        Ok(s) => s,
+        Err(e) => return json!({"error": format!("append_file rejected: {e}")}),
+    };
+    let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+    if content.len() > 8000 {
+        return json!({"error": format!("append_file: chunk too large ({} KB). Keep each append under 60 lines.", content.len() / 1024)});
+    }
+    if !safe.full_path.exists() {
+        return json!({"error": format!("append_file: file not found: {path}. Create it first with write_file.")});
+    }
+    let before = fs::read_to_string(&safe.full_path).unwrap_or_default();
+    get_snapshot_manager(cwd.to_path_buf()).note(&safe.full_path, Some(before.clone()));
+    let sep = if !before.is_empty() && !before.ends_with('\n') { "\n" } else { "" };
+    let new = format!("{before}{sep}{content}");
+    if let Err(e) = fs::write(&safe.full_path, &new) {
+        return json!({"error": e.to_string()});
+    }
+    get_file_state_tracker().record_write(&safe.full_path, &new);
+    get_read_tracker().record_write(&safe.full_path, cwd);
+    let total = new.split('\n').count();
+    let added = content.split('\n').count();
+    json!({"result": format!("Appended {added} lines to {path} (now {total} lines total)"), "action": "Appended", "path": path})
+}
+
+async fn exec_patch(args: &Value, cwd: &Path, ctx: &ExecCtx<'_>) -> Value {
+    let Some(path) = args.get("path").and_then(|v| v.as_str()) else {
+        return json!({"error": "patch rejected: path missing"});
+    };
+    let safe = match safe_resolve_path(path, cwd, PathOptions::default()) {
+        Ok(s) => s,
+        Err(e) => return json!({"error": format!("patch rejected: {e}")}),
+    };
+    if !safe.full_path.exists() {
+        return json!({"error": format!("File not found: {path}")});
+    }
+    get_read_tracker().record_read(&safe.full_path, cwd);
+    let old_str = args.get("old_str").and_then(|v| v.as_str()).unwrap_or("");
+    let new_str = args.get("new_str").and_then(|v| v.as_str()).unwrap_or("");
+    let content = match fs::read_to_string(&safe.full_path) {
+        Ok(c) => c,
+        Err(e) => return json!({"error": e.to_string()}),
+    };
+    get_snapshot_manager(cwd.to_path_buf()).note(&safe.full_path, Some(content.clone()));
+    if old_str.is_empty() {
+        return json!({"error": "patch: old_str is empty"});
+    }
+    let count = content.matches(old_str).count();
+    if count == 0 {
+        return json!({"error": format!("old_str not found in {path}")});
+    }
+    if count > 1 {
+        return json!({"error": format!("old_str matches {count} locations. Include more context.")});
+    }
+    let new_content = content.replacen(old_str, new_str, 1);
+    if let Err(e) = fs::write(&safe.full_path, &new_content) {
+        return json!({"error": e.to_string()});
+    }
+    get_file_state_tracker().record_write(&safe.full_path, &new_content);
+    let prefix = new_content.split(new_str).next().unwrap_or("");
+    let line_num = prefix.split('\n').count();
+    let old_lines = old_str.split('\n').count();
+    let new_lines = new_str.split('\n').count();
+    if let Some(fs_ref) = &ctx.fullscreen {
+        fs_ref.add_diff(path, old_str, new_str, line_num as u32);
+    } else {
+        print!("{}", crate::tui::render_diff(path, old_str, new_str, line_num as u32));
+    }
+    json!({
+        "result": format!("Patched {path}: replaced {old_lines} lines with {new_lines} lines at line {line_num}"),
+        "action": "Edited",
+        "path": path,
+        "line": line_num,
+    })
+}
+
+async fn exec_bash(args: &Value, cwd: &Path, ctx: &ExecCtx<'_>) -> Value {
+    let Some(command) = args.get("command").and_then(|v| v.as_str()) else {
+        return json!({"error": "bash: command missing"});
+    };
+    let command = rtk_rewrite(command);
+
+    let blocking = regex::Regex::new(r"(?i)^(node|python|python3|ruby|php|go run|deno run|bun run)\s+.*\b(server\.(js|py|rb|php|ts)|app\.(js|py|rb|php|ts))\b").unwrap();
+    let explicit = regex::Regex::new(r"(?i)\b(uvicorn|gunicorn|rails\s+s|npm\s+start|yarn\s+start|npm\s+run\s+dev|python3?\s+-m\s+(flask|django|uvicorn|aiohttp\.web|fastapi)|puma|unicorn|passenger)\b").unwrap();
+    if (blocking.is_match(&command) || explicit.is_match(&command))
+        && !command.contains("--check")
+        && !command.contains("--version")
+        && !command.contains("test")
+    {
+        return json!({
+            "result": format!("Refused: \"{command}\" would start a long-running server that blocks. Use \"node --check <file>\" to verify syntax, or describe what you want to test and I'll use a non-blocking approach."),
+            "error": "Blocking command detected",
+            "command": command,
+        });
+    }
+    // Interactive-stdin guard
+    let script_re = regex::Regex::new(r#"(?:^|\s)(python3?|node|ruby)\s+["']?([^\s"']+)"#).unwrap();
+    if let Some(caps) = script_re.captures(&command) {
+        let target_rel = caps[2].to_string();
+        let target = cwd.join(&target_rel);
+        if target.exists() && !command.contains("--check") && !command.contains("-c") && !command.contains("-m") {
+            if let Ok(fc) = fs::read_to_string(&target) {
+                if fc.contains("input(") || fc.contains("readline.question") || fc.contains("process.stdin.on") {
+                    return json!({
+                        "result": format!("Refused: \"{command}\" — file contains interactive input() calls that block in non-interactive mode. File created successfully. Verify syntax: python -m py_compile {target_rel}"),
+                        "error": "Interactive script detected",
+                        "command": command,
+                    });
+                }
+            }
+        }
+    }
+
+    let persistent = std::env::var("ITSY_SHELL_PERSIST").ok().as_deref() != Some("false");
+    if persistent {
+        let shell = get_shell(ShellOptions { cwd: cwd.to_path_buf(), ..Default::default() });
+        let result = shell.run(&command);
+        let max_output = if ctx.config.context.detected_window < 64_000 { 1500 } else { 3000 };
+        let trimmed = trim_output(&result.stdout, max_output);
+        if result.timed_out {
+            return json!({"result": if trimmed.is_empty() { "(no output before timeout)".to_string() } else { trimmed.clone() }, "error": "Timed out (killed after 30s)", "command": command});
+        }
+        if let Some(err) = result.error {
+            return json!({"result": trimmed, "error": err, "command": command});
+        }
+        if result.exit_code != 0 {
+            return json!({"result": if trimmed.is_empty() { "(no output)".to_string() } else { trimmed.clone() }, "error": format!("Exit code {}", result.exit_code), "command": command});
+        }
+        return json!({"result": if trimmed.is_empty() { "(no output)".to_string() } else { trimmed }, "command": command});
+    }
+
+    // Fallback: one-shot
+    let output = Command::new(if cfg!(windows) { "cmd.exe" } else { "bash" })
+        .args(if cfg!(windows) { ["/C"].as_slice() } else { ["-c"].as_slice() })
+        .arg(&command)
+        .current_dir(cwd)
+        .output();
+    match output {
+        Ok(out) => {
+            let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            let trimmed = trim_output(&sanitize_tool_output(&combined), 3000);
+            if !out.status.success() {
+                json!({"result": trimmed, "error": format!("Exit code {}", out.status.code().unwrap_or(-1)), "command": command})
+            } else {
+                json!({"result": if trimmed.is_empty() { "(no output)".to_string() } else { trimmed }, "command": command})
+            }
+        }
+        Err(e) => json!({"result": redact_string(&e.to_string()), "error": e.to_string(), "command": command}),
+    }
+}
+
+fn rtk_rewrite(command: &str) -> String {
+    if std::env::var("ITSY_RTK").ok().as_deref() == Some("false") {
+        return command.to_string();
+    }
+    if which::which("rtk").is_err() {
+        return command.to_string();
+    }
+    let trimmed = command.trim_start();
+    if trimmed.starts_with("rtk ") {
+        return command.to_string();
+    }
+    let rewrites = [
+        r"^git\s+(status|log|diff|add|commit|push|pull|fetch|branch|show)\b",
+        r"^(cargo\s+test|jest|vitest|pytest|go\s+test|npm\s+test|yarn\s+test|pnpm\s+test|rake\s+test|rspec)\b",
+        r"^(cargo\s+build|cargo\s+clippy|tsc\b|eslint|ruff\s+check|golangci-lint|rubocop)\b",
+        r"^(ls|find\s|grep\s|rg\s)",
+        r"^docker\s+(ps|images|logs|compose\s+ps)\b",
+        r"^kubectl\s+(get\s+pods|logs|get\s+services)\b",
+        r"^(npm\s+list|pnpm\s+list|yarn\s+list)\b",
+    ];
+    for pat in rewrites {
+        if regex::Regex::new(pat).map(|r| r.is_match(trimmed)).unwrap_or(false) {
+            return format!("rtk {trimmed}");
+        }
+    }
+    command.to_string()
+}
+
+fn trim_output(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let head_len = max.saturating_sub(500);
+    let head = &s[..head_len.min(s.len())];
+    let tail = &s[s.len().saturating_sub(300)..];
+    format!("{head}\n...(truncated)...\n{tail}")
+}
+
+async fn exec_search(args: &Value, cwd: &Path) -> Value {
+    let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
+    let path = args.get("path").and_then(|v| v.as_str()).map(|p| p.to_string());
+    let safe_path: String = match path {
+        Some(p) => match safe_resolve_path(&p, cwd, PathOptions::default()) {
+            Ok(s) => s.full_path.to_string_lossy().into_owned(),
+            Err(e) => return json!({"error": format!("search rejected: {e}")}),
+        },
+        None => ".".into(),
+    };
+    let cmd = format!(
+        "{} {}",
+        build_command("rg", &["--line-number", "--max-count", "10", "-C", "1"], &[pattern]),
+        escape_shell_arg(&safe_path),
+    );
+    let out = run_shell(&cmd, cwd);
+    json!({"result": truncate(&sanitize_tool_output(&out.unwrap_or_else(|_| "No matches found.".into())), 3000)})
+}
+
+async fn exec_find_files(args: &Value, cwd: &Path) -> Value {
+    let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
+    if pattern.is_empty() || pattern == "*" || pattern == "**" {
+        let hint = args.get("hint").and_then(|v| v.as_str()).unwrap_or("");
+        let listing = format_smart_listing(cwd, hint, 50);
+        return json!({"result": listing});
+    }
+    let cmd = format!(
+        "rg --files --glob {} --glob {} --glob {}",
+        escape_shell_arg(pattern),
+        escape_shell_arg("!node_modules"),
+        escape_shell_arg("!.git"),
+    );
+    match run_shell(&cmd, cwd) {
+        Ok(output) => {
+            let files: Vec<&str> = output.lines().take(30).filter(|l| !l.is_empty()).collect();
+            if files.is_empty() {
+                json!({"result": "No files found."})
+            } else {
+                json!({"result": format!("Found {} files:\n{}", files.len(), files.join("\n"))})
+            }
+        }
+        Err(_) => json!({"result": "No files found."}),
+    }
+}
+
+async fn exec_list_projects(ctx: &ExecCtx<'_>, cwd: &Path) -> Value {
+    if let Some(bridge) = &ctx.mcp_bridge {
+        if let Some(result) = bridge.call("tools/call", json!({"name": "list_repos", "arguments": {}})).await {
+            if let Some(text) = result.pointer("/content/0/text").and_then(|t| t.as_str()) {
+                if let Ok(data) = serde_json::from_str::<Value>(text) {
+                    let repos = data.get("repos").and_then(|r| r.as_array()).cloned().unwrap_or_default();
+                    if repos.is_empty() {
+                        return json!({"result": "No projects indexed yet. The code graph is empty."});
+                    }
+                    let mut out = format!("Workspace: {} indexed projects\n\n", repos.len());
+                    for r in &repos {
+                        out.push_str(&format!(
+                            "• {} — {} files, {} symbols, {}\n",
+                            r.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                            r.get("file_count").and_then(|v| v.as_u64()).map(|n| n.to_string()).unwrap_or_else(|| "?".into()),
+                            r.get("symbol_count").and_then(|v| v.as_u64()).map(|n| n.to_string()).unwrap_or_else(|| "?".into()),
+                            r.get("languages").and_then(|v| v.as_array()).map(|arr| arr.iter().filter_map(|v| v.as_str()).take(4).collect::<Vec<_>>().join(", ")).unwrap_or_else(|| "?".into()),
+                        ));
+                    }
+                    return json!({"result": out});
+                }
+            }
+        }
+    }
+    json!({"result": format!("Files in {}:\n{}", cwd.display(), format_smart_listing(cwd, "", 40))})
+}
+
+async fn exec_graph_search(args: &Value, ctx: &ExecCtx<'_>, cwd: &Path) -> Value {
+    let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+    let max_tokens = args.get("max_tokens").and_then(|v| v.as_u64()).unwrap_or(4000);
+    if let Some(bridge) = &ctx.mcp_bridge {
+        if let Some(result) = bridge.call("tools/call", json!({"name": "search_graph", "arguments": {"query": query, "max_tokens": max_tokens}})).await {
+            if let Some(content) = result.get("content").and_then(|c| c.as_array()) {
+                let text: String = content.iter().filter_map(|c| c.get("text").and_then(|t| t.as_str()).map(String::from)).collect::<Vec<_>>().join("\n");
+                return json!({"result": sanitize_tool_output(&text)});
+            }
+        }
+    }
+    let cmd = build_command("rg", &["--line-number", "--max-count", "5"], &[query]) + " .";
+    let out = run_shell(&cmd, cwd).unwrap_or_else(|_| "No matches found in code graph or files.".into());
+    json!({"result": truncate(&sanitize_tool_output(&out), 3000)})
+}
+
+async fn exec_explain_symbol(args: &Value, ctx: &ExecCtx<'_>, cwd: &Path) -> Value {
+    let symbol = args.get("symbol").and_then(|v| v.as_str()).unwrap_or("");
+    if let Some(bridge) = &ctx.mcp_bridge {
+        if let Some(result) = bridge.call("tools/call", json!({"name": "explain_symbol", "arguments": {"symbol": symbol}})).await {
+            if let Some(content) = result.get("content").and_then(|c| c.as_array()) {
+                let text: String = content.iter().filter_map(|c| c.get("text").and_then(|t| t.as_str()).map(String::from)).collect::<Vec<_>>().join("\n");
+                return json!({"result": sanitize_tool_output(&text)});
+            }
+        }
+    }
+    let sym_re = regex::Regex::new(r"^[A-Za-z_][A-Za-z0-9_:.$-]*$").unwrap();
+    if !sym_re.is_match(symbol) {
+        return json!({"result": format!("Symbol \"{symbol}\" is not a valid identifier.")});
+    }
+    let cmd = format!("rg --line-number {} . --max-count 10", escape_shell_arg(&format!(r"\b{symbol}\b")));
+    let out = run_shell(&cmd, cwd).unwrap_or_default();
+    json!({"result": sanitize_tool_output(&format!("References to {symbol}:\n{}", truncate(&out, 2000)))})
+}
+
+async fn exec_read_and_patch(args: &Value, cwd: &Path) -> Value {
+    let Some(path) = args.get("path").and_then(|v| v.as_str()) else {
+        return json!({"error": "read_and_patch rejected: path missing"});
+    };
+    let safe = match safe_resolve_path(path, cwd, PathOptions::default()) {
+        Ok(s) => s,
+        Err(e) => return json!({"error": format!("read_and_patch rejected: {e}")}),
+    };
+    if !safe.full_path.exists() {
+        return json!({"error": format!("File not found: {path}")});
+    }
+    let content = match fs::read_to_string(&safe.full_path) {
+        Ok(c) => c,
+        Err(e) => return json!({"error": e.to_string()}),
+    };
+    let old_str = args.get("old_str").and_then(|v| v.as_str()).unwrap_or("");
+    let new_str = args.get("new_str").and_then(|v| v.as_str()).unwrap_or("");
+    let count = content.matches(old_str).count();
+    if count == 0 {
+        return json!({"error": format!("old_str not found in {path}")});
+    }
+    if count > 1 {
+        return json!({"error": format!("old_str matches {count} locations. Be more specific.")});
+    }
+    let new_content = content.replacen(old_str, new_str, 1);
+    if let Err(e) = fs::write(&safe.full_path, &new_content) {
+        return json!({"error": e.to_string()});
+    }
+    let prefix = new_content.split(new_str).next().unwrap_or("");
+    let line_num = prefix.split('\n').count();
+    json!({"result": format!("Read and patched {path} at line {line_num}"), "action": "Edited", "path": path, "line": line_num})
+}
+
+async fn exec_create_and_run(args: &Value, cwd: &Path) -> Value {
+    let Some(path) = args.get("path").and_then(|v| v.as_str()) else {
+        return json!({"error": "create_and_run rejected: path missing"});
+    };
+    let safe = match safe_resolve_path(path, cwd, PathOptions::default()) {
+        Ok(s) => s,
+        Err(e) => return json!({"error": format!("create_and_run rejected: {e}")}),
+    };
+    if let Some(dir) = safe.full_path.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+    if content.len() > 8000 {
+        return json!({"error": format!("create_and_run: content too large ({} lines). Use write_file (skeleton) + append_file (sections) + bash to run.", content.split('\n').count())});
+    }
+    if let Err(e) = fs::write(&safe.full_path, content) {
+        return json!({"error": e.to_string()});
+    }
+    let lines = content.split('\n').count();
+    let mut output = format!("Created {path} ({lines} lines)");
+    let mut cmd_error = false;
+    if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
+        let interactive = content.contains("input(")
+            || content.contains("readline")
+            || content.contains("process.stdin")
+            || content.contains("Scanner(")
+            || content.contains("gets")
+            || content.contains("read()");
+        if interactive {
+            output.push_str("\n⚠ File contains interactive input calls. Skipping execution.");
+            return json!({"result": output, "action": "Created", "path": path, "lines": lines});
+        }
+        match run_shell(cmd, cwd) {
+            Ok(out) => output.push_str(&format!("\n$ {cmd}\n{}", truncate(&out, 2000))),
+            Err(e) => {
+                cmd_error = true;
+                output.push_str(&format!("\n$ {cmd}\nFAILED:\n{}", truncate(&e, 2000)));
+            }
+        }
+    }
+    if cmd_error {
+        json!({"result": output, "action": "Created", "path": path, "lines": lines, "error": format!("Command failed")})
+    } else {
+        json!({"result": output, "action": "Created", "path": path, "lines": lines})
+    }
+}
+
+async fn exec_find_and_read(args: &Value, cwd: &Path) -> Value {
+    let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
+    let cmd = format!(
+        "rg --files --glob {} --glob {} --glob {}",
+        escape_shell_arg(pattern),
+        escape_shell_arg("!node_modules"),
+        escape_shell_arg("!.git"),
+    );
+    let found = match run_shell(&cmd, cwd) {
+        Ok(s) => s,
+        Err(_) => return json!({"result": format!("No files found matching: {pattern}")}),
+    };
+    let files: Vec<&str> = found.lines().filter(|l| !l.is_empty()).collect();
+    if files.is_empty() {
+        return json!({"result": format!("No files found matching: {pattern}")});
+    }
+    let target = files[0];
+    let safe = match safe_resolve_path(target, cwd, PathOptions::default()) {
+        Ok(s) => s,
+        Err(e) => return json!({"error": format!("find_and_read rejected: {e}")}),
+    };
+    let content = match fs::read_to_string(&safe.full_path) {
+        Ok(c) => c,
+        Err(e) => return json!({"error": e.to_string()}),
+    };
+    let max_lines = args.get("read_lines").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+    let lines: Vec<&str> = content.split('\n').take(max_lines).collect();
+    let numbered: String = lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| format!("{:>4}| {}", i + 1, sanitize_tool_output(l)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut output = format!(
+        "Found {} files. Reading {target} ({} lines):\n{numbered}",
+        files.len(),
+        content.split('\n').count(),
+    );
+    if files.len() > 1 {
+        output.push_str(&format!("\n\nOther matches: {}", files[1..5.min(files.len())].join(", ")));
+    }
+    json!({"result": output})
+}
+
+async fn exec_search_and_read(args: &Value, cwd: &Path) -> Value {
+    let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
+    let read_ctx = args.get("read_context").and_then(|v| v.as_u64()).map(|n| n as usize).filter(|n| *n > 0 && *n < 200).unwrap_or(10);
+    let cmd = format!(
+        "{} . --glob {} --glob {}",
+        build_command("rg", &["--line-number", "-C", &read_ctx.to_string(), "--max-count", "3"], &[pattern]),
+        escape_shell_arg("!node_modules"),
+        escape_shell_arg("!.git"),
+    );
+    let out = run_shell(&cmd, cwd).unwrap_or_default();
+    let clean = sanitize_tool_output(&out);
+    let result = if clean.trim().is_empty() {
+        "No matches.".to_string()
+    } else {
+        truncate(&clean, 4000)
+    };
+    json!({"result": result})
+}
+
+async fn exec_run(args: &Value, cwd: &Path) -> Value {
+    let Some(command) = args.get("command").and_then(|v| v.as_str()) else {
+        return json!({"error": "run: command missing"});
+    };
+    let script_re = regex::Regex::new(r#"^(python3?|node|ruby)\s+["']?([^\s"']+)"#).unwrap();
+    if let Some(caps) = script_re.captures(command) {
+        let target = cwd.join(&caps[2]);
+        if target.exists() {
+            if let Ok(content) = fs::read_to_string(&target) {
+                if content.contains("input(") || content.contains("readline") || content.contains("process.stdin") {
+                    return json!({"result": format!("Refused: \"{command}\" — interactive input detected."), "error": "Interactive script", "command": command});
+                }
+            }
+        }
+    }
+    let timeout = args.get("timeout").and_then(|v| v.as_u64()).unwrap_or(30);
+    match run_shell_with_timeout(command, cwd, std::time::Duration::from_secs(timeout)) {
+        Ok(out) => json!({"result": truncate(&sanitize_tool_output(&out), 3000), "command": command}),
+        Err((out, code)) => json!({"result": format!("EXIT {code}: {}", truncate(&out, 2500)), "error": format!("Exit {code}"), "command": command}),
+    }
+}
+
+async fn exec_memory(name: &str, args: &Value, ctx: &ExecCtx<'_>) -> Value {
+    let mut store = ctx.memory.lock();
+    match name {
+        "memory_load" => {
+            let task = args.get("task").and_then(|v| v.as_str()).unwrap_or("");
+            let objects = store.load_for_task(task);
+            if objects.is_empty() {
+                return json!({"result": "No relevant memory found."});
+            }
+            let formatted: String = objects
+                .iter()
+                .map(|o| format!("[{}] {}: {}", o.kind, o.title, o.content))
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            let tokens_used = objects.len() * 50;
+            json!({"result": format!("Loaded {} memories ({} tokens):\n\n{}", objects.len(), tokens_used, formatted)})
+        }
+        "memory_remember" => {
+            let kind = args.get("type").and_then(|v| v.as_str()).unwrap_or("context");
+            let title = args.get("title").and_then(|v| v.as_str()).unwrap_or("");
+            let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            let tags: Vec<String> = args.get("tags").and_then(|v| v.as_array()).map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
+            let obj = store.remember(kind, title, content, tags);
+            json!({"result": format!("Remembered [{}] \"{}\" ({})", obj.kind, obj.title, obj.id)})
+        }
+        "memory_list" => {
+            let kind = args.get("type").and_then(|v| v.as_str());
+            let objects = match kind {
+                Some(t) => store.by_type(t),
+                None => store.all(),
+            };
+            if objects.is_empty() {
+                return json!({"result": "No memory stored."});
+            }
+            let list = objects.iter().map(|o| format!("[{}] ({}) {}", o.id, o.kind, o.title)).collect::<Vec<_>>().join("\n");
+            json!({"result": list})
+        }
+        "memory_forget" => {
+            let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            let ok = store.forget(id);
+            json!({"result": if ok { format!("Deleted {id}") } else { format!("Not found: {id}") }})
+        }
+        _ => json!({"result": ""}),
+    }
+}
+
+async fn exec_bone_compile(args: &Value, cwd: &Path) -> Value {
+    let Some(path) = args.get("path").and_then(|v| v.as_str()) else {
+        return json!({"error": "bone_compile: path missing"});
+    };
+    if !path.ends_with(".bone") {
+        return json!({"error": format!("Expected a .bone file, got: {path}")});
+    }
+    let safe = match safe_resolve_path(path, cwd, PathOptions::default()) {
+        Ok(s) => s,
+        Err(e) => return json!({"error": format!("bone_compile rejected: {e}")}),
+    };
+    if !safe.full_path.exists() {
+        return json!({"error": format!("File not found: {path}")});
+    }
+    let allowed = ["express", "nakama", "prisma", "sqlite"];
+    let target = args.get("target").and_then(|v| v.as_str()).unwrap_or("express");
+    if !allowed.contains(&target) {
+        return json!({"error": format!("bone_compile: invalid target. Allowed: {}", allowed.join(", "))});
+    }
+    let compiler = find_bonescript_compiler();
+    let Some(compiler) = compiler else {
+        return json!({"error": "BoneScript compiler not found."});
+    };
+    let cmd = format!(
+        "node {} compile {} --target {}",
+        escape_shell_arg(&compiler.to_string_lossy()),
+        escape_shell_arg(&safe.full_path.to_string_lossy()),
+        escape_shell_arg(target),
+    );
+    match run_shell(&cmd, cwd) {
+        Ok(out) => json!({"result": format!("Compiled {path} → output/\n{}", truncate(&sanitize_tool_output(&out), 2000)), "action": "Created", "path": "output/"}),
+        Err(e) => json!({"error": format!("BoneScript compile failed:\n{}", truncate(&sanitize_tool_output(&e), 2000))}),
+    }
+}
+
+async fn exec_bone_check(args: &Value, cwd: &Path) -> Value {
+    let Some(path) = args.get("path").and_then(|v| v.as_str()) else {
+        return json!({"error": "bone_check: path missing"});
+    };
+    if !path.ends_with(".bone") {
+        return json!({"error": format!("Expected a .bone file, got: {path}")});
+    }
+    let safe = match safe_resolve_path(path, cwd, PathOptions::default()) {
+        Ok(s) => s,
+        Err(e) => return json!({"error": format!("bone_check rejected: {e}")}),
+    };
+    let Some(compiler) = find_bonescript_compiler() else {
+        return json!({"error": "BoneScript compiler not found."});
+    };
+    let cmd = format!(
+        "node {} check {}",
+        escape_shell_arg(&compiler.to_string_lossy()),
+        escape_shell_arg(&safe.full_path.to_string_lossy()),
+    );
+    match run_shell(&cmd, cwd) {
+        Ok(out) => {
+            let cleaned = sanitize_tool_output(&out);
+            let result = if cleaned.trim().is_empty() { "✓ No errors found.".into() } else { cleaned.trim().to_string() };
+            json!({"result": result})
+        }
+        Err(e) => json!({"error": format!("BoneScript validation errors:\n{}", truncate(&sanitize_tool_output(&e), 2000))}),
+    }
+}
+
+fn find_bonescript_compiler() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?.to_path_buf();
+    let candidates = [
+        dir.join("..").join("node_modules").join("bonescript-compiler").join("dist").join("cli.js"),
+        dir.join("..").join("..").join("BoneScript").join("compiler").join("dist").join("cli.js"),
+        PathBuf::from(std::env::var("BONESCRIPT_COMPILER").unwrap_or_default()),
+    ];
+    candidates.into_iter().find(|p| p.exists())
+}
+
+async fn exec_web_search(args: &Value) -> Value {
+    if std::env::var("ITSY_WEB_BROWSE").ok().as_deref() != Some("true") {
+        return json!({"error": "Web browsing disabled. Set ITSY_WEB_BROWSE=true."});
+    }
+    let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+    match web_search(query, 5).await {
+        Ok(results) => {
+            if results.is_empty() {
+                json!({"result": "No results found."})
+            } else {
+                let formatted = results
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| format!("{}. {}\n   {}\n   {}", i + 1, r.title, r.url, r.snippet))
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                json!({"result": formatted})
+            }
+        }
+        Err(e) => json!({"error": e.to_string()}),
+    }
+}
+
+async fn exec_web_fetch(args: &Value) -> Value {
+    if std::env::var("ITSY_WEB_BROWSE").ok().as_deref() != Some("true") {
+        return json!({"error": "Web browsing disabled. Set ITSY_WEB_BROWSE=true."});
+    }
+    let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
+    match web_fetch(url, 5).await {
+        Ok(content) => json!({"result": content}),
+        Err(e) => json!({"error": e.to_string()}),
+    }
+}
+
+// ─── Shell helpers ──────────────────────────────────────────────────────────
+
+fn run_shell(cmd: &str, cwd: &Path) -> Result<String, String> {
+    run_shell_with_timeout(cmd, cwd, std::time::Duration::from_secs(30)).map_err(|(out, _)| out)
+}
+
+fn run_shell_with_timeout(cmd: &str, cwd: &Path, _timeout: std::time::Duration) -> Result<String, (String, i32)> {
+    let (program, args): (&str, Vec<&str>) = if cfg!(windows) { ("cmd.exe", vec!["/C", cmd]) } else { ("bash", vec!["-c", cmd]) };
+    match Command::new(program).args(args).current_dir(cwd).output() {
+        Ok(out) => {
+            let mut combined = String::from_utf8_lossy(&out.stdout).to_string();
+            combined.push_str(&String::from_utf8_lossy(&out.stderr));
+            if out.status.success() {
+                Ok(combined)
+            } else {
+                Err((combined, out.status.code().unwrap_or(-1)))
+            }
+        }
+        Err(e) => Err((e.to_string(), -1)),
+    }
+}
+
+fn truncate(s: &str, n: usize) -> String {
+    if s.len() <= n {
+        s.to_string()
+    } else {
+        let mut end = n;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        s[..end].to_string()
+    }
+}

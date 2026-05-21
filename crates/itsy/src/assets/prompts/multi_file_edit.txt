@@ -1,0 +1,8 @@
+Plan the edits needed across these files. Reply with a JSON object:
+{ "edits": [ { "path": "...", "summary": "..." } ] }
+
+Files:
+{{files}}
+
+Goal:
+{{goal}}
