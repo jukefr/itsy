@@ -1,0 +1,6 @@
+Summarize the following file. Keep signatures, key logic, and structure.
+Aim for {{max_tokens}} tokens or less. Omit comments unless they explain WHY.
+
+File: {{path}}
+---
+{{content}}

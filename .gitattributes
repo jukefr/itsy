@@ -1,3 +1,0 @@
-# Keep LF line endings for bin files (shebang requires it)
-bin/*.js text eol=lf
-src/**/*.js text eol=lf

@@ -1,0 +1,7 @@
+The file you wrote has errors. Fix only the listed errors. Do not refactor.
+
+File: {{path}}
+Errors:
+{{errors}}
+
+Reply with a patch (old_str / new_str) targeting the smallest possible change.

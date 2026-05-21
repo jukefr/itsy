@@ -1,0 +1,57 @@
+[package]
+name = "itsy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "AI coding agent optimized for small LLMs (8B-35B parameters)"
+
+[[bin]]
+name = "itsy"
+path = "src/bin/itsy.rs"
+
+[[bin]]
+name = "itsy-init"
+path = "src/bin/itsy_init.rs"
+
+[lib]
+name = "itsy"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+clap.workspace = true
+reqwest.workspace = true
+futures.workspace = true
+async-stream.workspace = true
+regex.workspace = true
+once_cell.workspace = true
+dirs.workspace = true
+rusqlite.workspace = true
+toml.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+chrono.workspace = true
+unicode-width.workspace = true
+shell-words.workspace = true
+walkdir.workspace = true
+ignore.workspace = true
+tempfile.workspace = true
+nix.workspace = true
+which.workspace = true
+url.workspace = true
+sha2.workspace = true
+base64.workspace = true
+rand.workspace = true
+log.workspace = true
+env_logger.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+tokio-util.workspace = true
+tokio-stream.workspace = true
+parking_lot.workspace = true
+indexmap.workspace = true

@@ -1,0 +1,153 @@
+//! Tool schemas sent to the model + the 2-stage
+//! routing entry point. Tool execution lives in [`crate::executor`].
+
+use std::env;
+
+use once_cell::sync::Lazy;
+use serde_json::{json, Value};
+
+use crate::compiled::two_stage_router::{
+    get_category_selector_tool, get_routing_mode, get_tools_for_category as two_stage_for_category,
+    RoutingMode,
+};
+use crate::compiled::tool_router::{category_needs_tools, get_tools_for_category as compiled_for_category};
+use crate::Config;
+
+pub static TOOLS: Lazy<Vec<Value>> = Lazy::new(|| vec![
+    func_tool("list_projects",
+        "List all indexed projects/repos in the workspace with stats: file count, symbol count, lines of code, languages. Use this FIRST when asked about \"the projects\", \"the codebase\", or \"what's in this workspace\".",
+        json!({"type":"object","properties":{},"required":[]})),
+    func_tool("graph_search",
+        "Search the code graph for a symbol, function, or class name. Returns connected code with context. Use for \"how does X work\" or \"find the auth logic\" — NOT for listing projects.",
+        json!({"type":"object","properties":{"query":{"type":"string","description":"Symbol name or concept to search for"},"max_tokens":{"type":"integer","description":"Max tokens to return (default 4000)"}},"required":["query"]})),
+    func_tool("explain_symbol",
+        "Get full explanation of a symbol: signature, location, callers, callees, and where it fits in the architecture. Use for \"what does X do\" questions.",
+        json!({"type":"object","properties":{"symbol":{"type":"string","description":"Symbol name to explain"}},"required":["symbol"]})),
+    func_tool("memory_load",
+        "Load relevant project memory for a task. Returns past decisions, workflows, conventions, and gotchas. Call this before starting complex work.",
+        json!({"type":"object","properties":{"task":{"type":"string","description":"Task description to find relevant context for"}},"required":["task"]})),
+    func_tool("read_file",
+        "Read a file. Returns content with line numbers.",
+        json!({"type":"object","properties":{"path":{"type":"string","description":"File path relative to cwd"},"start_line":{"type":"integer","description":"Start line (optional)"},"end_line":{"type":"integer","description":"End line (optional)"}},"required":["path"]})),
+    func_tool("write_file",
+        "Create or overwrite a file. LIMIT: 60 lines / 8KB max. For larger files write a skeleton then use patch to add sections.",
+        json!({"type":"object","properties":{"path":{"type":"string","description":"File path"},"content":{"type":"string","description":"File content — keep under 60 lines"}},"required":["path","content"]})),
+    func_tool("append_file",
+        "Append content to the end of an existing file. Use this to build large files in chunks — write_file for the first 50 lines, then append_file for each subsequent section.",
+        json!({"type":"object","properties":{"path":{"type":"string","description":"File path to append to"},"content":{"type":"string","description":"Content to append — keep under 60 lines per call"}},"required":["path","content"]})),
+    func_tool("patch",
+        "Edit a file by replacing old_str with new_str. old_str must match exactly ONE location.",
+        json!({"type":"object","properties":{"path":{"type":"string","description":"File to edit"},"old_str":{"type":"string","description":"Exact text to find"},"new_str":{"type":"string","description":"Replacement text"}},"required":["path","old_str","new_str"]})),
+    func_tool("bash",
+        "Run a shell command. Returns stdout/stderr.",
+        json!({"type":"object","properties":{"command":{"type":"string","description":"Shell command"}},"required":["command"]})),
+    func_tool("search",
+        "Search file contents using regex (ripgrep). Returns matching lines.",
+        json!({"type":"object","properties":{"pattern":{"type":"string","description":"Regex pattern"},"path":{"type":"string","description":"Directory to search (default: .)"}},"required":["pattern"]})),
+    func_tool("find_files",
+        "Find files matching a glob pattern.",
+        json!({"type":"object","properties":{"pattern":{"type":"string","description":"Glob pattern e.g. **/*.ts"}},"required":["pattern"]})),
+    func_tool("memory_remember",
+        "Save durable knowledge to project memory. Only save facts that should persist: decisions, workflows, gotchas, conventions. NOT task transcripts.",
+        json!({"type":"object","properties":{"type":{"type":"string","enum":["decision","workflow","gotcha","convention","context"],"description":"Knowledge type"},"title":{"type":"string","description":"Short title"},"content":{"type":"string","description":"The knowledge"},"tags":{"type":"array","items":{"type":"string"},"description":"Tags"}},"required":["type","title","content"]})),
+    func_tool("bone_compile",
+        "Compile a .bone file into a complete Node.js/TypeScript backend. Creates routes, models, auth, events, migrations, SDK, admin panel, Docker, and CI from a single declarative file.",
+        json!({"type":"object","properties":{"path":{"type":"string","description":"Path to the .bone file"},"target":{"type":"string","description":"Target: express (default), nakama, prisma, sqlite"}},"required":["path"]})),
+    func_tool("bone_check",
+        "Validate a .bone file without generating code. Reports type errors and constraint violations.",
+        json!({"type":"object","properties":{"path":{"type":"string","description":"Path to the .bone file to validate"}},"required":["path"]})),
+    func_tool("web_search",
+        "Search the internet for information. Requires ITSY_WEB_BROWSE=true.",
+        json!({"type":"object","properties":{"query":{"type":"string","description":"Search query"}},"required":["query"]})),
+    func_tool("web_fetch",
+        "Fetch and extract readable text content from a URL. Requires ITSY_WEB_BROWSE=true.",
+        json!({"type":"object","properties":{"url":{"type":"string","description":"URL to fetch"}},"required":["url"]})),
+    func_tool("memory_list",
+        "List all stored memory objects. Optionally filter by type.",
+        json!({"type":"object","properties":{"type":{"type":"string","description":"Filter by type: decision, workflow, gotcha, convention, context (optional)"}},"required":[]})),
+    func_tool("memory_forget",
+        "Delete a memory object by ID.",
+        json!({"type":"object","properties":{"id":{"type":"string","description":"Memory object ID to delete"}},"required":["id"]})),
+]);
+
+pub static COMPOUND_TOOLS: Lazy<Vec<Value>> = Lazy::new(|| vec![
+    func_tool("read_and_patch",
+        "Read a file, then apply a patch to it in one step. Equivalent to read_file + patch but in a single tool call.",
+        json!({"type":"object","properties":{"path":{"type":"string","description":"File path"},"old_str":{"type":"string","description":"Text to find"},"new_str":{"type":"string","description":"Replacement text"}},"required":["path","old_str","new_str"]})),
+    func_tool("create_and_run",
+        "Create a file and then run a command (like running the file or running tests). Equivalent to write_file + bash in one call.",
+        json!({"type":"object","properties":{"path":{"type":"string","description":"File to create"},"content":{"type":"string","description":"File content"},"command":{"type":"string","description":"Command to run after creating"}},"required":["path","content"]})),
+    func_tool("find_and_read",
+        "Find files matching a pattern and read the first match. Equivalent to find_files + read_file in one call.",
+        json!({"type":"object","properties":{"pattern":{"type":"string","description":"Glob pattern (e.g. **/main.ts, src/**/*.py)"},"read_lines":{"type":"integer","description":"Max lines to show from matched file. Default: 50"}},"required":["pattern"]})),
+    func_tool("search_and_read",
+        "Search for a pattern in code, then read the most relevant file found. Equivalent to search + read_file in one call.",
+        json!({"type":"object","properties":{"pattern":{"type":"string","description":"Regex to search for"},"read_context":{"type":"integer","description":"Lines of context around matches. Default: 10"}},"required":["pattern"]})),
+    func_tool("run",
+        "Run an existing file (python, node, etc). Use this instead of create_and_run when the file already exists.",
+        json!({"type":"object","properties":{"command":{"type":"string","description":"Command to run e.g. \"python game.py\" or \"node server.js\""},"timeout":{"type":"integer","description":"Timeout in seconds. Default: 30"}},"required":["command"]})),
+]);
+
+fn func_tool(name: &str, description: &str, params: Value) -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": params,
+        }
+    })
+}
+
+#[derive(Default)]
+pub struct ToolDeps {
+    pub plugin_tools: Vec<Value>,
+    pub mcp_tools: Vec<Value>,
+}
+
+/// Mirror of `getAllTools` — routing-aware selection of tool schemas.
+pub fn get_all_tools(config: &Config, stage2_category: Option<&str>, deps: &ToolDeps) -> Vec<Value> {
+    let mut all_tools: Vec<Value> = TOOLS.clone();
+    all_tools.extend(COMPOUND_TOOLS.iter().cloned());
+    all_tools.extend(deps.plugin_tools.iter().cloned());
+    all_tools.extend(deps.mcp_tools.iter().cloned());
+
+    if let Some(cat) = stage2_category {
+        if !category_needs_tools(cat) {
+            return Vec::new();
+        }
+        let allowed = compiled_for_category(cat);
+        if !allowed.is_empty() {
+            let filtered: Vec<Value> = all_tools
+                .iter()
+                .filter(|t| {
+                    t.pointer("/function/name")
+                        .and_then(|v| v.as_str())
+                        .map(|n| allowed.contains(&n))
+                        .unwrap_or(false)
+                })
+                .cloned()
+                .collect();
+            if !filtered.is_empty() {
+                return filtered;
+            }
+        }
+    }
+
+    let context_window = config.context.detected_window;
+    let routing_override = env::var("ITSY_TOOL_ROUTING").ok();
+    let mode = get_routing_mode(context_window, routing_override.as_deref());
+
+    if context_window <= 16384 && mode == RoutingMode::TwoStage && stage2_category.is_none() {
+        return vec![get_category_selector_tool()];
+    }
+    if mode == RoutingMode::TwoStage && stage2_category.is_none() {
+        return vec![get_category_selector_tool()];
+    }
+    if mode == RoutingMode::TwoStage {
+        if let Some(cat) = stage2_category {
+            return two_stage_for_category(cat, &all_tools);
+        }
+    }
+    all_tools
+}
