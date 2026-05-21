@@ -5,7 +5,7 @@
 //! decompose strategies, escalation, dedup, token monitoring and trace
 //! recording. Environment variables use the `ITSY_*` prefix.
 
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -133,6 +133,8 @@ struct AgentSession {
     cwd: PathBuf,
     /// Persists across turns so affirmation guards can keep the prior category.
     current_tool_category: Arc<Mutex<Option<String>>>,
+    /// Active fullscreen renderer (Some when running ratatui REPL).
+    fullscreen: Arc<Mutex<Option<Arc<itsy::fullscreen::Fullscreen>>>>,
 }
 
 // ── Helpers: estimation & history compaction ─────────────────────────────────
@@ -746,15 +748,15 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                 // Dedup lookup.
                 let dedup_outcome = session.dedup.lock().lookup(&name, &args);
                 let started = Instant::now();
-                println!("{}", tui::tool_start(&name));
+                let fs_handle = session.fullscreen.lock().clone();
+                if let Some(fs) = &fs_handle {
+                    fs.add_tool(&name, "running", "");
+                } else {
+                    println!("{}", tui::tool_start(&name));
+                }
 
                 let result = match dedup_outcome {
-                    DedupOutcome::Hit(cached) => {
-                        if let Some(fs) = None::<()> {
-                            let _ = fs;
-                        }
-                        cached
-                    }
+                    DedupOutcome::Hit(cached) => cached,
                     DedupOutcome::Skip | DedupOutcome::Miss | DedupOutcome::SoftWarn(_) => {
                         let ctx = ExecCtx {
                             config: &session.config.lock().clone(),
@@ -762,7 +764,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                             memory: session.memory.clone(),
                             mcp_bridge: Some(session.mcp_bridge.clone()),
                             mcp_client: None,
-                            fullscreen: None,
+                            fullscreen: fs_handle.clone(),
                         };
                         let r = execute_tool(&name, args.clone(), &ctx).await;
                         session.dedup.lock().record(&name, &args, &r);
@@ -1152,19 +1154,32 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             }
             drop(plan);
 
-            println!("{}", tui::render_markdown(content));
+            let fs_assist = session.fullscreen.lock().clone();
+            if let Some(fs) = &fs_assist {
+                fs.add_chat(itsy::fullscreen::ChatRole::Assistant, content.clone());
+            } else {
+                println!("{}", tui::render_markdown(content));
+            }
         } else if tool_calls_this_turn == 0 {
             // No content + no tool calls + nothing tried — try streaming.
             let cfg = session.config.lock().clone();
             let hist = session.history.lock().clone();
             let mut early = session.early_stop.lock();
+            let fs_handle = session.fullscreen.lock().clone();
+            if let Some(ref fs) = fs_handle {
+                fs.set_streaming(true);
+            }
             if let Some(out) = stream_final_response(
                 &cfg,
                 &hist,
                 Some(&mut early),
                 |tok| {
-                    print!("{tok}");
-                    io::stdout().lock().flush().ok();
+                    if let Some(ref fs) = fs_handle {
+                        fs.stream_token(tok);
+                    } else {
+                        print!("{tok}");
+                        io::stdout().lock().flush().ok();
+                    }
                 },
             )
             .await
@@ -1175,7 +1190,11 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     .lock()
                     .push(json!({"role": "assistant", "content": out}));
             }
-            println!();
+            if let Some(ref fs) = fs_handle {
+                fs.end_stream();
+            } else {
+                println!();
+            }
         }
         break;
     }
@@ -1601,6 +1620,7 @@ fn build_session(config: Config, flags: Flags, cwd: PathBuf, mcp_bridge: Arc<Mcp
         mcp_bridge,
         cwd,
         current_tool_category: Arc::new(Mutex::new(None)),
+        fullscreen: Arc::new(Mutex::new(None)),
     }
 }
 
@@ -1660,6 +1680,99 @@ async fn run_repl(session: &AgentSession) -> Result<()> {
         }
         handle_turn(&line, session).await;
     }
+    Ok(())
+}
+
+/// Fullscreen ratatui REPL — the default interactive mode.
+///
+/// Spawns the blocking `fullscreen::run_loop` on a dedicated thread; the
+/// closures forward submitted input through an mpsc channel that this async
+/// task drains, dispatching to `handle_turn` / `handle_command` like the
+/// classic REPL does.
+async fn run_fullscreen_repl(session: Arc<AgentSession>) -> Result<()> {
+    use itsy::fullscreen::{Fullscreen, Theme};
+    use tokio::sync::mpsc;
+
+    // Build the renderer and stash it on the session so executor + handle_turn
+    // can route their output (diffs, tool indicators, streamed tokens).
+    let fs = Arc::new(Fullscreen::with_theme(Theme::from_env()));
+    {
+        // Seed the status bar from the current config + cwd.
+        let cfg = session.config.lock();
+        fs.set_model(cfg.model.name.clone());
+        fs.set_status(format!("cwd: {}", session.cwd.display()));
+    }
+
+    *session.fullscreen.lock() = Some(fs.clone());
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+
+    // UI thread: blocking crossterm event loop.
+    let ui_state = fs.state.clone();
+    let tx_submit = tx.clone();
+    let tx_command = tx.clone();
+    let ui_handle = std::thread::spawn(move || {
+        let _ = itsy::fullscreen::run_loop(
+            ui_state,
+            move |text| {
+                let _ = tx_submit.send(text);
+            },
+            move |cmd| {
+                let _ = tx_command.send(cmd);
+            },
+        );
+    });
+
+    let cmd_ctx = make_cmd_ctx(&session);
+
+    // Async dispatch loop — exits when the UI quits (channel closes) or the
+    // user runs `/quit`.
+    loop {
+        // Refresh the status bar each tick. Use a short timeout so the loop
+        // can poll the quit flag the UI sets.
+        let recv = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await;
+        // Check whether the UI thread has set the quit flag (Ctrl+Q, Esc).
+        if fs.state.lock().quit {
+            break;
+        }
+        // Periodic status refresh.
+        {
+            let cfg = session.config.lock();
+            fs.set_model(cfg.model.name.clone());
+            let totals = session.tokens.lock().stats();
+            fs.set_token_count(totals.prompt as u32, totals.completion as u32);
+        }
+        let payload = match recv {
+            Ok(Some(p)) => p,
+            Ok(None) => break,            // channel closed
+            Err(_) => continue,           // tick — loop back for a redraw cycle
+        };
+        if payload.starts_with('/') {
+            match handle_command(&payload, &cmd_ctx).await {
+                Ok(CommandResult::Quit) => {
+                    fs.request_quit();
+                    break;
+                }
+                Ok(CommandResult::Print(s)) => {
+                    fs.add_chat(itsy::fullscreen::ChatRole::System, s);
+                }
+                Ok(CommandResult::Continue) => {}
+                Err(e) => {
+                    fs.add_chat(itsy::fullscreen::ChatRole::System, format!("error: {e}"));
+                }
+            }
+        } else {
+            handle_turn(&payload, &session).await;
+        }
+    }
+
+    // Signal the UI to tear down, then wait for the thread to exit so the
+    // alt-screen / raw-mode state is restored before main() returns.
+    fs.request_quit();
+    let _ = ui_handle.join();
+    // Drop the renderer from the session so executor stops routing into a
+    // dead handle if anything async fires later.
+    *session.fullscreen.lock() = None;
     Ok(())
 }
 
@@ -1751,8 +1864,15 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Classic REPL — the fullscreen renderer is opt-in via a future flag.
-    let res = run_repl(&session).await;
+    // Default to the fullscreen ratatui REPL. Fall back to the classic
+    // line-based REPL when the user passes `--classic` or stdin isn't a TTY
+    // (piped input would otherwise break the alt-screen renderer).
+    let use_fullscreen = !cli.classic && io::stdin().is_terminal();
+    let res = if use_fullscreen {
+        run_fullscreen_repl(session.clone()).await
+    } else {
+        run_repl(&session).await
+    };
     mcp_bridge.kill();
     res
 }

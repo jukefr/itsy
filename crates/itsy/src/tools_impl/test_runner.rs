@@ -594,8 +594,14 @@ fn _keep_pathbuf() -> Option<PathBuf> { None }
 mod tests {
     use super::*;
 
+    /// Serialise env-mutating tests so the parallel test runner can't catch
+    /// `override_env` mid-flight from a sibling test.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn detects_cargo() {
+        let _g = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var("ITSY_TEST_RUNNER"); }
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("Cargo.toml"), "[package]").unwrap();
         let d = detect_full(tmp.path()).unwrap();
@@ -605,6 +611,8 @@ mod tests {
 
     #[test]
     fn detects_go() {
+        let _g = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var("ITSY_TEST_RUNNER"); }
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("go.mod"), "module x").unwrap();
         let d = detect_full(tmp.path()).unwrap();
@@ -613,9 +621,10 @@ mod tests {
 
     #[test]
     fn override_env() {
-        // SAFETY: env var mutation is only unsafe re: thread races; this
-        // test is the only one touching ITSY_TEST_RUNNER and runs serially
-        // within its own process slot.
+        // SAFETY: env var mutation is unsafe re: parallel test threads; the
+        // ENV_LOCK above serialises every test that reads or writes
+        // `ITSY_TEST_RUNNER`.
+        let _g = ENV_LOCK.lock().unwrap();
         unsafe { std::env::set_var("ITSY_TEST_RUNNER", "my-cmd --foo"); }
         let tmp = tempfile::tempdir().unwrap();
         let d = detect_full(tmp.path()).unwrap();

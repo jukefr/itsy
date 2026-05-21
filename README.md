@@ -4,8 +4,9 @@ AI coding agent optimized for small LLMs (8B–35B parameters).
 
 Designed around models running on consumer hardware: budget-managed
 context, forgiving multi-format tool-call parsing, TODO-decomposed
-planning, search-and-replace patch edits, and opt-in cloud escalation.
-No network calls required at the model layer — point it at LM Studio,
+planning, search-and-replace patch edits, opt-in cloud escalation,
+native code graph (tree-sitter + SQLite), and FTS5-backed project
+memory. No external runtime dependencies — point it at LM Studio,
 Ollama, vLLM, or any OpenAI-compatible endpoint.
 
 ## Build
@@ -14,70 +15,106 @@ Ollama, vLLM, or any OpenAI-compatible endpoint.
 cargo build --release
 ```
 
-Binaries land in `target/release/`:
+Single binary lands at `target/release/itsy`. Requires Rust 1.85+
+(edition 2024).
 
-- `itsy`      — the agent (REPL + non-interactive `-p "..."`)
-- `itsy-init` — interactive `.env` setup wizard
+## First launch
 
-Requires Rust 1.85+ (edition 2024).
+```bash
+./target/release/itsy
+```
+
+If `~/.config/itsy/config.toml` doesn't exist, itsy runs an
+interactive setup wizard that asks for your provider / endpoint /
+model, detects the model's quantization tier and family from its
+name, probes the endpoint for the actual context window, and writes
+a sensible default config to disk. On subsequent launches the wizard
+is skipped. Re-run it any time with `itsy --init`.
 
 ## Configure
 
-```bash
-./target/release/itsy-init
-# or write a .env yourself:
-ITSY_MODEL=your-model-name
-ITSY_BASE_URL=http://localhost:1234/v1
-# Optional cloud escalation:
-# OPENAI_API_KEY=sk-...
-# ANTHROPIC_API_KEY=sk-ant-...
-# DEEPSEEK_API_KEY=sk-...
+Canonical config lives at `~/.config/itsy/config.toml`. It's a
+versioned TOML file:
+
+```toml
+version = "1"
+
+[model]
+provider = "openai"
+name = "your-model"
+base_url = "http://localhost:1234/v1"
+timeout = 300
+
+[context]
+detected_window = 32768
+max_budget_pct = 70
+
+[tools]
+bash_timeout = 30
+tool_routing = "direct"   # or "two_stage" for small-context models
+
+[tui]
+auto_approve = false
+theme = "dark"
+
+[git]
+auto_commit = false
 ```
 
-Config search order: `.env` → `.itsy/.env` → `~/.config/itsy/.env` →
-`~/.itsy/.env`. First file wins; existing env vars never overridden.
-`itsy.toml` is also honored for backwards-compatible setups.
+The `version` field is honored on load and the file is migrated
+forward as the schema evolves. Don't remove it.
+
+`ITSY_*` env vars override individual fields at runtime; CLI flags
+override env vars. Cloud escalation keys come from the standard
+provider env vars:
+
+```
+OPENAI_API_KEY=sk-...
+ANTHROPIC_API_KEY=sk-ant-...
+DEEPSEEK_API_KEY=sk-...
+```
+
+Project-local `.env` files are **not** read — runtime state and
+config live under `~/.config/itsy/` exclusively.
 
 ## Run
 
 ```bash
-./target/release/itsy                       # interactive REPL
-./target/release/itsy -p "fix the build"    # one-shot
+./target/release/itsy                       # interactive fullscreen REPL
+./target/release/itsy --classic             # classic line-based REPL
+./target/release/itsy -p "fix the build"    # one-shot non-interactive
 ./target/release/itsy --print-system-prompt
+./target/release/itsy --eval <suite>        # offline eval suite
+./target/release/itsy --mcp                 # MCP-server mode
+./target/release/itsy --init                # re-run the setup wizard
 ```
 
-Slash commands: `/help`, `/model [name]`, `/endpoint [url]`, `/stats`,
-`/tokens`, `/memory`, `/escalation`, `/clear`, `/quit`.
+Slash commands: `/help`, `/model [name]`, `/endpoint [url]`,
+`/stats`, `/tokens`, `/memory`, `/plan`, `/diff`, `/git`,
+`/escalation`, `/sessions`, `/trace`, `/skills`, `/plugins`,
+`/checkpoint`, `/rollback`, `/share`, `/clear`, `/quit`.
 
-## Layout
+## State layout
+
+All runtime state lives under `~/.config/itsy/`:
 
 ```
-Cargo.toml                  workspace root
-crates/itsy/                single crate, lib + 2 bins
-  src/
-    bin/itsy.rs             agent entry point
-    bin/itsy_init.rs        config wizard
-    lib.rs                  module tree (see lib doc-comment)
-    config.rs               env / toml / flag layering
-    tools.rs                tool schemas + 2-stage routing
-    executor.rs             tool dispatch
-    model_client.rs         OpenAI-compatible chat client
-    governor.rs             scoring, verification, classifier
-    escalation.rs           cloud-model fallback
-    memory.rs               typed project memory
-    mcp_bridge.rs           code-graph MCP server lifecycle
-    tui.rs                  classic line-based renderer
-    fullscreen.rs           ratatui alternate-screen renderer
-    commands.rs             slash commands
-    security.rs             redaction, ANSI strip, path safety
-    session/                persistence, undo, snapshots, ...
-    tools_impl/             persistent shell, MCP client, web, ...
-    model/                  profiles, routing, adaptive params
-    compiled/               deterministic router + providers
-    plugins/                plugin / skill loaders
-    api.rs                  programmatic embedding API
-    adapters/               ACP adapter
+~/.config/itsy/
+  config.toml              global config
+  plugins/                 user plugins
+  skills/                  user skills
+  projects/<id>/           per-project state, keyed by cwd hash
+    memory.db              SQLite + FTS5 project memory
+    codegraph.db           SQLite + FTS5 symbol index (tree-sitter)
+    sessions/              conversation persistence
+    traces/                agent execution traces
+    snapshots/             auto-rollback checkpoints
+    tool_scores.json       governor's per-tool confidence
 ```
+
+The project id is `<slug>-<hash10>` derived from the canonical
+absolute path of your working directory — so each repo gets its own
+isolated memory, code graph, and session history.
 
 ## License
 
