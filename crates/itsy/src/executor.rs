@@ -419,6 +419,28 @@ async fn exec_find_files(args: &Value, cwd: &Path) -> Value {
 }
 
 async fn exec_list_projects(ctx: &ExecCtx<'_>, cwd: &Path) -> Value {
+    // Native code graph: preferred path.
+    if let Some(graph) = crate::code_graph::try_get_code_graph() {
+        if let Ok(repos) = graph.list_repos() {
+            if !repos.is_empty() {
+                let mut out = format!("Workspace: {} indexed projects\n\n", repos.len());
+                for r in &repos {
+                    let langs = if r.languages.is_empty() {
+                        "?".to_string()
+                    } else {
+                        r.languages.iter().take(4).cloned().collect::<Vec<_>>().join(", ")
+                    };
+                    out.push_str(&format!(
+                        "• {} — {} files, {} symbols, {}\n",
+                        r.name, r.file_count, r.symbol_count, langs
+                    ));
+                }
+                return json!({"result": out});
+            }
+        }
+    }
+
+    // Legacy MCP path: still honoured while the JS server is around.
     if let Some(bridge) = &ctx.mcp_bridge {
         if let Some(result) = bridge.call("tools/call", json!({"name": "list_repos", "arguments": {}})).await {
             if let Some(text) = result.pointer("/content/0/text").and_then(|t| t.as_str()) {
@@ -448,6 +470,30 @@ async fn exec_list_projects(ctx: &ExecCtx<'_>, cwd: &Path) -> Value {
 async fn exec_graph_search(args: &Value, ctx: &ExecCtx<'_>, cwd: &Path) -> Value {
     let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
     let max_tokens = args.get("max_tokens").and_then(|v| v.as_u64()).unwrap_or(4000);
+
+    // Native code graph.
+    if let Some(graph) = crate::code_graph::try_get_code_graph() {
+        if let Ok(hits) = graph.search_graph(query, max_tokens as u32) {
+            if !hits.is_empty() {
+                let mut out = String::new();
+                for h in &hits {
+                    out.push_str(&format!("{} ({}, {}:{})\n", h.name, h.kind, h.file, h.line));
+                    if let Some(sig) = &h.signature {
+                        out.push_str(&format!("  {}\n", sig));
+                    }
+                    if let Some(snip) = &h.snippet {
+                        out.push_str(snip);
+                        if !snip.ends_with('\n') {
+                            out.push('\n');
+                        }
+                    }
+                    out.push('\n');
+                }
+                return json!({"result": truncate(&sanitize_tool_output(&out), 3000)});
+            }
+        }
+    }
+
     if let Some(bridge) = &ctx.mcp_bridge {
         if let Some(result) = bridge.call("tools/call", json!({"name": "search_graph", "arguments": {"query": query, "max_tokens": max_tokens}})).await {
             if let Some(content) = result.get("content").and_then(|c| c.as_array()) {
@@ -463,6 +509,41 @@ async fn exec_graph_search(args: &Value, ctx: &ExecCtx<'_>, cwd: &Path) -> Value
 
 async fn exec_explain_symbol(args: &Value, ctx: &ExecCtx<'_>, cwd: &Path) -> Value {
     let symbol = args.get("symbol").and_then(|v| v.as_str()).unwrap_or("");
+
+    // Native code graph.
+    if let Some(graph) = crate::code_graph::try_get_code_graph() {
+        if let Ok(Some(exp)) = graph.explain_symbol(symbol) {
+            let mut out = format!("{} ({}) at {}:{}\n", exp.name, exp.kind, exp.file, exp.line);
+            if let Some(sig) = &exp.signature {
+                out.push_str(&format!("Signature: {}\n", sig));
+            }
+            if exp.callers.is_empty() {
+                out.push_str("Callers: (none)\n");
+            } else {
+                out.push_str("Callers:\n");
+                for c in exp.callers.iter().take(10) {
+                    out.push_str(&format!("  - {} ({}:{})\n", c.name, c.file, c.line));
+                }
+            }
+            if exp.callees.is_empty() {
+                out.push_str("Callees: (none)\n");
+            } else {
+                out.push_str("Callees:\n");
+                for c in exp.callees.iter().take(10) {
+                    out.push_str(&format!("  - {} ({}:{})\n", c.name, c.file, c.line));
+                }
+            }
+            if let Some(snip) = &exp.snippet {
+                out.push_str("Snippet:\n");
+                out.push_str(snip);
+                if !snip.ends_with('\n') {
+                    out.push('\n');
+                }
+            }
+            return json!({"result": sanitize_tool_output(&out)});
+        }
+    }
+
     if let Some(bridge) = &ctx.mcp_bridge {
         if let Some(result) = bridge.call("tools/call", json!({"name": "explain_symbol", "arguments": {"symbol": symbol}})).await {
             if let Some(content) = result.get("content").and_then(|c| c.as_array()) {

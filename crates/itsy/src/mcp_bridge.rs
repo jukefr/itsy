@@ -105,39 +105,66 @@ impl McpBridge {
     }
 
     pub async fn init_code_graph(&self, version: &str) -> bool {
-        let _ = self
-            .call(
-                "initialize",
-                json!({
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {},
-                    "clientInfo": {"name": "itsy", "version": version}
-                }),
-            )
-            .await;
-        let list = self.call("tools/call", json!({"name": "list_repos", "arguments": {}})).await;
-        let already = list
-            .as_ref()
-            .and_then(|v| v.pointer("/content/0/text"))
-            .and_then(|t| t.as_str())
-            .and_then(|s| serde_json::from_str::<Value>(s).ok())
-            .and_then(|v| v.get("total").cloned())
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        if already > 0 {
-            return true;
+        // ── Native (Rust) code graph: preferred, always attempted ──
+        // Spawn off the indexing onto a blocking thread so the synchronous
+        // tree-sitter walk doesn't stall the tokio reactor.
+        let native_ok = tokio::task::spawn_blocking(|| {
+            let Some(graph) = crate::code_graph::try_get_code_graph() else {
+                return false;
+            };
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            // Skip if this repo is already indexed.
+            if let Ok(repos) = graph.list_repos() {
+                if !repos.is_empty() {
+                    return true;
+                }
+            }
+            let name = cwd
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "workspace".into());
+            graph.index_repo(&cwd, &name).is_ok()
+        })
+        .await
+        .unwrap_or(false);
+
+        // ── Legacy MCP path: only used if the JS server is reachable ──
+        let mcp_started = self.inner.lock().stdin.is_some();
+        if mcp_started {
+            let _ = self
+                .call(
+                    "initialize",
+                    json!({
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {},
+                        "clientInfo": {"name": "itsy", "version": version}
+                    }),
+                )
+                .await;
+            let list = self.call("tools/call", json!({"name": "list_repos", "arguments": {}})).await;
+            let already = list
+                .as_ref()
+                .and_then(|v| v.pointer("/content/0/text"))
+                .and_then(|t| t.as_str())
+                .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                .and_then(|v| v.get("total").cloned())
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            if already == 0 {
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                let _ = self
+                    .call(
+                        "tools/call",
+                        json!({
+                            "name": "index_repo",
+                            "arguments": {"path": cwd.to_string_lossy(), "name": cwd.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()}
+                        }),
+                    )
+                    .await;
+            }
         }
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let _ = self
-            .call(
-                "tools/call",
-                json!({
-                    "name": "index_repo",
-                    "arguments": {"path": cwd.to_string_lossy(), "name": cwd.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()}
-                }),
-            )
-            .await;
-        true
+
+        native_ok || mcp_started
     }
 
     pub fn kill(&self) {

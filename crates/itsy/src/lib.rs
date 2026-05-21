@@ -10,6 +10,7 @@
 //! * [`escalation`]   — cloud-model fallback (Claude / OpenAI / DeepSeek)
 //! * [`memory`]       — typed project memory store
 //! * [`mcp_bridge`]   — built-in code-graph MCP server lifecycle
+//! * [`code_graph`]   — native (tree-sitter + SQLite) code graph
 //! * [`tui`]          — classic line-based rendering
 //! * [`fullscreen`]   — ratatui alternate-screen renderer
 //! * [`commands`]     — slash-command dispatch
@@ -23,6 +24,7 @@
 
 pub mod adapters;
 pub mod api;
+pub mod code_graph;
 pub mod cognition_adapter;
 pub mod commands;
 pub mod compiled;
