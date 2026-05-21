@@ -24,7 +24,17 @@ use serde_json::{json, Value};
 
 /// Heuristic budget calculator. Picks a token budget from a coarse task
 /// classification plus a small bonus for long prompts.
+///
+/// `ITSY_THINKING_BUDGET` overrides everything: when set to a positive
+/// integer, that value is returned verbatim regardless of task type.
 pub fn thinking_budget(task_type: &str, message_len: usize) -> u32 {
+    if let Some(v) = std::env::var("ITSY_THINKING_BUDGET")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .filter(|n| *n > 0)
+    {
+        return v;
+    }
     let base = match task_type {
         "coding" | "backend" => 512,
         "editing" => 256,

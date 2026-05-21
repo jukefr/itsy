@@ -430,13 +430,46 @@ pub fn run() -> Result<ConfigFile> {
         ask_bool("Enable escalation?", true)
     };
 
+    // Small-model safeguards — bulk-on for tiny quants, otherwise ask
+    // whether to enable. All are individually overridable via `ITSY_*`
+    // env vars or by editing the TOML later.
+    let safeguards_default = matches!(hints.quant_tier, "tiny" | "low" | "balanced" | "unknown");
+    let safeguards_all = ask_bool(
+        "Enable small-model safeguards (plan/snapshot/write-guard/trust-decay/bootstrap)?",
+        safeguards_default,
+    );
+
+    // Thinking-budget cap for reasoning models. 0 = use per-task heuristic.
+    let thinking_budget: u32 = if hints.is_reasoning {
+        let default = "8000".to_string();
+        ask("  Thinking-token budget per turn (0 = heuristic)", &default)
+            .parse()
+            .unwrap_or(8000)
+    } else {
+        0
+    };
+
+    let features = crate::config::FeaturesConfig {
+        plan: safeguards_all,
+        snapshot: safeguards_all,
+        snapshot_auto_rollback: safeguards_all,
+        write_guard: safeguards_all,
+        bootstrap: safeguards_all,
+        trust_decay: safeguards_all,
+        temp_adapt: safeguards_all,
+        thinking_budget,
+    };
+
+    let web_browse = ask_bool("Enable web_search / web_fetch tools?", true);
+    let shell_persist = ask_bool("Use a persistent shell (cd src; ls works as expected)?", true);
+
     let file = ConfigFile {
         version: CURRENT_CONFIG_VERSION.into(),
         model: Some(ModelConfig {
             provider: "openai".into(),
             name: model_name,
             base_url: normalized_base,
-            timeout: 300,
+            timeout: 600,
             api_key,
         }),
         context: Some(ContextConfig {
@@ -445,7 +478,12 @@ pub fn run() -> Result<ConfigFile> {
             working_memory_tokens: 500,
             summary_threshold: 200,
         }),
-        tools: Some(ToolsConfig { bash_timeout, tool_routing }),
+        tools: Some(ToolsConfig {
+            bash_timeout,
+            tool_routing,
+            web_browse,
+            shell_persist,
+        }),
         tui: Some(TuiConfig {
             show_token_usage: true,
             auto_approve,
@@ -461,6 +499,7 @@ pub fn run() -> Result<ConfigFile> {
             model: None,
         }),
         git: Some(GitConfig { auto_commit }),
+        features: Some(features),
         models: None,
     };
 
@@ -490,7 +529,12 @@ pub fn write_default() -> Result<ConfigFile> {
             working_memory_tokens: 500,
             summary_threshold: 200,
         }),
-        tools: Some(ToolsConfig { bash_timeout: 30, tool_routing: "direct".into() }),
+        tools: Some(ToolsConfig {
+            bash_timeout: 30,
+            tool_routing: "direct".into(),
+            web_browse: false,
+            shell_persist: true,
+        }),
         tui: Some(TuiConfig {
             show_token_usage: true,
             auto_approve: false,
@@ -506,6 +550,7 @@ pub fn write_default() -> Result<ConfigFile> {
             model: None,
         }),
         git: Some(GitConfig { auto_commit: false }),
+        features: Some(crate::config::FeaturesConfig::default()),
         models: None,
     };
     paths::ensure_config_dirs()?;

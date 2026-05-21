@@ -56,10 +56,75 @@ pub struct ToolsConfig {
     /// `ITSY_TOOL_ROUTING` still overrides this at runtime.
     #[serde(default = "default_tool_routing")]
     pub tool_routing: String,
+    /// Enable web_search / web_fetch tools. Sets `ITSY_WEB_BROWSE`.
+    #[serde(default)]
+    pub web_browse: bool,
+    /// Use a persistent shell so `cd src` etc. stick across calls. Sets
+    /// `ITSY_SHELL_PERSIST`.
+    #[serde(default = "default_true")]
+    pub shell_persist: bool,
 }
 
 fn default_tool_routing() -> String {
     "direct".into()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Small-model safeguards. Each toggle here propagates to the matching
+/// `ITSY_*` env var the runtime reads — so the env always wins, but the
+/// TOML provides a stable default per project.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeaturesConfig {
+    /// Auto-detect multi-step tasks and ask the model to commit to a plan
+    /// before executing. Sets `ITSY_PLAN`.
+    #[serde(default = "default_true")]
+    pub plan: bool,
+    /// Wrap each turn in a checkpoint so failures can roll back. Sets
+    /// `ITSY_SNAPSHOT`.
+    #[serde(default = "default_true")]
+    pub snapshot: bool,
+    /// Auto-rollback on hard failure (build break, exception). Sets
+    /// `ITSY_SNAPSHOT_AUTO_ROLLBACK`.
+    #[serde(default = "default_true")]
+    pub snapshot_auto_rollback: bool,
+    /// Refuse `write_file` on a file the model hasn't read this turn. Sets
+    /// `ITSY_WRITE_GUARD`.
+    #[serde(default = "default_true")]
+    pub write_guard: bool,
+    /// Inject a project bootstrap (cwd, file listing, project type) on the
+    /// first message of a new session. Sets `ITSY_BOOTSTRAP`.
+    #[serde(default = "default_true")]
+    pub bootstrap: bool,
+    /// Penalise tools that fail and re-promote tools that succeed. Sets
+    /// `ITSY_TRUST_DECAY`.
+    #[serde(default = "default_true")]
+    pub trust_decay: bool,
+    /// Adapt sampling temperature based on recent repair history. Sets
+    /// `ITSY_TEMP_ADAPT`.
+    #[serde(default = "default_true")]
+    pub temp_adapt: bool,
+    /// Hard cap for reasoning-model thinking tokens per turn. `0` means
+    /// "use the per-task heuristic". Sets `ITSY_THINKING_BUDGET`.
+    #[serde(default)]
+    pub thinking_budget: u32,
+}
+
+impl Default for FeaturesConfig {
+    fn default() -> Self {
+        Self {
+            plan: true,
+            snapshot: true,
+            snapshot_auto_rollback: true,
+            write_guard: true,
+            bootstrap: true,
+            trust_decay: true,
+            temp_adapt: true,
+            thinking_budget: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,6 +167,8 @@ pub struct Config {
     pub escalation: EscalationConfig,
     pub git: GitConfig,
     #[serde(default)]
+    pub features: FeaturesConfig,
+    #[serde(default)]
     pub models: Option<MultiModels>,
 }
 
@@ -128,6 +195,8 @@ pub struct ConfigFile {
     pub escalation: Option<EscalationConfig>,
     #[serde(default)]
     pub git: Option<GitConfig>,
+    #[serde(default)]
+    pub features: Option<FeaturesConfig>,
     #[serde(default)]
     pub models: Option<MultiModels>,
 }
@@ -232,6 +301,9 @@ impl ConfigFile {
         if let Some(g) = self.git.clone() {
             config.git = g;
         }
+        if let Some(f) = self.features.clone() {
+            config.features = f;
+        }
         if self.models.is_some() {
             config.models = self.models.clone();
         }
@@ -248,9 +320,46 @@ impl From<&Config> for ConfigFile {
             tui: Some(c.tui.clone()),
             escalation: Some(c.escalation.clone()),
             git: Some(c.git.clone()),
+            features: Some(c.features.clone()),
             models: c.models.clone(),
         }
     }
+}
+
+/// Propagate config toggles into the corresponding `ITSY_*` env vars so the
+/// many code paths that read env vars (snapshot, write_guard, plan_tracker,
+/// shell_session, web_browse, …) see the configured values without each
+/// having to add a separate `Config` plumbing path.
+///
+/// **Precedence:** an env var that is *already set* in the process is never
+/// overwritten — so `ITSY_WEB_BROWSE=true ./itsy ...` always wins over the
+/// TOML, matching the documented load order.
+pub fn propagate_features_to_env(config: &Config) {
+    let mut set = |name: &str, val: &str| {
+        if env::var(name).is_err() {
+            // SAFETY: called during single-threaded startup before any
+            // worker threads touch the environment.
+            unsafe { env::set_var(name, val) };
+        }
+    };
+    let f = &config.features;
+    set("ITSY_PLAN", bool_env(f.plan));
+    set("ITSY_SNAPSHOT", bool_env(f.snapshot));
+    set("ITSY_SNAPSHOT_AUTO_ROLLBACK", bool_env(f.snapshot_auto_rollback));
+    set("ITSY_WRITE_GUARD", bool_env(f.write_guard));
+    set("ITSY_BOOTSTRAP", bool_env(f.bootstrap));
+    set("ITSY_TRUST_DECAY", bool_env(f.trust_decay));
+    set("ITSY_TEMP_ADAPT", bool_env(f.temp_adapt));
+    if f.thinking_budget > 0 {
+        set("ITSY_THINKING_BUDGET", &f.thinking_budget.to_string());
+    }
+    set("ITSY_SHELL_PERSIST", bool_env(config.tools.shell_persist));
+    set("ITSY_WEB_BROWSE", bool_env(config.tools.web_browse));
+    set("ITSY_TOOL_ROUTING", &config.tools.tool_routing);
+}
+
+fn bool_env(b: bool) -> &'static str {
+    if b { "true" } else { "false" }
 }
 
 fn env_or<T: std::str::FromStr>(name: &str, default: T) -> T {
@@ -321,6 +430,8 @@ pub fn load_config(flags: &Flags) -> Config {
         tools: ToolsConfig {
             bash_timeout: env_or("ITSY_BASH_TIMEOUT", 30),
             tool_routing: env_str("ITSY_TOOL_ROUTING").unwrap_or_else(|| "direct".into()),
+            web_browse: env_str("ITSY_WEB_BROWSE").as_deref() == Some("true"),
+            shell_persist: env_str("ITSY_SHELL_PERSIST").as_deref() != Some("false"),
         },
         tui: TuiConfig {
             show_token_usage: true,
@@ -338,6 +449,16 @@ pub fn load_config(flags: &Flags) -> Config {
         },
         git: GitConfig {
             auto_commit: env_str("ITSY_AUTO_COMMIT").as_deref() == Some("true"),
+        },
+        features: FeaturesConfig {
+            plan: env_str("ITSY_PLAN").as_deref() != Some("false"),
+            snapshot: env_str("ITSY_SNAPSHOT").as_deref() != Some("false"),
+            snapshot_auto_rollback: env_str("ITSY_SNAPSHOT_AUTO_ROLLBACK").as_deref() != Some("false"),
+            write_guard: env_str("ITSY_WRITE_GUARD").as_deref() != Some("false"),
+            bootstrap: env_str("ITSY_BOOTSTRAP").as_deref() != Some("false"),
+            trust_decay: env_str("ITSY_TRUST_DECAY").as_deref() != Some("false"),
+            temp_adapt: env_str("ITSY_TEMP_ADAPT").as_deref() != Some("false"),
+            thinking_budget: env_or("ITSY_THINKING_BUDGET", 0u32),
         },
         models: None,
     };
@@ -387,6 +508,12 @@ pub fn load_config(flags: &Flags) -> Config {
     if flags.classic {
         config.tui.classic = true;
     }
+
+    // Push TOML-configured feature toggles into ITSY_* env vars so the
+    // many env-var consumers (snapshot, write_guard, plan_tracker, …)
+    // pick them up automatically. Env vars that are already set are
+    // left alone, preserving the documented load order.
+    propagate_features_to_env(&config);
 
     config
 }

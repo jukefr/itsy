@@ -394,7 +394,12 @@ mod tests {
                 working_memory_tokens: 8192,
                 summary_threshold: 8000,
             },
-            tools: ToolsConfig { bash_timeout: 30, tool_routing: "direct".into() },
+            tools: ToolsConfig {
+                bash_timeout: 30,
+                tool_routing: "direct".into(),
+                web_browse: false,
+                shell_persist: true,
+            },
             tui: TuiConfig { show_token_usage: false, auto_approve: false, theme: "dark".into(), classic: false },
             escalation: EscalationConfig {
                 enabled: false,
@@ -405,6 +410,7 @@ mod tests {
                 model: None,
             },
             git: GitConfig { auto_commit: false },
+            features: crate::config::FeaturesConfig::default(),
             models: None,
         }
     }
