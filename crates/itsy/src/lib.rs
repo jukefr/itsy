@@ -36,6 +36,7 @@ pub mod features_adapter;
 pub mod fullscreen;
 pub mod governor;
 pub mod init_wizard;
+pub mod interrupt;
 pub mod knowledge;
 pub mod loops_adapter;
 pub mod lsp;

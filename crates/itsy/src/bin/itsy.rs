@@ -603,10 +603,23 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
     let mut improvement_attempts: std::collections::HashMap<String, u32> = Default::default();
     let mut current_category: Option<String> = stage2_category;
 
+    // Reset any pending Ctrl+C presses from earlier turns; the user starts
+    // each turn with a clean slate.
+    itsy::interrupt::reset();
+
     // 7) Main while-loop.
     loop {
         if tool_calls_this_turn >= MAX_TOOL_CALLS_PER_TURN {
             println!("\n  \x1b[33m⚠ Reached tool call limit\x1b[0m");
+            break;
+        }
+
+        // Cooperative SIGINT check. Once the user has pressed Ctrl+C, we
+        // bail out as soon as we're between tool calls instead of letting
+        // the model fire off another one.
+        if itsy::interrupt::pending() > 0 {
+            itsy::interrupt::take();
+            println!("\n  \x1b[33m⚠ Interrupted\x1b[0m");
             break;
         }
 
@@ -1661,6 +1674,14 @@ async fn run_repl(session: &AgentSession) -> Result<()> {
         }
         input.clear();
         if stdin.lock().read_line(&mut input)? == 0 {
+            // EOF — Ctrl+D in classic mode → exit.
+            break;
+        }
+        // A Ctrl+C while we were waiting for input. read_line() returned an
+        // empty line (or partial) after the SIGINT was delivered; treat it as
+        // a "quit" if the user already hit it once with no input pending.
+        if itsy::interrupt::take() > 0 && input.trim().is_empty() {
+            println!("\n  bye");
             break;
         }
         let line = input.trim_end_matches('\n').to_string();
@@ -1781,6 +1802,7 @@ async fn run_fullscreen_repl(session: Arc<AgentSession>) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     load_dotenv();
+    itsy::interrupt::install();
     let cli = Cli::parse();
 
     // First-launch / explicit `--init`: run the interactive wizard before
