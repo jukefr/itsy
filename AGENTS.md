@@ -73,17 +73,35 @@ full builds.
    `load_config`. The convention is `ITSY_FOO_BAR`.
 3. Document it in `README.md` if it's user-facing.
 
-## Don't
+## Integrating upstream changes
 
-- Do not commit a `Cargo.lock` if you bumped a workspace dep without
-  intent — `cargo update` is a deliberate operation.
-- Do not introduce new top-level files; the repo root holds only
-  `README.md`, `AGENTS.md`, `LICENSE`, `.gitignore`, `Cargo.toml`,
-  `Cargo.lock`, and the `crates/` directory.
-- Do not add `tokio::process` writes from inside a synchronous mutex
-  guard — see the concurrency note above.
-- Do not use `eprintln!` in hot paths; gate diagnostic output behind
-  `ITSY_DEBUG` via `compiled::logger::debug`.
+itsy is a Rust port of `github.com/Doorman11991/smallcode`. When syncing new
+upstream work, follow the skill at `.agents/skills/upstream-changes/SKILL.md`
+— it tracks the last-ported SHA in its own `upstream-rev` file and covers
+the fetch / per-commit review / port-or-skip workflow plus a JS → Rust path
+map.
+
+## Repo root
+
+Try to keep the root lean. Current contents:
+
+- `README.md`, `AGENTS.md`, `LICENSE`
+- `.gitignore`
+- `Cargo.toml`, `Cargo.lock`
+- `crates/` — the workspace
+- `.agents/` — agent skills (see above)
+
+Add new top-level files only when there's a real reason — and when you do,
+add a line here so future agents know it's load-bearing.
+
+## Heads-up
+
+- `cargo update` is a deliberate operation. Don't bump `Cargo.lock` in
+  passing.
+- No `tokio::process` writes from inside a synchronous mutex guard — see
+  the concurrency note above.
+- No `eprintln!` in hot paths; gate diagnostic output behind `ITSY_DEBUG`
+  via `compiled::logger::debug`.
 
 ## Versioning
 
