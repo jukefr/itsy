@@ -277,9 +277,7 @@ pub fn build_system_prompt(
          - Create files with write_file directly. Do NOT run mkdir first."
     );
 
-    if current_task_type == Some("backend") {
-        prompt.push_str("\n\nBONESCRIPT MODE — For Node.js/TypeScript backends, use BoneScript.");
-    }
+    let _ = current_task_type;
     prompt.push_str(&format!("\nWorking directory: {cwd}"));
     prompt.push_str(memory_context);
     prompt.push_str(skill_context);

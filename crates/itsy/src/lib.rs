@@ -23,7 +23,6 @@
 
 pub mod adapters;
 pub mod api;
-pub mod bonescript_guide;
 pub mod cognition_adapter;
 pub mod commands;
 pub mod compiled;

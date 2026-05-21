@@ -48,7 +48,7 @@ use itsy::tools::{get_all_tools, ToolDeps};
 use itsy::tools_impl::dedup::{DedupOutcome, ToolDedup};
 use itsy::tools_impl::test_runner;
 use itsy::trace_recorder::TraceRecorder;
-use itsy::{bonescript_guide, tui};
+use itsy::tui;
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -451,19 +451,6 @@ fn build_full_system_prompt(
         &plugin_ctx,
         Some(task_type),
     );
-
-    // BoneScript hint for backend tasks.
-    if bonescript_guide::should_use_bonescript(
-        messages
-            .iter()
-            .rev()
-            .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
-            .and_then(|m| m.get("content").and_then(|c| c.as_str()))
-            .unwrap_or(""),
-    ) {
-        prompt.push_str("\n\n");
-        prompt.push_str(bonescript_guide::get_bonescript_guide());
-    }
 
     // Knowledge auto-injection.
     let know = get_knowledge_context(messages, config);

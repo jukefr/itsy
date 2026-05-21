@@ -14,7 +14,7 @@ pub const TOOL_CATEGORIES: &[CategoryDef] = &[
     CategoryDef { key: "write", description: "Create files, edit files with patch, rewrite files", tools: &["write_file", "patch", "read_and_patch", "create_and_run"] },
     CategoryDef { key: "search", description: "Search code by regex, search code graph, explain symbols", tools: &["search", "search_and_read", "graph_search", "explain_symbol", "list_projects"] },
     CategoryDef { key: "run", description: "Run shell commands, execute scripts", tools: &["bash", "run"] },
-    CategoryDef { key: "plan", description: "Load/save project memory, BoneScript compile/check", tools: &["memory_load", "memory_remember", "bone_compile", "bone_check"] },
+    CategoryDef { key: "plan", description: "Load/save project memory", tools: &["memory_load", "memory_remember"] },
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,7 +42,7 @@ pub fn get_category_selector_tool() -> Value {
         "type": "function",
         "function": {
             "name": "select_category",
-            "description": "Pick the tool category you need. Categories: read (read/find files), write (create/edit files), search (grep/code graph), run (shell commands), plan (memory/bonescript).",
+            "description": "Pick the tool category you need. Categories: read (read/find files), write (create/edit files), search (grep/code graph), run (shell commands), plan (memory).",
             "parameters": {
                 "type": "object",
                 "properties": {

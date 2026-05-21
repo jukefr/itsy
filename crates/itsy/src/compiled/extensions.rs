@@ -25,7 +25,7 @@ pub fn tmpl_classify_task(user_message: &str) -> String {
         - explanation: answering questions, explaining concepts\n\
         - multi_step: tasks with multiple sequential parts\n\
         - debugging: fixing errors or bugs\n\
-        - backend: building Node.js/TypeScript backends (use BoneScript)\n\n\
+        - backend: building backend services / APIs\n\n\
         User message: \"{user_message}\"\n\n\
         Category:"
     )

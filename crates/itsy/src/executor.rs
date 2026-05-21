@@ -60,8 +60,6 @@ pub async fn execute_tool(name: &str, mut args: Value, ctx: &ExecCtx<'_>) -> Val
         "memory_load" | "memory_remember" | "memory_list" | "memory_forget" => {
             exec_memory(name, &args, ctx).await
         }
-        "bone_compile" => exec_bone_compile(&args, &cwd).await,
-        "bone_check" => exec_bone_check(&args, &cwd).await,
         "web_search" => exec_web_search(&args).await,
         "web_fetch" => exec_web_fetch(&args).await,
         "select_category" => {
@@ -691,81 +689,6 @@ async fn exec_memory(name: &str, args: &Value, ctx: &ExecCtx<'_>) -> Value {
         }
         _ => json!({"result": ""}),
     }
-}
-
-async fn exec_bone_compile(args: &Value, cwd: &Path) -> Value {
-    let Some(path) = args.get("path").and_then(|v| v.as_str()) else {
-        return json!({"error": "bone_compile: path missing"});
-    };
-    if !path.ends_with(".bone") {
-        return json!({"error": format!("Expected a .bone file, got: {path}")});
-    }
-    let safe = match safe_resolve_path(path, cwd, PathOptions::default()) {
-        Ok(s) => s,
-        Err(e) => return json!({"error": format!("bone_compile rejected: {e}")}),
-    };
-    if !safe.full_path.exists() {
-        return json!({"error": format!("File not found: {path}")});
-    }
-    let allowed = ["express", "nakama", "prisma", "sqlite"];
-    let target = args.get("target").and_then(|v| v.as_str()).unwrap_or("express");
-    if !allowed.contains(&target) {
-        return json!({"error": format!("bone_compile: invalid target. Allowed: {}", allowed.join(", "))});
-    }
-    let compiler = find_bonescript_compiler();
-    let Some(compiler) = compiler else {
-        return json!({"error": "BoneScript compiler not found."});
-    };
-    let cmd = format!(
-        "node {} compile {} --target {}",
-        escape_shell_arg(&compiler.to_string_lossy()),
-        escape_shell_arg(&safe.full_path.to_string_lossy()),
-        escape_shell_arg(target),
-    );
-    match run_shell(&cmd, cwd) {
-        Ok(out) => json!({"result": format!("Compiled {path} → output/\n{}", truncate(&sanitize_tool_output(&out), 2000)), "action": "Created", "path": "output/"}),
-        Err(e) => json!({"error": format!("BoneScript compile failed:\n{}", truncate(&sanitize_tool_output(&e), 2000))}),
-    }
-}
-
-async fn exec_bone_check(args: &Value, cwd: &Path) -> Value {
-    let Some(path) = args.get("path").and_then(|v| v.as_str()) else {
-        return json!({"error": "bone_check: path missing"});
-    };
-    if !path.ends_with(".bone") {
-        return json!({"error": format!("Expected a .bone file, got: {path}")});
-    }
-    let safe = match safe_resolve_path(path, cwd, PathOptions::default()) {
-        Ok(s) => s,
-        Err(e) => return json!({"error": format!("bone_check rejected: {e}")}),
-    };
-    let Some(compiler) = find_bonescript_compiler() else {
-        return json!({"error": "BoneScript compiler not found."});
-    };
-    let cmd = format!(
-        "node {} check {}",
-        escape_shell_arg(&compiler.to_string_lossy()),
-        escape_shell_arg(&safe.full_path.to_string_lossy()),
-    );
-    match run_shell(&cmd, cwd) {
-        Ok(out) => {
-            let cleaned = sanitize_tool_output(&out);
-            let result = if cleaned.trim().is_empty() { "✓ No errors found.".into() } else { cleaned.trim().to_string() };
-            json!({"result": result})
-        }
-        Err(e) => json!({"error": format!("BoneScript validation errors:\n{}", truncate(&sanitize_tool_output(&e), 2000))}),
-    }
-}
-
-fn find_bonescript_compiler() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?.to_path_buf();
-    let candidates = [
-        dir.join("..").join("node_modules").join("bonescript-compiler").join("dist").join("cli.js"),
-        dir.join("..").join("..").join("BoneScript").join("compiler").join("dist").join("cli.js"),
-        PathBuf::from(std::env::var("BONESCRIPT_COMPILER").unwrap_or_default()),
-    ];
-    candidates.into_iter().find(|p| p.exists())
 }
 
 async fn exec_web_search(args: &Value) -> Value {

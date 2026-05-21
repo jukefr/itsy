@@ -221,7 +221,7 @@ pub fn get_tools_for_category(category: &str) -> Vec<&'static str> {
         "run" => vec!["bash", "run", "read_file"],
         "plan" => vec![
             "read_file", "write_file", "patch", "bash", "search", "find_files",
-            "graph_search", "memory_load", "memory_remember", "bone_compile", "bone_check",
+            "graph_search", "memory_load", "memory_remember",
             "read_and_patch", "create_and_run", "find_and_read", "search_and_read",
         ],
         "web" => vec!["web_search", "web_fetch", "read_file"],

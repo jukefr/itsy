@@ -90,7 +90,7 @@ pub fn get_template(name: &str) -> Option<&'static str> {
 
 fn tmpl_classify_task(user_message: &str) -> String {
     format!(
-        "Classify this user message into ONE of these categories. Reply with ONLY the category name, nothing else.\n\nCategories:\n- coding: creating new code/files\n- editing: modifying existing files\n- search: finding files or symbols\n- shell: running commands\n- explanation: answering questions, explaining concepts\n- multi_step: tasks with multiple sequential parts\n- debugging: fixing errors or bugs\n- backend: building Node.js/TypeScript backends (use BoneScript)\n\nUser message: \"{user_message}\"\n\nCategory:"
+        "Classify this user message into ONE of these categories. Reply with ONLY the category name, nothing else.\n\nCategories:\n- coding: creating new code/files\n- editing: modifying existing files\n- search: finding files or symbols\n- shell: running commands\n- explanation: answering questions, explaining concepts\n- multi_step: tasks with multiple sequential parts\n- debugging: fixing errors or bugs\n- backend: building backend services / APIs\n\nUser message: \"{user_message}\"\n\nCategory:"
     )
 }
 
