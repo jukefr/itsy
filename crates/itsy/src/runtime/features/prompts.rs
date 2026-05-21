@@ -1,5 +1,5 @@
 //! Features-layer prompt dispatcher — ported from
-//! `src/compiled/features/prompts.js`. Self-contained: uses env config +
+//! upstream JS `features/prompts.js`. Self-contained: uses env config +
 //! direct OpenAI-compatible HTTP, with an in-memory TTL cache. The 9 prompts
 //! here back the [`crate::features_adapter`] surface.
 

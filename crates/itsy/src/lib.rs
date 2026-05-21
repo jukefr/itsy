@@ -18,16 +18,16 @@
 //! * [`session`]      — persistence, undo, snapshots, references, plan
 //! * [`tools_impl`]   — persistent shell, read tracker, MCP client, web browse
 //! * [`model`]        — profiles, routing, adaptive temperature
-//! * [`compiled`]     — deterministic tool router + provider adapters
+//! * [`runtime`]      — deterministic tool router + provider adapters
 //! * [`plugins`]      — plugin/skill loaders
 //! * [`api`]          — programmatic embedding API
+//! * [`paths`]        — canonical ~/.config/itsy/ layout
 
 pub mod adapters;
 pub mod api;
 pub mod code_graph;
 pub mod cognition_adapter;
 pub mod commands;
-pub mod compiled;
 pub mod config;
 pub mod escalation;
 pub mod eval_runner;
@@ -35,6 +35,7 @@ pub mod executor;
 pub mod features_adapter;
 pub mod fullscreen;
 pub mod governor;
+pub mod init_wizard;
 pub mod knowledge;
 pub mod loops_adapter;
 pub mod lsp;
@@ -42,7 +43,9 @@ pub mod mcp_bridge;
 pub mod memory;
 pub mod model;
 pub mod model_client;
+pub mod paths;
 pub mod plugins;
+pub mod runtime;
 pub mod security;
 pub mod session;
 pub mod token_monitor;

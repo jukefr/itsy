@@ -10,10 +10,6 @@ description = "AI coding agent optimized for small LLMs (8B-35B parameters)"
 name = "itsy"
 path = "src/bin/itsy.rs"
 
-[[bin]]
-name = "itsy-init"
-path = "src/bin/itsy_init.rs"
-
 [lib]
 name = "itsy"
 path = "src/lib.rs"

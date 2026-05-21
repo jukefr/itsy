@@ -1,12 +1,12 @@
 //! Features adapter — bridges the agent loop to the compiled features
-//! prompts in [`crate::compiled::features::prompts`]. All functions are
+//! prompts in [`crate::runtime::features::prompts`]. All functions are
 //! defensive: any model failure falls back to a safe default rather than
 //! crashing the agent. Mirrors `bin/features_adapter.js`.
 
 use anyhow::Result;
 use serde_json::{json, Value};
 
-use crate::compiled::features::prompts::call_prompt;
+use crate::runtime::features::prompts::call_prompt;
 
 // ─── Feature 1: Repair a malformed tool call ─────────────────────────────────
 

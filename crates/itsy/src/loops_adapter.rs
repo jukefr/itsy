@@ -1,11 +1,11 @@
 //! Bounded loop adapter — wraps the compiled loop runtime
-//! ([`crate::compiled::cognition::loops`]) for use in the agent loop.
+//! ([`crate::runtime::cognition::loops`]) for use in the agent loop.
 //! Mirrors `bin/loops_adapter.js`.
 
 use std::future::Future;
 use std::pin::Pin;
 
-use crate::compiled::cognition::loops::{run_with_retry, RetryConfig};
+use crate::runtime::cognition::loops::{run_with_retry, RetryConfig};
 
 #[derive(Debug, Clone)]
 pub struct ValidationOutcome {

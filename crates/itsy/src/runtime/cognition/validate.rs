@@ -1,5 +1,5 @@
 //! Cognition Layer Phase 5 — output validation modes (port of
-//! `src/compiled/cognition/validate.js`).
+//! upstream JS `cognition/validate.js`).
 //!
 //! The upstream JS exposes three validation modes (`schema_only`,
 //! `ast_compiles`, `custom:<ext>`). The Rust port keeps the

@@ -63,7 +63,7 @@ full builds.
    `crates/itsy/src/tools.rs`.
 2. Add a `match` arm in `crates/itsy/src/executor.rs::execute_tool`.
 3. Mention the tool in the relevant category in
-   `crates/itsy/src/compiled/tool_router.rs::get_tools_for_category`
+   `crates/itsy/src/runtime/tool_router.rs::get_tools_for_category`
    so the 2-stage router can route to it.
 
 ## Adding a config knob

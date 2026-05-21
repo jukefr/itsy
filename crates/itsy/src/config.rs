@@ -1,13 +1,21 @@
-//! Loads configuration from environment variables,
-//! `itsy.toml`, and CLI flags. CLI flags win over toml; env wins over both
-//! except for the `model.name` field, which the toml is allowed to populate.
+//! Configuration loader. Precedence (last wins):
+//!
+//!   1. Built-in defaults
+//!   2. `~/.config/itsy/config.toml` (TOML, versioned, migration-aware)
+//!   3. `~/.config/itsy/.env` env-var overrides
+//!   4. Live process environment (`ITSY_*`)
+//!   5. CLI flags
+//!
+//! The TOML file has a `version = "N"` field at the top. On load, any
+//! version older than [`CURRENT_CONFIG_VERSION`] is run through the
+//! migration chain in [`MIGRATIONS`] before being parsed into [`Config`].
 
 use std::collections::HashMap;
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 
@@ -44,6 +52,14 @@ pub struct ContextConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolsConfig {
     pub bash_timeout: u32,
+    /// Tool routing mode: "direct" or "two_stage". Env var
+    /// `ITSY_TOOL_ROUTING` still overrides this at runtime.
+    #[serde(default = "default_tool_routing")]
+    pub tool_routing: String,
+}
+
+fn default_tool_routing() -> String {
+    "direct".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,6 +105,154 @@ pub struct Config {
     pub models: Option<MultiModels>,
 }
 
+/// Schema version currently understood. Bump when a breaking change is
+/// introduced and a corresponding entry is added to [`MIGRATIONS`].
+pub const CURRENT_CONFIG_VERSION: &str = "1";
+
+/// On-disk shape of `config.toml`. The top-level `version` field is
+/// inspected before parsing; older versions are migrated to current before
+/// being deserialised into [`Config`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigFile {
+    #[serde(default = "default_version")]
+    pub version: String,
+    #[serde(default)]
+    pub model: Option<ModelConfig>,
+    #[serde(default)]
+    pub context: Option<ContextConfig>,
+    #[serde(default)]
+    pub tools: Option<ToolsConfig>,
+    #[serde(default)]
+    pub tui: Option<TuiConfig>,
+    #[serde(default)]
+    pub escalation: Option<EscalationConfig>,
+    #[serde(default)]
+    pub git: Option<GitConfig>,
+    #[serde(default)]
+    pub models: Option<MultiModels>,
+}
+
+fn default_version() -> String {
+    CURRENT_CONFIG_VERSION.into()
+}
+
+/// One step in the migration chain. Takes the raw `toml::Value` of the
+/// file at version `from`, returns the equivalent value bumped to the
+/// next version. If the migration needs user input to proceed, return
+/// `Err(MigrationError::NeedsUserInput(prompt))` so the caller (the init
+/// wizard at first launch) can interactively complete it.
+pub type Migration = fn(&mut toml::Value) -> Result<()>;
+
+/// Migration chain. Each entry runs in order until the file version
+/// matches [`CURRENT_CONFIG_VERSION`]. Entries are keyed by the version
+/// they migrate *from*.
+///
+/// Add entries here when bumping the schema. v1 is the initial shipped
+/// schema so this list is empty for now.
+pub const MIGRATIONS: &[(&str, Migration)] = &[
+    // ("1", v1_to_v2),  // example: when shipping v2, add the migrator here
+];
+
+impl ConfigFile {
+    /// Parse a TOML file. Runs any pending schema migrations before
+    /// deserialising into the typed struct.
+    pub fn load_from_path(path: &Path) -> Result<Self> {
+        let text = fs::read_to_string(path)
+            .with_context(|| format!("read config: {}", path.display()))?;
+        let mut value: toml::Value = toml::from_str(&text)
+            .with_context(|| format!("parse config: {}", path.display()))?;
+        Self::apply_migrations(&mut value)?;
+        let parsed: ConfigFile = value
+            .try_into()
+            .with_context(|| format!("deserialise config: {}", path.display()))?;
+        Ok(parsed)
+    }
+
+    /// Apply migrations in-place, bumping the embedded `version` to the
+    /// current value. No-op if the file already matches.
+    pub fn apply_migrations(value: &mut toml::Value) -> Result<()> {
+        loop {
+            let current = value
+                .get("version")
+                .and_then(|v| v.as_str())
+                .unwrap_or("1")
+                .to_string();
+            if current == CURRENT_CONFIG_VERSION {
+                return Ok(());
+            }
+            let migrator = MIGRATIONS
+                .iter()
+                .find(|(from, _)| *from == current)
+                .map(|(_, m)| *m);
+            match migrator {
+                Some(m) => m(value)?,
+                None => {
+                    anyhow::bail!(
+                        "config version {current} has no migration to {CURRENT_CONFIG_VERSION}",
+                    );
+                }
+            }
+        }
+    }
+
+    /// Save to disk, prepending a friendly header. Atomic via tmp+rename.
+    pub fn save_to_path(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).ok();
+        }
+        let mut body = String::new();
+        body.push_str("# itsy config — see https://github.com/jukefr/itsy\n");
+        body.push_str("# This file is migration-aware: the `version` field at top\n");
+        body.push_str("# is honored on load and the file is rewritten in newer\n");
+        body.push_str("# layouts as needed. Do not remove `version`.\n\n");
+        body.push_str(&toml::to_string_pretty(self).with_context(|| "serialise config")?);
+        let tmp = path.with_extension("toml.tmp");
+        fs::write(&tmp, body).with_context(|| format!("write {}", tmp.display()))?;
+        fs::rename(&tmp, path).with_context(|| format!("rename {} → {}", tmp.display(), path.display()))?;
+        Ok(())
+    }
+
+    /// Merge any populated sections of this file into a base [`Config`].
+    pub fn apply_to(&self, config: &mut Config) {
+        if let Some(m) = self.model.clone() {
+            config.model = m;
+        }
+        if let Some(c) = self.context.clone() {
+            config.context = c;
+        }
+        if let Some(t) = self.tools.clone() {
+            config.tools = t;
+        }
+        if let Some(t) = self.tui.clone() {
+            config.tui = t;
+        }
+        if let Some(e) = self.escalation.clone() {
+            config.escalation = e;
+        }
+        if let Some(g) = self.git.clone() {
+            config.git = g;
+        }
+        if self.models.is_some() {
+            config.models = self.models.clone();
+        }
+    }
+}
+
+impl From<&Config> for ConfigFile {
+    fn from(c: &Config) -> Self {
+        Self {
+            version: CURRENT_CONFIG_VERSION.into(),
+            model: Some(c.model.clone()),
+            context: Some(c.context.clone()),
+            tools: Some(c.tools.clone()),
+            tui: Some(c.tui.clone()),
+            escalation: Some(c.escalation.clone()),
+            git: Some(c.git.clone()),
+            models: c.models.clone(),
+        }
+    }
+}
+
 fn env_or<T: std::str::FromStr>(name: &str, default: T) -> T {
     env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
@@ -97,18 +261,13 @@ fn env_str(name: &str) -> Option<String> {
     env::var(name).ok().filter(|s| !s.is_empty())
 }
 
-/// Walk the canonical `.env` search paths and inject values into the process
-/// environment. Matches the JS version's "first found wins, never override
-/// existing env" semantics.
+/// Load `.env` overrides from the user's config directory. Project-local
+/// `.env` files are *not* read — runtime state and config live under
+/// `~/.config/itsy/`. The full TOML config (see [`crate::paths::config_file`])
+/// is the canonical place for user settings; `.env` is a fallback for one-off
+/// env overrides.
 pub fn load_dotenv() {
-    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let paths = [
-        cwd.join(".env"),
-        cwd.join(".itsy").join(".env"),
-        home.join(".config").join("itsy").join(".env"),
-        home.join(".itsy").join(".env"),
-    ];
+    let paths = [crate::paths::config_dir().join(".env")];
     for p in &paths {
         if !p.exists() {
             continue;
@@ -161,6 +320,7 @@ pub fn load_config(flags: &Flags) -> Config {
         },
         tools: ToolsConfig {
             bash_timeout: env_or("ITSY_BASH_TIMEOUT", 30),
+            tool_routing: env_str("ITSY_TOOL_ROUTING").unwrap_or_else(|| "direct".into()),
         },
         tui: TuiConfig {
             show_token_usage: true,
@@ -190,38 +350,24 @@ pub fn load_config(flags: &Flags) -> Config {
         });
     }
 
-    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let toml_paths = [
-        cwd.join("itsy.toml"),
-        cwd.join(".itsy").join("config.toml"),
-        home.join(".config").join("itsy").join("config.toml"),
-    ];
-    for p in &toml_paths {
-        if p.exists() && config.model.name.is_empty() {
-            if let Ok(content) = fs::read_to_string(p) {
-                for line in content.lines() {
-                    if let Some(m) = line.strip_prefix("name") {
-                        if let Some(v) = extract_value(m) {
-                            config.model.name = v;
-                        }
-                    } else if line.starts_with("baseUrl") || line.starts_with("base_url") {
-                        if let Some(v) = extract_value(line) {
-                            config.model.base_url = v;
-                        }
-                    } else if line.starts_with("provider") {
-                        if let Some(v) = extract_value(line) {
-                            config.model.provider = v;
-                        }
-                    } else if let Some(rest) = line.strip_prefix("timeout") {
-                        if let Some(v) = extract_value(rest) {
-                            if let Ok(n) = v.parse() {
-                                config.model.timeout = n;
-                            }
-                        }
-                    }
-                }
-                break;
+    // Merge TOML file on top of env-derived defaults (env still wins on
+    // individual fields below; we apply TOML before env-overrides at the
+    // top of this function — but env_str() was already evaluated, so we
+    // walk back through it after merge for keys that have ITSY_* overrides).
+    let toml_path = crate::paths::config_file();
+    if toml_path.exists() {
+        if let Ok(file) = ConfigFile::load_from_path(&toml_path) {
+            file.apply_to(&mut config);
+            // Env vars still take precedence over the TOML file. Re-apply
+            // any that are actually set.
+            if let Some(v) = env_str("ITSY_PROVIDER") {
+                config.model.provider = v;
+            }
+            if let Some(v) = env_str("ITSY_MODEL") {
+                config.model.name = v;
+            }
+            if let Some(v) = env_str("ITSY_BASE_URL") {
+                config.model.base_url = v;
             }
         }
     }

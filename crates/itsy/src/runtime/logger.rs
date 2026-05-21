@@ -138,7 +138,7 @@ pub fn logger() -> Logger {
 }
 
 // ---------------------------------------------------------------------------
-// Free-function shims used inside the crate (`compiled::logger::info(...)`)
+// Free-function shims used inside the crate (`runtime::logger::info(...)`)
 // ---------------------------------------------------------------------------
 
 pub fn info(event: &str, area: &str, error: Option<&str>) {

@@ -1,4 +1,4 @@
-//! Verify-and-fix loop — mirrors `src/compiled/features/verify_and_fix.js`.
+//! Verify-and-fix loop — mirrors upstream JS `features/verify_and_fix.js`.
 //!
 //! After a file is written/patched, this module:
 //!   1. Runs a fast self-critique via [`crate::features_adapter::validate_edit_compiled`].

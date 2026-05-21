@@ -13,7 +13,6 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-const SCORES_FILE_REL: &str = ".itsy/tool_scores.json";
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ToolScore {
@@ -110,7 +109,8 @@ impl ToolScorer {
 }
 
 fn scores_path() -> PathBuf {
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(SCORES_FILE_REL)
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    crate::paths::tool_scores(&cwd)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

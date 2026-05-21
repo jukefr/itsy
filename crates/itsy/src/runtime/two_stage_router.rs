@@ -1,5 +1,4 @@
-//! Lives under `compiled` because
-//! its logic is also a generated runtime helper.
+//! Lives under `runtime` alongside the other deterministic helpers.
 
 use serde_json::{json, Value};
 

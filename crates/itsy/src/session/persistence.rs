@@ -16,7 +16,6 @@ use serde_json::Value;
 
 use crate::security::redact_value;
 
-pub const SESSIONS_DIR: &str = ".itsy/sessions";
 
 /// Keep last 50 sessions; older ones are pruned.
 pub const MAX_SESSIONS: usize = 50;
@@ -71,8 +70,10 @@ pub struct SessionStore {
 }
 
 impl SessionStore {
-    pub fn new(root: PathBuf) -> Self {
-        let dir = root.join(SESSIONS_DIR);
+    /// Open the session store for the project at `cwd`. Sessions live under
+    /// [`crate::paths::sessions_dir`].
+    pub fn new(cwd: PathBuf) -> Self {
+        let dir = crate::paths::sessions_dir(&cwd);
         let _ = fs::create_dir_all(&dir);
         #[cfg(unix)]
         {

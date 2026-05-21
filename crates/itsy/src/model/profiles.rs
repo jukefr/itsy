@@ -285,15 +285,7 @@ pub fn load_profile(name: &str) -> Option<DiskProfile> {
 }
 
 fn candidate_profile_dirs() -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    if let Ok(cwd) = std::env::current_dir() {
-        out.push(cwd.join("profiles"));
-        out.push(cwd.join(".itsy").join("profiles"));
-    }
-    if let Some(home) = dirs::home_dir() {
-        out.push(home.join(".config").join("itsy").join("profiles"));
-    }
-    out
+    vec![crate::paths::config_dir().join("profiles")]
 }
 
 /// Get the effective profile for a model.

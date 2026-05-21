@@ -6,11 +6,11 @@ use std::env;
 use once_cell::sync::Lazy;
 use serde_json::{json, Value};
 
-use crate::compiled::two_stage_router::{
+use crate::runtime::two_stage_router::{
     get_category_selector_tool, get_routing_mode, get_tools_for_category as two_stage_for_category,
     RoutingMode,
 };
-use crate::compiled::tool_router::{category_needs_tools, get_tools_for_category as compiled_for_category};
+use crate::runtime::tool_router::{category_needs_tools, get_tools_for_category as compiled_for_category};
 use crate::Config;
 
 pub static TOOLS: Lazy<Vec<Value>> = Lazy::new(|| vec![

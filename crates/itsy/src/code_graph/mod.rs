@@ -35,8 +35,6 @@ pub const MAX_FILE_BYTES: u64 = 1_024 * 1_024; // 1 MB
 /// files, the rest of the walk is skipped.
 pub const MAX_FILES_PER_REPO: usize = 5_000;
 
-/// Default DB sub-path under the repo root.
-pub const DEFAULT_DB_REL: &str = ".itsy/codegraph.db";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RepoSummary {
@@ -81,14 +79,14 @@ pub struct CodeGraph {
 }
 
 impl CodeGraph {
-    /// Open (or create) the codegraph DB rooted at `root`.
+    /// Open (or create) the codegraph DB for the project at `cwd`.
     ///
-    /// The path is `<root>/.itsy/codegraph.db` unless `ITSY_CODEGRAPH_DB`
-    /// overrides it.
-    pub fn open(root: &Path) -> Result<Self> {
+    /// The path comes from [`crate::paths::codegraph_db`] unless
+    /// `ITSY_CODEGRAPH_DB` overrides it explicitly.
+    pub fn open(cwd: &Path) -> Result<Self> {
         let db_path = match std::env::var("ITSY_CODEGRAPH_DB") {
             Ok(p) if !p.is_empty() => PathBuf::from(p),
-            _ => root.join(DEFAULT_DB_REL),
+            _ => crate::paths::codegraph_db(cwd),
         };
         Self::open_at(&db_path)
     }

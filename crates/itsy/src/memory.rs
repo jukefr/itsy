@@ -22,8 +22,7 @@ use parking_lot::Mutex;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-pub const MEMORY_DIR: &str = ".itsy/memory";
-pub const MEMORY_DB: &str = ".itsy/memory.db";
+use crate::paths;
 
 // ─── Public types ───────────────────────────────────────────────────────────
 
@@ -99,30 +98,18 @@ enum Backend {
 }
 
 impl MemoryStore {
-    /// Construct a memory store rooted at `root_dir`. Tries SQLite first; on
-    /// any error initialising the DB falls back to the JSON store. If a
-    /// legacy JSON store already exists on disk and SQLite is empty, its
-    /// contents are migrated on first open.
-    pub fn new(root_dir: impl AsRef<Path>) -> Self {
-        let root = root_dir.as_ref().to_path_buf();
-        let inner = match SqliteBackend::open(&root) {
-            Ok(mut sqlite) => {
-                // One-time migration from `.itsy/memory/index.json` if present.
-                let json_index = root.join(MEMORY_DIR).join("index.json");
-                if json_index.exists() && sqlite.count().unwrap_or(0) == 0 {
-                    if let Ok(content) = fs::read_to_string(&json_index) {
-                        if let Ok(file) = serde_json::from_str::<StoreFile>(&content) {
-                            for obj in file.objects {
-                                let _ = sqlite.insert(&obj);
-                            }
-                        }
-                    }
-                }
-                Backend::Sqlite(sqlite)
-            }
-            Err(_) => Backend::Json(JsonBackend::new(&root)),
+    /// Construct a memory store for the project rooted at `cwd`. Data lives
+    /// under `paths::memory_db(cwd)` (SQLite) or `paths::project_dir(cwd)`
+    /// (JSON fallback). Tries SQLite first; falls back to JSON if SQLite
+    /// can't be opened.
+    pub fn new(cwd: impl AsRef<Path>) -> Self {
+        let cwd = cwd.as_ref().to_path_buf();
+        let _ = paths::ensure_project_dirs(&cwd);
+        let inner = match SqliteBackend::open(&cwd) {
+            Ok(sqlite) => Backend::Sqlite(sqlite),
+            Err(_) => Backend::Json(JsonBackend::new(&cwd)),
         };
-        Self { inner, root_dir: root }
+        Self { inner, root_dir: cwd }
     }
 
     /// Force the JSON fallback regardless of SQLite availability. Used by
@@ -231,8 +218,8 @@ struct SqliteBackend {
 }
 
 impl SqliteBackend {
-    fn open(root: &Path) -> rusqlite::Result<Self> {
-        let db_path = root.join(MEMORY_DB);
+    fn open(cwd: &Path) -> rusqlite::Result<Self> {
+        let db_path = paths::memory_db(cwd);
         if let Some(parent) = db_path.parent() {
             let _ = fs::create_dir_all(parent);
         }
@@ -473,8 +460,10 @@ struct StoreFile {
 }
 
 impl JsonBackend {
-    fn new(root: &Path) -> Self {
-        let mem_dir = root.join(MEMORY_DIR);
+    fn new(cwd: &Path) -> Self {
+        // JSON fallback stores everything alongside the (would-be) SQLite DB
+        // in the project's slot — `<config>/projects/<id>/memory/`.
+        let mem_dir = paths::project_dir(cwd).join("memory");
         let mut backend = Self { mem_dir, objects: Vec::new() };
         backend.load();
         backend
@@ -670,32 +659,4 @@ mod tests {
         assert_eq!(s.by_type.get("workflow").copied(), Some(1));
     }
 
-    #[test]
-    fn migration_from_json_index() {
-        let dir = tempdir().unwrap();
-        let json_dir = dir.path().join(MEMORY_DIR);
-        fs::create_dir_all(&json_dir).unwrap();
-        let now = Utc::now().to_rfc3339();
-        let payload = serde_json::to_string_pretty(&StoreFile {
-            version: 1,
-            updated_at: now.clone(),
-            objects: vec![MemoryObject {
-                id: "abcd1234".into(),
-                kind: "decision".into(),
-                title: "imported".into(),
-                content: "from json".into(),
-                tags: vec!["legacy".into()],
-                relations: vec![],
-                created_at: now.clone(),
-                updated_at: now,
-                source: None,
-            }],
-        })
-        .unwrap();
-        fs::write(json_dir.join("index.json"), payload).unwrap();
-        let store = MemoryStore::new(dir.path());
-        assert_eq!(store.backend_name(), "sqlite+fts5");
-        assert_eq!(store.stats().total, 1);
-        assert!(store.get("abcd1234").is_some());
-    }
 }

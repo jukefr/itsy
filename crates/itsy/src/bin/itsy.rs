@@ -1670,12 +1670,24 @@ async fn main() -> Result<()> {
     load_dotenv();
     let cli = Cli::parse();
 
-    if cli.init {
-        // Defer to the dedicated init binary's logic — surface a hint since
-        // it lives in a separate bin. Running `itsy --init` keeps the legacy
-        // alias working for users.
-        eprintln!("Please run: itsy-init");
-        return Ok(());
+    // First-launch / explicit `--init`: run the interactive wizard before
+    // anything else. The wizard writes ~/.config/itsy/config.toml so the
+    // rest of `main` can boot normally on subsequent runs.
+    if cli.init || itsy::init_wizard::is_first_launch() {
+        match itsy::init_wizard::run() {
+            Ok(_) => {
+                if cli.init {
+                    return Ok(());
+                }
+                // First-launch path: fall through into normal startup so the
+                // user lands in the REPL right away.
+                println!();
+            }
+            Err(e) => {
+                eprintln!("  ✗ Setup failed: {e}");
+                std::process::exit(1);
+            }
+        }
     }
 
     let flags = Flags {
@@ -1690,8 +1702,8 @@ async fn main() -> Result<()> {
 
     if config.model.name.is_empty() {
         eprintln!("\n  ✗ No model configured.");
-        eprintln!("  Set ITSY_MODEL in .env, or add [model] name = \"...\" to itsy.toml.");
-        eprintln!("  Run `itsy-init` for an interactive setup wizard.\n");
+        eprintln!("  Edit {} or set ITSY_MODEL.", itsy::paths::config_file().display());
+        eprintln!("  Run `itsy --init` to re-run the setup wizard.\n");
         std::process::exit(1);
     }
 

@@ -144,13 +144,12 @@ impl AdaptiveRouter {
     }
 
     /// Default on-disk path: `$ITSY_ADAPTIVE_STATE_PATH` or
-    /// `~/.itsy/adaptive_router.json`.
+    /// `<config_dir>/adaptive_router.json`.
     pub fn default_state_path() -> PathBuf {
         if let Some(p) = env::var("ITSY_ADAPTIVE_STATE_PATH").ok().filter(|s| !s.is_empty()) {
             return PathBuf::from(p);
         }
-        let base = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        base.join(".itsy").join("adaptive_router.json")
+        crate::paths::config_dir().join("adaptive_router.json")
     }
 
     /// Record the outcome of a chat-completion call.
@@ -395,7 +394,7 @@ mod tests {
                 working_memory_tokens: 8192,
                 summary_threshold: 8000,
             },
-            tools: ToolsConfig { bash_timeout: 30 },
+            tools: ToolsConfig { bash_timeout: 30, tool_routing: "direct".into() },
             tui: TuiConfig { show_token_usage: false, auto_approve: false, theme: "dark".into(), classic: false },
             escalation: EscalationConfig {
                 enabled: false,

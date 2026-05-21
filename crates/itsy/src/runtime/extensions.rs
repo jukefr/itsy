@@ -2,7 +2,7 @@
 //! helpers that the cognition layer dispatches to.
 //!
 //! These mirror the JS `extensions.js` extension function bodies. Higher
-//! layers (`compiled::cognition::prompts`) already expose `tmpl_classify_task`
+//! layers (`runtime::cognition::prompts`) already expose `tmpl_classify_task`
 //! et al as free functions; the helpers here expose the same bodies as
 //! public functions for callers that want to use the registry shape.
 

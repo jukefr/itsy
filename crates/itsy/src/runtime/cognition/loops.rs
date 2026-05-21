@@ -12,7 +12,7 @@
 use std::future::Future;
 use std::time::{Duration, Instant};
 
-use crate::compiled::cognition::traces::{write_span, SpanInit};
+use crate::runtime::cognition::traces::{write_span, SpanInit};
 
 // ─── Retry helper (kept for existing callers) ───────────────────────────────
 

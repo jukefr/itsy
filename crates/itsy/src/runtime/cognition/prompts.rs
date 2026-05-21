@@ -1,5 +1,5 @@
 //! Cognition-layer prompt dispatcher — ported from
-//! `src/compiled/cognition/prompts.js`. Three prompts back the cognition
+//! upstream JS `cognition/prompts.js`. Three prompts back the cognition
 //! adapter: `classify_task_type`, `code_assist`, `compress_history`.
 //!
 //! Each goes through the full pipeline: model lookup → template render →
@@ -12,13 +12,13 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 
-use crate::compiled::cognition::budget::{Budget, CostClass};
-use crate::compiled::cognition::cache::{derive_key, DeriveKeyArgs, PromptCache};
-use crate::compiled::cognition::router::{coding_router_route, RouteDecision};
-use crate::compiled::cognition::traces::TraceBuffer;
-use crate::compiled::cognition::validate::validate_type;
-use crate::compiled::providers::openai_compat::OpenAICompatProvider;
-use crate::compiled::providers::types::{ChatMessage, ChatRequest};
+use crate::runtime::cognition::budget::{Budget, CostClass};
+use crate::runtime::cognition::cache::{derive_key, DeriveKeyArgs, PromptCache};
+use crate::runtime::cognition::router::{coding_router_route, RouteDecision};
+use crate::runtime::cognition::traces::TraceBuffer;
+use crate::runtime::cognition::validate::validate_type;
+use crate::runtime::providers::openai_compat::OpenAICompatProvider;
+use crate::runtime::providers::types::{ChatMessage, ChatRequest};
 
 /// Dispatch a cognition-layer prompt by name. Returns `serde_json::Value`
 /// (a string for string-typed prompts; parsed value for JSON-typed).
@@ -86,7 +86,7 @@ pub fn get_template(name: &str) -> Option<&'static str> {
     })
 }
 
-// ─── Templates (extension points in upstream src/compiled/extensions.ts) ────
+// ─── Templates (extension points in upstream JS `extensions.ts`) ────────────
 
 fn tmpl_classify_task(user_message: &str) -> String {
     format!(

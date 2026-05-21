@@ -63,7 +63,7 @@ pub fn execute_flow<C, E: std::fmt::Display>(
     let len = steps.len();
     for i in 0..len {
         let step_name = steps[i].name.clone();
-        crate::compiled::logger::info(
+        crate::runtime::logger::info(
             "flow_step_started",
             &format!("{name}.{step_name}"),
             None,
@@ -76,7 +76,7 @@ pub fn execute_flow<C, E: std::fmt::Display>(
             }
             Err(e) => {
                 let err_msg = e.to_string();
-                crate::compiled::logger::error(
+                crate::runtime::logger::error(
                     "flow_step_failed",
                     &format!("{name}.{step_name}"),
                     Some(&err_msg),
@@ -87,14 +87,14 @@ pub fn execute_flow<C, E: std::fmt::Display>(
                         match cfn(ctx) {
                             Ok(()) => {
                                 compensated.push(cname.clone());
-                                crate::compiled::logger::info(
+                                crate::runtime::logger::info(
                                     "flow_compensated",
                                     &format!("{name}.{cname}"),
                                     None,
                                 );
                             }
                             Err(ce) => {
-                                crate::compiled::logger::error(
+                                crate::runtime::logger::error(
                                     "flow_compensation_failed",
                                     &format!("{name}.{cname}"),
                                     Some(&ce.to_string()),

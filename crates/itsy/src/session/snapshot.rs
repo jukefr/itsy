@@ -93,7 +93,7 @@ impl SnapshotManager {
     pub fn new(workdir: PathBuf) -> Self {
         let snapshot_dir = std::env::var_os("ITSY_SNAPSHOT_DIR")
             .map(PathBuf::from)
-            .unwrap_or_else(|| workdir.join(".itsy").join("snapshots"));
+            .unwrap_or_else(|| crate::paths::snapshots_dir(&workdir));
         let disabled = std::env::var("ITSY_SNAPSHOT")
             .map(|v| v == "false")
             .unwrap_or(false);

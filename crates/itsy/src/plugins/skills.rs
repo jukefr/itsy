@@ -107,11 +107,7 @@ impl SkillManager {
     }
 
     fn skill_dirs(&self) -> Vec<PathBuf> {
-        let mut dirs = vec![self.project_dir.join(".itsy").join("skills")];
-        if let Some(home) = dirs::home_dir() {
-            dirs.push(home.join(".config").join("itsy").join("skills"));
-        }
-        dirs
+        vec![crate::paths::skills_dir()]
     }
 
     /// Backward-compatible alias for old API. Resets the project dir and reloads.
@@ -200,7 +196,7 @@ impl SkillManager {
         trigger: Trigger,
         keywords: &[String],
     ) -> std::io::Result<Skill> {
-        let dir = self.project_dir.join(".itsy").join("skills");
+        let dir = crate::paths::skills_dir();
         fs::create_dir_all(&dir)?;
 
         let mut frontmatter = String::from("---\n");

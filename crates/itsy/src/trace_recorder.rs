@@ -94,7 +94,7 @@ pub struct TraceRecorder {
 
 impl TraceRecorder {
     pub fn new(workdir: PathBuf) -> Self {
-        let traces_dir = workdir.join(".itsy").join("traces");
+        let traces_dir = crate::paths::traces_dir(&workdir);
         Self { workdir, traces_dir, current: None, recording: false }
     }
 

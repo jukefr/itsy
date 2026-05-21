@@ -130,7 +130,7 @@ impl SpanWriter {
             .map(|v| !v.is_empty() && v != "0" && v.to_lowercase() != "false")
             .unwrap_or(false);
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let spans_dir = cwd.join(".itsy").join("traces").join("spans");
+        let spans_dir = crate::paths::traces_dir(&cwd).join("spans");
         Self {
             buffer: Mutex::new(VecDeque::with_capacity(10_000)),
             capacity: 10_000,

@@ -1,6 +1,6 @@
 //! Cognition adapter — bridges the Rust runtime to the
 //! MarrowScript-compiled cognition layer ported under
-//! [`crate::compiled::cognition`]. Falls back to the hand-rolled regex
+//! [`crate::runtime::cognition`]. Falls back to the hand-rolled regex
 //! classifier (from [`crate::governor::classify_task`]) when the compiled
 //! layer is unavailable.
 
@@ -8,8 +8,8 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::{json, Value};
 
-use crate::compiled::cognition::prompts::call_prompt;
-use crate::compiled::cognition::router::{
+use crate::runtime::cognition::prompts::call_prompt;
+use crate::runtime::cognition::router::{
     coding_router_fallback, coding_router_route, RouteDecision,
 };
 
@@ -106,7 +106,7 @@ pub fn estimate_complexity(message: &str) -> f64 {
 pub fn is_compiled_cognition_available() -> bool {
     // In the Rust port the compiled layer is statically linked — always
     // available so long as `call_prompt` exists. The JS version only ever
-    // reported false when `require('../src/compiled/cognition')` threw.
+    // reported false when the upstream JS `require` of its cognition module threw.
     true
 }
 
