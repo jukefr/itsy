@@ -233,6 +233,24 @@ async fn exec_patch(args: &Value, cwd: &Path, ctx: &ExecCtx<'_>) -> Value {
     }
     let count = content.matches(old_str).count();
     if count == 0 {
+        // Last-chance recovery: ask the model to merge the intended
+        // change into the current file. Gated on config.features.semantic_merge.
+        if ctx.config.features.semantic_merge {
+            if let Some(merged) = crate::features_adapter::semantic_merge(path, new_str, &content).await {
+                if let Err(e) = fs::write(&safe.full_path, &merged) {
+                    return json!({"error": e.to_string()});
+                }
+                get_file_state_tracker().record_write(&safe.full_path, &merged);
+                let old_lines = content.split('\n').count();
+                let new_lines = merged.split('\n').count();
+                return json!({
+                    "result": format!("Patched {path} via semantic merge ({old_lines} → {new_lines} lines)"),
+                    "action": "Edited",
+                    "path": path,
+                    "line": 1,
+                });
+            }
+        }
         return json!({"error": format!("old_str not found in {path}")});
     }
     if count > 1 {
@@ -310,7 +328,15 @@ async fn exec_bash(args: &Value, cwd: &Path, ctx: &ExecCtx<'_>) -> Value {
             return json!({"result": trimmed, "error": err, "command": command});
         }
         if result.exit_code != 0 {
-            return json!({"result": if trimmed.is_empty() { "(no output)".to_string() } else { trimmed.clone() }, "error": format!("Exit code {}", result.exit_code), "command": command});
+            let body = if trimmed.is_empty() { "(no output)".to_string() } else { trimmed.clone() };
+            let with_hint = maybe_prepend_error_diagnosis(
+                ctx.config.features.error_diagnosis,
+                &command,
+                &body,
+                result.exit_code,
+            )
+            .await;
+            return json!({"result": with_hint, "error": format!("Exit code {}", result.exit_code), "command": command});
         }
         return json!({"result": if trimmed.is_empty() { "(no output)".to_string() } else { trimmed }, "command": command});
     }
@@ -326,13 +352,47 @@ async fn exec_bash(args: &Value, cwd: &Path, ctx: &ExecCtx<'_>) -> Value {
             let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
             let trimmed = trim_output(&sanitize_tool_output(&combined), 3000);
             if !out.status.success() {
-                json!({"result": trimmed, "error": format!("Exit code {}", out.status.code().unwrap_or(-1)), "command": command})
+                let code = out.status.code().unwrap_or(-1);
+                let with_hint = maybe_prepend_error_diagnosis(
+                    ctx.config.features.error_diagnosis,
+                    &command,
+                    &trimmed,
+                    code,
+                )
+                .await;
+                json!({"result": with_hint, "error": format!("Exit code {}", code), "command": command})
             } else {
                 json!({"result": if trimmed.is_empty() { "(no output)".to_string() } else { trimmed }, "command": command})
             }
         }
         Err(e) => json!({"result": redact_string(&e.to_string()), "error": e.to_string(), "command": command}),
     }
+}
+
+/// Call the LLM error-diagnosis prompt and prepend a `[ERROR-DIAGNOSIS]`
+/// block to `body` if a useful hint comes back. Falls back silently
+/// when the feature is disabled or the LLM call errors.
+async fn maybe_prepend_error_diagnosis(
+    enabled: bool,
+    command: &str,
+    output: &str,
+    exit_code: i32,
+) -> String {
+    if !enabled {
+        return output.to_string();
+    }
+    let Some(diag) = crate::features_adapter::diagnose_error(command, output, exit_code).await else {
+        return output.to_string();
+    };
+    let loc = match (&diag.file, diag.line) {
+        (Some(f), Some(l)) => format!(" in {f}:{l}"),
+        (Some(f), None) => format!(" in {f}"),
+        _ => String::new(),
+    };
+    format!(
+        "[ERROR-DIAGNOSIS] Type: {}{}. Fix: {}\n\n{}",
+        diag.kind, loc, diag.suggestion, output
+    )
 }
 
 fn rtk_rewrite(command: &str) -> String {

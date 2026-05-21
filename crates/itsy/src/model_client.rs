@@ -52,13 +52,32 @@ pub async fn chat_completion(ctx: &ChatContext<'_>) -> Option<Value> {
     let mut messages = vec![json!({"role": "system", "content": ctx.system_prompt})];
     messages.extend(processed);
 
-    let body = json!({
+    // Adaptive temperature: bumps with repair history if enabled.
+    let temperature = if ctx.config.features.temp_adapt {
+        let task = ctx.current_task_type.unwrap_or("coding");
+        crate::model::adaptive_temp::adaptive_temperature(task, 0)
+    } else {
+        0.1
+    };
+
+    let mut body = json!({
         "model": ctx.config.model.name,
         "messages": messages,
         "tools": ctx.tools,
-        "temperature": 0.1,
+        "temperature": temperature,
         "max_tokens": 4096,
     });
+
+    // Provider-gated reasoning fields (Anthropic `thinking`, OpenAI
+    // `reasoning_effort`, Qwen / llama.cpp `chat_template_kwargs`).
+    let task = ctx.current_task_type.unwrap_or("coding");
+    let tokens = crate::model::thinking_budget::thinking_budget(task, 0);
+    crate::model::thinking_budget::apply_thinking_budget(
+        &mut body,
+        &ctx.config.model.base_url,
+        tokens,
+        /* disable = */ false,
+    );
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(ctx.config.model.timeout))

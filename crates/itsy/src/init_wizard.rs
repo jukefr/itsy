@@ -454,6 +454,40 @@ pub fn run() -> Result<ConfigFile> {
         0
     };
 
+    // LLM-cost features — each adds a round-trip per turn or per failure.
+    // Auto-suggest on for tiny quants (where recovery is most valuable)
+    // since they fail more often; off by default otherwise to keep
+    // latency tight on bigger models.
+    let llm_recover_default = safeguards_default;
+    let semantic_merge = ask_bool(
+        "Recover from failed patches with an LLM merge call?",
+        llm_recover_default,
+    );
+    let error_diagnosis = ask_bool(
+        "Diagnose bash failures with an LLM hint?",
+        llm_recover_default,
+    );
+    let clarifier = ask_bool(
+        "Ask the model to clarify when the user message is vague?",
+        true,
+    );
+    let context_retrieval = ask_bool(
+        "Inject code-graph hits into the system prompt for long messages?",
+        true,
+    );
+    let validate_edits = ask_bool(
+        "LLM self-critique after every successful write/patch? (extra LLM call per edit)",
+        false,
+    );
+    let reviewer = ask_bool(
+        "Run a post-hoc LLM reviewer on the final assistant response? (extra LLM call per turn)",
+        false,
+    );
+    let chain = ask_bool(
+        "Use a planner→executor chain (extra LLM call up front)?",
+        false,
+    );
+
     let features = crate::config::FeaturesConfig {
         plan: safeguards_all,
         snapshot: safeguards_all,
@@ -463,6 +497,13 @@ pub fn run() -> Result<ConfigFile> {
         trust_decay: safeguards_all,
         temp_adapt: safeguards_all,
         thinking_budget,
+        clarifier,
+        semantic_merge,
+        error_diagnosis,
+        validate_edits,
+        context_retrieval,
+        reviewer,
+        chain,
     };
 
     let web_browse = ask_bool("Enable web_search / web_fetch tools?", true);

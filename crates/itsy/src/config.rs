@@ -110,6 +110,37 @@ pub struct FeaturesConfig {
     /// "use the per-task heuristic". Sets `ITSY_THINKING_BUDGET`.
     #[serde(default)]
     pub thinking_budget: u32,
+    /// Detect vague short inputs and inject a system message asking the
+    /// model to clarify before acting. Sets `ITSY_CLARIFIER`.
+    #[serde(default = "default_true")]
+    pub clarifier: bool,
+    /// Recover from `patch` failures (`old_str` not found) by asking the
+    /// model to merge the intended change into the current file content.
+    /// Sets `ITSY_SEMANTIC_MERGE`.
+    #[serde(default = "default_true")]
+    pub semantic_merge: bool,
+    /// Diagnose `bash` failures via an LLM-derived hint prepended to the
+    /// tool result. Sets `ITSY_ERROR_DIAGNOSIS`.
+    #[serde(default = "default_true")]
+    pub error_diagnosis: bool,
+    /// LLM self-critique after every successful write/patch. Costs one
+    /// extra LLM call per edit — off by default for small models. Sets
+    /// `ITSY_VALIDATE_EDITS`.
+    #[serde(default)]
+    pub validate_edits: bool,
+    /// Inject relevant code-graph hits into the system prompt for long
+    /// user messages. Sets `ITSY_CONTEXT_RETRIEVAL`.
+    #[serde(default = "default_true")]
+    pub context_retrieval: bool,
+    /// Post-hoc reviewer that asks the model "does this look right?" at
+    /// the end of each turn. Costs an extra LLM call per turn. Sets
+    /// `ITSY_REVIEWER`.
+    #[serde(default)]
+    pub reviewer: bool,
+    /// Run the user prompt through a planner→executor chain before the
+    /// main agent loop. Costs an extra LLM call. Sets `ITSY_CHAIN`.
+    #[serde(default)]
+    pub chain: bool,
 }
 
 impl Default for FeaturesConfig {
@@ -123,6 +154,13 @@ impl Default for FeaturesConfig {
             trust_decay: true,
             temp_adapt: true,
             thinking_budget: 0,
+            clarifier: true,
+            semantic_merge: true,
+            error_diagnosis: true,
+            validate_edits: false,
+            context_retrieval: true,
+            reviewer: false,
+            chain: false,
         }
     }
 }
@@ -356,6 +394,13 @@ pub fn propagate_features_to_env(config: &Config) {
     set("ITSY_SHELL_PERSIST", bool_env(config.tools.shell_persist));
     set("ITSY_WEB_BROWSE", bool_env(config.tools.web_browse));
     set("ITSY_TOOL_ROUTING", &config.tools.tool_routing);
+    set("ITSY_CLARIFIER", bool_env(f.clarifier));
+    set("ITSY_SEMANTIC_MERGE", bool_env(f.semantic_merge));
+    set("ITSY_ERROR_DIAGNOSIS", bool_env(f.error_diagnosis));
+    set("ITSY_VALIDATE_EDITS", bool_env(f.validate_edits));
+    set("ITSY_CONTEXT_RETRIEVAL", bool_env(f.context_retrieval));
+    set("ITSY_REVIEWER", bool_env(f.reviewer));
+    set("ITSY_CHAIN", bool_env(f.chain));
 }
 
 fn bool_env(b: bool) -> &'static str {
@@ -459,6 +504,13 @@ pub fn load_config(flags: &Flags) -> Config {
             trust_decay: env_str("ITSY_TRUST_DECAY").as_deref() != Some("false"),
             temp_adapt: env_str("ITSY_TEMP_ADAPT").as_deref() != Some("false"),
             thinking_budget: env_or("ITSY_THINKING_BUDGET", 0u32),
+            clarifier: env_str("ITSY_CLARIFIER").as_deref() != Some("false"),
+            semantic_merge: env_str("ITSY_SEMANTIC_MERGE").as_deref() != Some("false"),
+            error_diagnosis: env_str("ITSY_ERROR_DIAGNOSIS").as_deref() != Some("false"),
+            validate_edits: env_str("ITSY_VALIDATE_EDITS").as_deref() == Some("true"),
+            context_retrieval: env_str("ITSY_CONTEXT_RETRIEVAL").as_deref() != Some("false"),
+            reviewer: env_str("ITSY_REVIEWER").as_deref() == Some("true"),
+            chain: env_str("ITSY_CHAIN").as_deref() == Some("true"),
         },
         models: None,
     };

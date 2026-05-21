@@ -216,6 +216,28 @@ fn is_affirmation(s: &str) -> bool {
     )
 }
 
+/// Detect quoted absolute paths or paths with a slash/extension. The
+/// clarifier shouldn't fire on `'C:\\path\\foo.md'` even though it's short.
+fn looks_like_path(s: &str) -> bool {
+    static RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+        regex::Regex::new(r#"[\\/]|\.\w{1,5}\s*$|^["'].*["']$"#).unwrap()
+    });
+    RE.is_match(s.trim())
+}
+
+/// Detect option-references like "option 2", "do 3", "first", "second".
+/// The clarifier shouldn't fire on these — they're context-references to
+/// a prior assistant message that proposed choices.
+fn looks_like_option_ref(s: &str) -> bool {
+    static RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+        regex::Regex::new(
+            r"(?i)^(option\s+\d|work\s+on\s+\d|do\s+\d|start\s+with\s+\d|\d+\.?\s*$|first|second|third|fourth)\b",
+        )
+        .unwrap()
+    });
+    RE.is_match(s.trim())
+}
+
 /// Auto-compact: trim oldest non-system messages once the budget is exceeded.
 /// Mirrors JS lines 700-760 but without the LLM-based summary path.
 fn maybe_compact(history: &mut Vec<Value>, config: &Config) -> bool {
@@ -460,6 +482,36 @@ fn build_full_system_prompt(
         prompt.push_str(&know);
     }
 
+    // Code-graph hits for long user messages — gated on
+    // `features.context_retrieval`. Uses the local code graph (no LLM).
+    if config.features.context_retrieval {
+        if let Some(last_user) = messages
+            .iter()
+            .rev()
+            .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+            .and_then(|m| m.get("content").and_then(|c| c.as_str()))
+        {
+            if last_user.len() > 200 {
+                if let Some(graph) = itsy::code_graph::try_get_code_graph() {
+                    if let Ok(hits) = graph.search_graph(last_user, 1500) {
+                        if !hits.is_empty() {
+                            prompt.push_str("\n\nRelevant code from the project:\n");
+                            for h in hits.iter().take(5) {
+                                prompt.push_str(&format!(
+                                    "- {} ({} at {}:{})\n",
+                                    h.name, h.kind, h.file, h.line
+                                ));
+                                if let Some(sig) = &h.signature {
+                                    prompt.push_str(&format!("    {}\n", sig));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Active plan re-anchor.
     let plan = session.plan_tracker.lock();
     let plan_ctx = get_active_plan_context(&plan);
@@ -494,18 +546,29 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
 
     let user_msg = prompt_in.to_string();
 
-    // 1) Clarifier check — only fires on short messages (< 80 chars).
-    if user_msg.len() < 80 {
+    // 1) Clarifier check — only fires on short messages (< 80 chars) that
+    // are *not* obviously actionable (paths, option-refs, affirmations).
+    // Ports the a85c90c fix: instruction is spliced out after the model
+    // responds so it doesn't linger across turns.
+    let clarifier_enabled = session.config.lock().features.clarifier;
+    if clarifier_enabled
+        && user_msg.len() < 80
+        && !looks_like_path(&user_msg)
+        && !looks_like_option_ref(&user_msg)
+        && !is_affirmation(&user_msg)
+    {
         let needs = features_adapter::check_needs_clarification(&user_msg).await;
         if needs {
-            session
-                .history
-                .lock()
-                .push(json!({"role": "user", "content": user_msg.clone()}));
-            session.history.lock().push(json!({
-                "role": "system",
-                "content": "Clarify the user's intent. Ask a brief, targeted question. Do not call any tools."
-            }));
+            let clarifier_idx = {
+                let mut hist = session.history.lock();
+                hist.push(json!({"role": "user", "content": user_msg.clone()}));
+                let idx = hist.len();
+                hist.push(json!({
+                    "role": "system",
+                    "content": itsy::session::clarify::get_clarification_instruction(),
+                }));
+                idx
+            };
             let snapshot = (session.history.lock().clone(), session.config.lock().clone());
             let chat_ctx = ChatContext {
                 config: &snapshot.1,
@@ -514,7 +577,28 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                 current_task_type: None,
                 system_prompt: build_full_system_prompt(&snapshot.1, "explanation", &snapshot.0, session),
             };
-            if let Some(data) = chat_completion(&chat_ctx).await {
+            let response = chat_completion(&chat_ctx).await;
+            // Splice the one-shot clarifier instruction out of history,
+            // whether or not the model responded — otherwise it sticks
+            // around and re-fires on every subsequent turn.
+            {
+                let mut hist = session.history.lock();
+                if clarifier_idx < hist.len() {
+                    let is_clarifier = hist[clarifier_idx]
+                        .get("role")
+                        .and_then(|r| r.as_str())
+                        == Some("system")
+                        && hist[clarifier_idx]
+                            .get("content")
+                            .and_then(|c| c.as_str())
+                            .map(|s| s.contains("vague"))
+                            .unwrap_or(false);
+                    if is_clarifier {
+                        hist.remove(clarifier_idx);
+                    }
+                }
+            }
+            if let Some(data) = response {
                 record_usage(&data, session, false);
                 if let Some(msg) = data.pointer("/choices/0/message") {
                     if let Some(content) = msg.get("content").and_then(|c| c.as_str()) {
@@ -530,6 +614,28 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             return;
         }
     }
+
+    // 1.5) Optional planner→executor chain. Runs a separate LLM call
+    // up front to break the task into steps, then injects the plan as a
+    // system message before the main agent loop. Off by default
+    // (`features.chain`); when on, only fires once per turn at the top.
+    let planner_injection: Option<String> = if session.config.lock().features.chain {
+        let cfg = session.config.lock().clone();
+        let plan = itsy::model::chain::call_planner(&user_msg, &cfg).await;
+        let injection = itsy::model::chain::format_planner_injection(plan.as_deref());
+        if injection.is_empty() {
+            None
+        } else {
+            session.history.lock().push(json!({
+                "role": "system",
+                "content": injection.clone(),
+            }));
+            Some(injection)
+        }
+    } else {
+        None
+    };
+    let _ = planner_injection;
 
     // 2) Resolve `@file` references + auto-inject git diff when applicable.
     let refs = resolve_references(&user_msg, &session.cwd);
@@ -747,10 +853,24 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             // Push the assistant message verbatim.
             session.history.lock().push(msg.clone());
 
-            // Plan extraction from textual content.
+            // Plan extraction from textual content. Try the LLM extractor
+            // first when the plan toggle is on; fall back to the regex
+            // parser inside ingest_response.
             if let Some(content) = msg.get("content").and_then(|c| c.as_str()) {
+                let needs = { session.plan_tracker.lock().needs_plan() };
+                let llm_steps = if needs && session.config.lock().features.plan {
+                    features_adapter::extract_plan_steps(content).await
+                } else {
+                    None
+                };
                 let mut plan = session.plan_tracker.lock();
-                if plan.needs_plan() && plan.ingest_response(content) {
+                let ingested = if let Some(steps) = llm_steps {
+                    plan.set_plan(steps);
+                    true
+                } else {
+                    plan.needs_plan() && plan.ingest_response(content)
+                };
+                if ingested {
                     drop(plan);
                     // Strip the one-shot plan request instruction we injected.
                     if plan_instruction_idx >= 0 {
@@ -952,6 +1072,29 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                                     )
                                 );
                                 improvement_attempts.insert(file_path.clone(), 0);
+                            }
+                            // LLM self-critique: ask "does this still do
+                            // what the user wanted?" Cheap to wire, costs
+                            // one LLM call per accepted edit when enabled.
+                            if session.config.lock().features.validate_edits {
+                                if let Ok(content) = std::fs::read_to_string(&file_path) {
+                                    let result = features_adapter::validate_edit_compiled(
+                                        &file_path,
+                                        &content,
+                                        &user_msg,
+                                    )
+                                    .await;
+                                    if !result.ok && !result.issues.is_empty() {
+                                        let issues = result.issues.join("\n  - ");
+                                        let msg = format!(
+                                            "[SEMANTIC-REVIEW] The edit to {file_path} may need follow-up:\n  - {issues}"
+                                        );
+                                        session.history.lock().push(json!({
+                                            "role": "user",
+                                            "content": msg,
+                                        }));
+                                    }
+                                }
                             }
                         }
                         HardFailAction::Retry {
@@ -1225,6 +1368,31 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                 fs.add_chat(itsy::fullscreen::ChatRole::Assistant, content.clone());
             } else {
                 println!("{}", tui::render_markdown(content));
+            }
+            // Post-hoc reviewer — costs one extra LLM call per turn so
+            // it's off by default. When enabled, surfaces an "LGTM" or
+            // a short list of issues.
+            if session.config.lock().features.reviewer {
+                let cfg = session.config.lock().clone();
+                let review = itsy::model::reviewer::review_response(
+                    &user_msg,
+                    content,
+                    &edited_files,
+                    &cfg,
+                )
+                .await;
+                let notice = itsy::model::reviewer::format_reviewer_injection(review.as_ref());
+                if !notice.is_empty() {
+                    if let Some(fs) = &fs_assist {
+                        fs.add_chat(itsy::fullscreen::ChatRole::System, notice.clone());
+                    } else {
+                        println!("{}", tui::paint("\x1b[33m", &notice));
+                    }
+                    session.history.lock().push(json!({
+                        "role": "user",
+                        "content": notice,
+                    }));
+                }
             }
         } else if tool_calls_this_turn == 0 {
             // No content + no tool calls + nothing tried — try streaming.
