@@ -567,12 +567,19 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
     }
 
     // 4) Task classification (regex now; compiled LLM-based when available).
-    let task_type = classify_task_compiled(&user_msg, classify_task).await;
+    //    `classify_task` defaults to "coding" for anything it doesn't match,
+    //    which is wrong for conversational messages. We override below if
+    //    the tool router also routes the message to `respond`.
+    let task_type_initial = classify_task_compiled(&user_msg, classify_task).await;
 
-    // 5) Two-stage routing: classify intent → filter tools.
+    // 5) Tool routing: classify intent → filter (or strip) tools. The
+    //    `respond` category strips tools entirely so the model can't be
+    //    tempted to write a file on a conversational message like
+    //    "say hello". This applies to BOTH direct and two-stage routing.
     let stage2_category = {
         let mut current = session.current_tool_category.lock();
-        // Affirmation guard.
+        // Affirmation guard — keep the prior turn's tool set so "yes"/"ok"
+        // after a proposed action lets the model proceed.
         if is_affirmation(&user_msg)
             && current.as_deref().is_some()
             && current.as_deref() != Some("respond")
@@ -582,11 +589,28 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             *current = Some("plan".into());
             Some("plan".into())
         } else {
-            // We let the model pick a category itself via select_category tool.
-            // Reset so we get the broadest set on first call.
-            *current = None;
-            None
+            // Run the deterministic classifier. If it picks `respond`
+            // with positive confidence, pin to that — the model gets
+            // zero tools and must reply with plain text.
+            let classification = itsy::runtime::tool_router::classify_tool_category(&user_msg);
+            if classification.category == "respond" && classification.confidence > 0.0 {
+                *current = Some("respond".into());
+                Some("respond".into())
+            } else {
+                *current = None;
+                None
+            }
         }
+    };
+
+    // Align `task_type` with the routing decision. If the router says
+    // `respond`, treat the task as an explanation so downstream guards
+    // (system prompt, badger loops, plan tracker) don't try to coerce
+    // the model into action mode for a chat message.
+    let task_type: &'static str = if stage2_category.as_deref() == Some("respond") {
+        "explanation"
+    } else {
+        task_type_initial
     };
 
     // 6) Maybe pre-compact the history before the first call.
@@ -1112,8 +1136,13 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
 
         // 7b) No tool calls → model is responding with text.
         // Counter guard: action-task gave no-tool short response.
+        //
+        // Skip the badger when the router pinned us to `respond` — the
+        // model literally has no tools available, so prodding it to "use
+        // tools" would just spin the loop until MAX_TOOL_CALLS_PER_TURN.
         let content_opt = msg.get("content").and_then(|c| c.as_str()).map(String::from);
         if tool_calls_this_turn == 0
+            && current_category.as_deref() != Some("respond")
             && matches!(task_type, "coding" | "editing" | "backend")
             && content_opt
                 .as_deref()
@@ -1852,14 +1881,19 @@ async fn main() -> Result<()> {
         std::process::exit(code);
     }
 
-    println!("{}", tui::render_welcome(&config, false));
     let _reachable = check_endpoint(&mut config).await;
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    // Native code graph indexes regardless of whether the npm MCP bridge is
+    // installed. The MCP bridge is attempted as a bonus; its failure is
+    // expected and not treated as an error.
     let mcp_bridge = Arc::new(McpBridge::new());
-    if mcp_bridge.start().await.unwrap_or(false) {
-        let _ = mcp_bridge.init_code_graph(env!("CARGO_PKG_VERSION")).await;
-    }
+    let _ = mcp_bridge.start().await;
+    let graph_ok = mcp_bridge.init_code_graph(env!("CARGO_PKG_VERSION")).await;
+
+    // Welcome banner reflects the actual state of the native code graph.
+    println!("{}", tui::render_welcome(&config, graph_ok));
 
     let session = Arc::new(build_session(config, flags, cwd, mcp_bridge.clone()));
 

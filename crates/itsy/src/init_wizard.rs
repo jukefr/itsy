@@ -323,10 +323,15 @@ fn print_detected(hints: &ModelHints, window: u32, source: &str) {
 /// Run the wizard interactively, write the resulting config to disk, and
 /// return the populated [`ConfigFile`].
 pub fn run() -> Result<ConfigFile> {
+    // While this guard is held, a Ctrl+C cleanly exits the process
+    // (the synchronous read_line() calls below block in the kernel and
+    // can't observe a cooperative interrupt counter).
+    let _interrupt_guard = crate::interrupt::WizardGuard::enter();
+
     println!("\n  ⚡ itsy Setup");
     println!("  ─────────────────────────────────\n");
     println!("  No config found at {}.", paths::config_file().display());
-    println!("  Let's create one.\n");
+    println!("  Let's create one.  (Ctrl+C cancels.)\n");
 
     println!("  Providers:");
     println!("    1) LM Studio       (local, default port 1234)");

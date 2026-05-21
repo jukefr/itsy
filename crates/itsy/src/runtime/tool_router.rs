@@ -119,6 +119,13 @@ static CATEGORIES: Lazy<Vec<(&'static str, Category)>> = Lazy::new(|| {
                 Signal { re: r(r"\b(help|guide|tutorial|example|show\s+me\s+how)\b"), w: 2.0 },
                 Signal { re: r(r"\b(opinion|think|recommend|suggest|best\s+practice)\b"), w: 2.0 },
                 Signal { re: r(r"\b(thanks|thank\s+you|ok|sure|yes|no|got\s+it)\b"), w: 3.0 },
+                // Conversational openers — "say hello", "greet", "respond with"
+                // shouldn't trigger file tools just because the message is long.
+                Signal { re: r(r"\b(say|greet|respond\s+with|reply\s+with|just\s+say)\b"), w: 4.0 },
+                // Strong "no side effects" override.
+                Signal { re: r(r"\b(do\s+nothing|nothing\s+else|don'?t\s+do|don'?t\s+touch|do\s+not\s+touch|just\s+chat)\b"), w: 5.0 },
+                // Hi / hello / greet — common chat openers.
+                Signal { re: r(r"^\s*(hi|hello|hey|yo|sup|gm|good\s+(morning|afternoon|evening|night))\b"), w: 4.0 },
                 Signal { re: r(r"\b(failing|failed|broken|crash|error|bug|wrong)\b"), w: -2.0 },
                 Signal { re: r(r"\b(review|check|look\s+at|analyze|analyse|read|show|examine|audit)\b"), w: -3.0 },
                 Signal { re: r(r"\b(file|code|function|class|module|script|demo|mode)\b"), w: -1.5 },
@@ -237,4 +244,30 @@ pub fn category_needs_tools(category: &str) -> bool {
 #[allow(dead_code)]
 pub fn min_confidence_for(category: &str) -> Option<f64> {
     CATEGORIES.iter().find(|(n, _)| *n == category).map(|(_, c)| c.min_confidence)
+}
+
+#[cfg(test)]
+mod classify_user_examples {
+    use super::*;
+    #[test]
+    fn say_hello_lands_in_respond() {
+        for msg in [
+            "say hello",
+            "say hello and do nothing else",
+            "hi",
+            "hello",
+            "hey there",
+            "thanks",
+        ] {
+            let r = classify_tool_category(msg);
+            assert_eq!(r.category, "respond", "msg = {:?}, scores = {:?}", msg, r.scores);
+        }
+    }
+    #[test]
+    fn write_commands_dont_land_in_respond() {
+        for msg in ["create a file foo.rs", "write a hello world program", "fix the build"] {
+            let r = classify_tool_category(msg);
+            assert_ne!(r.category, "respond", "msg = {:?} should NOT be respond, got {} scores = {:?}", msg, r.category, r.scores);
+        }
+    }
 }
