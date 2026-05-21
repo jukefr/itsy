@@ -159,6 +159,14 @@ async function executeTool(name, args, ctx) {
       }
       const dir = path.dirname(filePath);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      // Guard against corrupted large writes — if content is suspiciously large
+      // (>200KB) or empty after a JSON parse error, refuse rather than corrupt.
+      if (!args.content && args.content !== '') {
+        return { error: `write_file: content is missing or undefined for ${args.path}` };
+      }
+      if (args.content.length > 200 * 1024) {
+        return { error: `write_file: content too large (${Math.round(args.content.length/1024)}KB > 200KB limit). Use patch for large edits or split into multiple smaller files.` };
+      }
       const existed = fs.existsSync(filePath);
       const oldContent = existed ? fs.readFileSync(filePath, 'utf-8') : null;
       // Snapshot for auto-rollback (Feature 9). No-op if no checkpoint open.

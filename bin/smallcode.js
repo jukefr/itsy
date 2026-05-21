@@ -923,8 +923,34 @@ async function runAgentLoop(userMessage, config) {
             } catch {}
           }
           if (!repaired) {
-            toolArgs = {};
-            console.log(`  \x1b[31m✗ Failed to parse args for ${toolName}\x1b[0m`);
+            // Last-resort fallback for write_file: try regex extraction of path + content
+            // before giving up entirely. The most common failure mode is a large file
+            // content with unescaped quotes that breaks JSON.parse — we can often still
+            // extract the path and a truncated content.
+            if (toolName === 'write_file' && typeof tc.function.arguments === 'string') {
+              try {
+                const raw = tc.function.arguments;
+                const pathMatch = raw.match(/"path"\s*:\s*"([^"]+)"/);
+                const contentMatch = raw.match(/"content"\s*:\s*"([\s\S]+?)(?=",\s*"|\s*}\s*$)/);
+                if (pathMatch) {
+                  // Unescape basic JSON escape sequences
+                  const unescape = s => s
+                    .replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\r/g, '')
+                    .replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+                  toolArgs = {
+                    path: pathMatch[1],
+                    content: contentMatch ? unescape(contentMatch[1]) : '',
+                  };
+                  repaired = true;
+                  if (_fullscreenRef) _fullscreenRef.addTool('repair', 'ok', `regex-extracted write_file args`);
+                  else console.log(`  \x1b[33m⚠ Repaired write_file args via regex extraction\x1b[0m`);
+                }
+              } catch {}
+            }
+            if (!repaired) {
+              toolArgs = {};
+              console.log(`  \x1b[31m✗ Failed to parse args for ${toolName}\x1b[0m`);
+            }
           }
         }
 
@@ -1527,7 +1553,7 @@ function buildCompactSystemPrompt(taskType, messages) {
   let prompt = `You are SmallCode, a coding agent. Working directory: ${process.cwd()}
 OS: ${os}${osHint}${bootstrapLine}
 
-Rules: Use patch for edits (not full rewrites). Prefer compound tools. Be concise. ACT immediately — do not ask for confirmation unless the task is genuinely ambiguous. If asked to read a file, read it. If asked to create something, create it. If asked about the project, read README.md or relevant files — do not answer from the workspace context line above.`;
+Rules: Use patch for edits (not full rewrites). Prefer compound tools. Be concise. ACT immediately — do not ask for confirmation unless the task is genuinely ambiguous. If asked to read a file, read it. If asked to create something, create it. If asked about the project, read README.md or relevant files — do not answer from the workspace context line above. For files over 100 lines, always use patch (search-and-replace) rather than write_file — large write_file calls frequently corrupt due to JSON encoding limits.`;
 
   // Only add tool-use instructions for tasks that need tools
   if (taskType !== 'explanation') {
