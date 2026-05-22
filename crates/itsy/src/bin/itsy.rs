@@ -188,27 +188,38 @@ struct AgentSession {
 
 /// Cheap heuristic token estimator (~4 chars per token).
 fn estimate_message_tokens(m: &Value) -> u64 {
-    let s = m
-        .get("content")
-        .and_then(|c| c.as_str())
-        .map(|s| s.len())
-        .unwrap_or(0);
-    // tool calls have args in arguments
-    let tc = m
+    // Mirrors JS estimateMessageTokens — chars/4 ceil.
+    let content_chars = match m.get("content") {
+        Some(Value::String(s)) => s.len(),
+        Some(other) if !other.is_null() => serde_json::to_string(other)
+            .map(|s| s.len())
+            .unwrap_or(0),
+        _ => 0,
+    };
+    // tool_calls messages carry function.name + function.arguments;
+    // upstream adds +20 per call as wire-overhead. Match exactly.
+    let tc_chars = m
         .get("tool_calls")
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
                 .map(|tc| {
-                    tc.pointer("/function/arguments")
+                    let name_len = tc
+                        .pointer("/function/name")
                         .and_then(|v| v.as_str())
                         .map(|s| s.len())
-                        .unwrap_or(0)
+                        .unwrap_or(0);
+                    let args_len = tc
+                        .pointer("/function/arguments")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.len())
+                        .unwrap_or(0);
+                    name_len + args_len + 20
                 })
                 .sum::<usize>()
         })
         .unwrap_or(0);
-    ((s + tc) as f64 / 4.0).ceil() as u64
+    ((content_chars + tc_chars) as f64 / 4.0).ceil() as u64
 }
 
 fn estimate_history_tokens(history: &[Value]) -> u64 {
@@ -937,10 +948,11 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
     // (tool_name, args). Catches identical mutating calls (like `rm -rf X`
     // 4 times in a row) that the regular dedup doesn't because the tool
     // is impure.
+    // `per_turn_repeats` is also used by other counters (empty-response
+    // retry, contract-gate refusals, contract-loop nudges, …). The
+    // identical-call repeat counter that used to live here was removed —
+    // see the "Spiral defense is upstream's" comment in the loop body.
     let mut per_turn_repeats: std::collections::HashMap<String, u32> = Default::default();
-    /// Hard cap: after this many identical (name, args) calls in one
-    /// turn we refuse and inject a [SYSTEM] hint instead of executing.
-    const MAX_IDENTICAL_REPEATS_PER_TURN: u32 = 3;
     let mut current_category: Option<String> = stage2_category;
 
     // Reset any pending Ctrl+C presses from earlier turns; the user starts
@@ -1217,68 +1229,15 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     );
                 }
 
-                // Per-turn hard repeat cap. Backstop for tools that dedup
-                // can't cache (mutating bash, etc.) — after N identical
-                // calls we refuse + inject a [SYSTEM] hint. If the model
-                // keeps trying past `BREAK_ON_REPEAT`, we abort the whole
-                // turn so the user gets the prompt back instead of watching
-                // 22 yellow warnings scroll by.
-                const BREAK_ON_REPEAT: u32 = 5;
-                let repeat_key = {
-                    use sha2::{Digest, Sha256};
-                    let args_canon = serde_json::to_string(&args).unwrap_or_default();
-                    let mut h = Sha256::new();
-                    h.update(name.as_bytes());
-                    h.update(b"|");
-                    h.update(args_canon.as_bytes());
-                    format!("{:x}", h.finalize())
-                };
-                let repeat_count = per_turn_repeats.entry(repeat_key.clone()).or_insert(0);
-                *repeat_count += 1;
-                if *repeat_count >= BREAK_ON_REPEAT {
-                    let msg = format!(
-                        "Stuck calling `{name}` with identical args ({} times) — skipping this call and asking you to take a different approach.",
-                        *repeat_count
-                    );
-                    println!("  \x1b[31m⚠ {msg}\x1b[0m");
-                    session.trace.lock().record_error("repeat_spiral", &msg);
-                    // Push as a tool result so the conversation history
-                    // stays coherent — the model now sees that this call
-                    // was refused and (hopefully) tries something else
-                    // on the next iteration. In non-interactive mode
-                    // returning would terminate the whole agent before
-                    // it produced any output, so we keep the loop alive
-                    // by skipping just this tool call. The mid-turn
-                    // tool-call cap still bounds the worst case.
-                    session.history.lock().push(json!({
-                        "role": "tool",
-                        "tool_call_id": id,
-                        "content": format!(
-                            "[ABORTED] {msg}\n\
-                             Reflect on what's blocking you. The result \
-                             of this call will not change — pick a \
-                             different file, command, or strategy."
-                        ),
-                    }));
-                    // Reset the per-turn repeat counter for THIS key so
-                    // we don't immediately re-abort on the next loop
-                    // iteration if the model picks the same call again.
-                    *repeat_count = 0;
-                    continue;
-                }
-                if *repeat_count > MAX_IDENTICAL_REPEATS_PER_TURN {
-                    let hint = format!(
-                        "[SYSTEM] You have called `{name}` with identical arguments {} times this turn. The result will not change. Stop repeating it and take a different approach, or describe what's blocking you.",
-                        *repeat_count
-                    );
-                    session.history.lock().push(json!({
-                        "role": "tool",
-                        "tool_call_id": id,
-                        "content": &hint,
-                    }));
-                    println!("  \x1b[33m⚠ {hint}\x1b[0m");
-                    continue;
-                }
+                // Spiral defense is upstream's: dedup catches pure-tool
+                // repeats, improvement_attempts catches failed mutating
+                // calls (bash/patch), the per-turn tool-call cap bounds
+                // the worst case. itsy had a Rust-only BREAK_ON_REPEAT
+                // counter here that aborted after 5 identical calls and
+                // then RESET to 0 — turning into a 5-emit / 1-abort
+                // cycle that never escapes. Removed: no bench evidence
+                // it helped, the reset bug made the spiral worse than
+                // upstream's bounded "spam until tool-call cap" path.
 
                 // Dedup lookup. Mirrors upstream:
                 //   let cached = dedup.lookup(name, args);

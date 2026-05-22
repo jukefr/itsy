@@ -21,6 +21,23 @@ When that SHA bumps, re-baseline all audits against the new tree.
   exposing the tools without backing impl would be a regression).
   5 contract tools added (novel, documented). `get_all_tools` routing
   logic matches upstream behaviour. No silent additions to revert.
+- **model_client.rs** — `chat_completion` reverted to upstream shape:
+  one POST, one transient-4xx retry. Adaptive max_tokens doubling +
+  `looks_like_budget_overflow` heuristic + 6 tests removed (no bench
+  evidence, caused network errors in bench). Kept (INTENTIONAL):
+  `apply_thinking_budget` (necessary for Qwen3 thinking models),
+  `max_tokens = tokens + 1024` (scales with thinking budget),
+  `chat_log::record` (observability, no behaviour change).
+- **bin/itsy.rs** — small helpers audited (estimate_message_tokens,
+  get_*_context fns). One regression fixed: `estimate_message_tokens`
+  was missing JSON-stringify for non-string content + missing
+  `name.length + 20` overhead per tool_call. Spiral defense
+  `BREAK_ON_REPEAT` / `MAX_IDENTICAL_REPEATS_PER_TURN` removed: not in
+  upstream, reset-on-abort bug created a 5-emit/1-abort cycle that
+  never escaped (bench-confirmed in fix-git trials). Upstream relies on
+  dedup + improvementAttempts + tool-call cap; itsy now does the same.
+  REMAINING: handle_turn body (~1200 lines) full function-by-function
+  audit deferred — needs dedicated session.
 
 ## States
 
@@ -42,7 +59,7 @@ These run on every turn. Highest impact for bugs.
 | `crates/itsy/src/executor.rs` | `bin/executor.js` | `PARTIAL` | — (port-incomplete; see notes) |
 | `crates/itsy/src/tools.rs` | `bin/tools.js` | `AUDITED` | (no changes needed) |
 | `crates/itsy/src/model_client.rs` | `bin/model_client.js` | `AUDITED` | (pending) |
-| `crates/itsy/src/bin/itsy.rs` | `bin/smallcode.js` | `NOT_AUDITED` | — |
+| `crates/itsy/src/bin/itsy.rs` | `bin/smallcode.js` | `PARTIAL` | (pending) |
 
 ## Tier 2 — model + governance
 
