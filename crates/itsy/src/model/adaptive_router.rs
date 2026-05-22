@@ -399,6 +399,8 @@ mod tests {
                 tool_routing: "direct".into(),
                 web_browse: false,
                 shell_persist: true,
+                shell_contain: false,
+                rtk: true,
             },
             tui: TuiConfig { show_token_usage: false, auto_approve: false, theme: "dark".into(), classic: false },
             escalation: EscalationConfig {
@@ -412,6 +414,18 @@ mod tests {
             git: GitConfig { auto_commit: false },
             features: crate::config::FeaturesConfig::default(),
             models: None,
+            limits: crate::config::LimitsConfig::default(),
+            security: crate::config::SecurityConfig::default(),
+            diff: crate::config::DiffConfig::default(),
+            filetree: crate::config::FileTreeConfig::default(),
+            snapshots: crate::config::SnapshotPathsConfig::default(),
+            code_graph: crate::config::CodeGraphConfig::default(),
+            tests: crate::config::TestsConfig::default(),
+            traces: crate::config::TracesConfig::default(),
+            dedup: crate::config::DedupConfig::default(),
+            evidence: crate::config::EvidenceConfig::default(),
+            plugins: crate::config::PluginsConfig::default(),
+            diag: crate::config::DiagConfig::default(),
         }
     }
 

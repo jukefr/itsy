@@ -23,7 +23,6 @@
 
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
 
 /// Root of all itsy state.
 pub fn config_dir() -> PathBuf {
@@ -83,24 +82,50 @@ pub fn tool_scores(cwd: &Path) -> PathBuf {
 }
 
 /// Derive a stable, human-readable project id from a working directory.
-/// The id is `<slug>-<hash10>`: the slug is the canonical basename with
-/// non-alphanumerics replaced by `-`, the hash is the first 10 hex chars of
-/// sha256 of the canonical absolute path.
+///
+/// The id is the canonical absolute path with `/` → `-`, leading dash
+/// preserved (mirrors Claude Code's project-slug convention). Examples:
+///
+/// * `/home/user/Documents/src/openclaw/life`
+///   → `-home-user-Documents-src-openclaw-life`
+/// * `/workspace/itsy`
+///   → `-workspace-itsy`
+///
+/// Characters that aren't ASCII alphanumeric, `-`, `_`, or `.` are
+/// also flattened to `-` so paths with spaces or unicode round-trip
+/// safely. Multiple consecutive `-` are collapsed.
 pub fn project_id(cwd: &Path) -> String {
     let canon = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
-    let mut h = Sha256::new();
-    h.update(canon.to_string_lossy().as_bytes());
-    let hex = format!("{:x}", h.finalize());
-    let short = &hex[..10];
-    let slug: String = canon
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "project".into())
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
-        .collect();
-    let slug = if slug.is_empty() { "project".into() } else { slug };
-    format!("{slug}-{short}")
+    let raw = canon.to_string_lossy();
+    let mut out = String::with_capacity(raw.len());
+    let mut prev_dash = false;
+    for c in raw.chars() {
+        let mapped = if c == '/' || c == '\\' {
+            '-'
+        } else if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+            c
+        } else {
+            '-'
+        };
+        if mapped == '-' {
+            if prev_dash {
+                continue;
+            }
+            prev_dash = true;
+        } else {
+            prev_dash = false;
+        }
+        out.push(mapped);
+    }
+    if out.is_empty() {
+        return "project".into();
+    }
+    // Strip a single trailing `-` (e.g. when cwd was "/") but keep a
+    // leading `-` so absolute paths stay distinct from relative ones.
+    if out.ends_with('-') && out.len() > 1 {
+        out.pop();
+    }
+    out
 }
 
 /// Eagerly create every directory the project will need. Safe to call on
@@ -139,6 +164,20 @@ mod tests {
         let p2 = std::env::temp_dir().join("subdir-that-may-not-exist");
         // Doesn't need to exist — canonicalize falls back to the literal path.
         assert_ne!(project_id(&p1), project_id(&p2));
+    }
+
+    #[test]
+    fn project_id_is_path_with_slashes_as_dashes() {
+        let p = PathBuf::from("/home/user/Documents/src/openclaw/life");
+        // canonicalize on a non-existent path falls back to the literal,
+        // so we get a deterministic string here.
+        assert_eq!(project_id(&p), "-home-user-Documents-src-openclaw-life");
+    }
+
+    #[test]
+    fn project_id_collapses_consecutive_dashes_and_handles_spaces() {
+        let p = PathBuf::from("/path with spaces/and//doubles");
+        assert_eq!(project_id(&p), "-path-with-spaces-and-doubles");
     }
 
     #[test]
