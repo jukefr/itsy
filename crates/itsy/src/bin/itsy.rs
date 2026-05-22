@@ -1714,69 +1714,88 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             }
         }
 
-        // Contract guard: refuse a "done / shipped / all green" claim
-        // while the active contract still has pending assertions. The
-        // model has to either flip the assertions itself with
-        // `mark_assertion`, or admit they're not done — no claiming
-        // success while the contract disagrees.
+        // Contract close-the-loop guard. If a contract is active AND
+        // unclosed when the model tries to end the turn (final text
+        // response, no tool calls this iteration), refuse: the model
+        // must call mark_assertion for each pending assertion and then
+        // close_contract. This is what makes the contract actually do
+        // its job — without it, the model proposes the contract and
+        // walks away, defeating the whole point of the feature.
+        //
+        // Bounded to MAX_CONTRACT_LOOP retries so we don't spin
+        // forever on a model that refuses to engage with the contract
+        // tools.
         if itsy::settings::get().contract {
             if let Some(c) = itsy::session::contract::current() {
                 let counts = c.counts();
-                if counts.pending > 0 {
-                    if let Some(content) = &content_opt {
-                        let lower = content.to_lowercase();
-                        // Match the most common "I'm done" wordings.
-                        // Narrow on purpose: don't fire on plain status
-                        // updates like "step 1 done".
-                        let claims_done = [
-                            "all done", "all set", "fully complete", "we're done",
-                            "task complete", "task is complete", "implementation complete",
-                            "everything works", "all tests pass", "all assertions",
-                            "everything is working", "successfully completed",
-                            "feature complete", "ready to ship",
-                        ]
-                        .iter()
-                        .any(|p| lower.contains(p));
-                        if claims_done {
-                            const MAX_CONTRACT_NUDGES: u32 = 2;
-                            let n = *per_turn_repeats
-                                .entry("__contract_pending".into())
-                                .and_modify(|n| *n += 1)
-                                .or_insert(1);
-                            if n <= MAX_CONTRACT_NUDGES {
-                                println!(
-                                    "  \x1b[33m⚠ Contract still has {} pending assertion(s) — model claimed done ({n}/{MAX_CONTRACT_NUDGES})\x1b[0m",
-                                    counts.pending
-                                );
-                                let pending_ids: Vec<&str> = c
-                                    .assertions
-                                    .iter()
-                                    .filter(|a| a.state
-                                        == itsy::session::contract::AssertionState::Pending)
-                                    .map(|a| a.id.as_str())
-                                    .collect();
-                                let mut hist = session.history.lock();
-                                hist.push(json!({"role": "assistant", "content": content}));
-                                hist.push(json!({
-                                    "role": "user",
-                                    "content": format!(
-                                        "[SYSTEM] You said the work is done, but the active contract still has these pending assertion(s): {}. \
-For each one, either call `mark_assertion` with a real verification command and observation, or `mark_assertion` it `skipped` with a justification. \
-Then call `close_contract` `completed`.",
-                                        pending_ids.join(", ")
-                                    ),
-                                }));
-                                continue;
-                            }
-                            session.trace.lock().record_error(
-                                "contract_pending_at_close",
-                                &format!(
-                                    "model claimed done with {} assertions still pending",
-                                    counts.pending
-                                ),
-                            );
+                let needs_more_work = counts.pending > 0 || counts.failed > 0;
+                if needs_more_work {
+                    const MAX_CONTRACT_LOOP: u32 = 4;
+                    let n = *per_turn_repeats
+                        .entry("__contract_loop".into())
+                        .and_modify(|n| *n += 1)
+                        .or_insert(1);
+                    if n <= MAX_CONTRACT_LOOP {
+                        println!(
+                            "  \x1b[33m⚠ contract not closed: {} pending, {} failed — re-asking model to finish ({n}/{MAX_CONTRACT_LOOP})\x1b[0m",
+                            counts.pending, counts.failed
+                        );
+                        // Build a precise list of what's outstanding.
+                        let pending_ids: Vec<&str> = c
+                            .assertions
+                            .iter()
+                            .filter(|a| a.state
+                                == itsy::session::contract::AssertionState::Pending)
+                            .map(|a| a.id.as_str())
+                            .collect();
+                        let failed_ids: Vec<&str> = c
+                            .assertions
+                            .iter()
+                            .filter(|a| a.state
+                                == itsy::session::contract::AssertionState::Failed)
+                            .map(|a| a.id.as_str())
+                            .collect();
+                        let mut hist = session.history.lock();
+                        if let Some(content) = &content_opt {
+                            hist.push(json!({"role": "assistant", "content": content}));
                         }
+                        let mut msg = String::from(
+                            "[SYSTEM] The turn cannot end yet — the contract is not closed.\n\n"
+                        );
+                        if !pending_ids.is_empty() {
+                            msg.push_str(&format!(
+                                "Pending assertions: {}. For each one, run a verification command \
+                                 (test, script, etc.) and call `mark_assertion` with the id, state \
+                                 (passed/failed/skipped), the command you ran, exit_code, and the \
+                                 actual observation (not \"OK\").\n\n",
+                                pending_ids.join(", ")
+                            ));
+                        }
+                        if !failed_ids.is_empty() {
+                            msg.push_str(&format!(
+                                "Failed assertions: {}. Fix the underlying issue (re-edit files, \
+                                 re-run tests) and re-mark passed. If genuinely impossible, mark \
+                                 skipped with a justification.\n\n",
+                                failed_ids.join(", ")
+                            ));
+                        }
+                        msg.push_str(
+                            "Once every assertion is non-pending and non-failed, call \
+                             `close_contract` `completed`. If you've given up, call \
+                             `close_contract` `aborted` with the current state — but try to fix \
+                             real failures first."
+                        );
+                        hist.push(json!({"role": "user", "content": msg}));
+                        continue;
                     }
+                    // Exhausted the retry budget — record + let turn end.
+                    session.trace.lock().record_error(
+                        "contract_loop_exhausted",
+                        &format!(
+                            "model gave up; {} pending + {} failed at end of turn",
+                            counts.pending, counts.failed
+                        ),
+                    );
                 }
             }
         }
