@@ -93,6 +93,16 @@ pub fn detect_full(cwd: &Path) -> Option<DetectedRunner> {
     if s.test_disable {
         return None;
     }
+    if let Ok(cmd) = std::env::var("ITSY_TEST_RUNNER") {
+        if !cmd.is_empty() {
+            return Some(DetectedRunner {
+                command: cmd,
+                framework: "custom".into(),
+                lang: "custom".into(),
+                confidence: 1.0,
+            });
+        }
+    }
     if let Some(override_cmd) = s.test_runner.as_deref() {
         if !override_cmd.is_empty() {
             return Some(DetectedRunner {
