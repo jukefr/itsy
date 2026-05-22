@@ -159,14 +159,19 @@ impl PluginLoader {
     }
 
     /// Load all plugins from the canonical config-dir location.
-    pub fn load_all(&mut self, _root: &Path) {
+    pub fn load_all(&mut self, root: &Path) {
         if !env_enabled() {
             return;
         }
         let enable_only = env_set("ITSY_PLUGINS_ENABLE");
         let disabled = env_set_or_empty("ITSY_PLUGINS_DISABLE");
 
-        let dirs: Vec<PathBuf> = vec![crate::paths::plugins_dir()];
+        // Search both project-local (.itsy/plugins/) and global
+        // (~/.config/itsy/plugins/), matching JS's order: project first.
+        let dirs: Vec<PathBuf> = vec![
+            root.join(".itsy").join("plugins"),
+            crate::paths::plugins_dir(),
+        ];
 
         for dir in dirs {
             if !dir.exists() {

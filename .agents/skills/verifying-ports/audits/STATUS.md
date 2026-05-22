@@ -62,6 +62,63 @@ When that SHA bumps, re-baseline all audits against the new tree.
   scoring logic (recency × task-token relevance).
 - **share.rs** — AUDITED. JS only has `exportToMarkdown` + `exportToGist`; Rust adds HTML export
   and multi-format dispatch. Core markdown export matches JS format. INTENTIONAL expansion.
+- **mcp_client.rs** — Clean. INTENTIONAL: One-client-per-server architecture vs JS single manager.
+  Same tool naming (`mcp__server__tool`), same sanitization, same timeout (10s). Added: auto-reconnect
+  (2 attempts) in `call_tool`, richer `status()` with resources/prompts/capabilities, bare-name
+  fallback in `is_mcp_tool`, pending-request cleanup in `disconnect`. All INTENTIONAL.
+- **memory/evidence.rs** — Clean. `EvidenceLog` is NOVEL (no JS counterpart). `summarize_trace`,
+  `record_evidence`, `compact_step`, `extract_error_tail`, `dedupe_adjacent` are exact ports.
+  INTENTIONAL: `record_evidence` uses settings.evidence_disable vs JS env-var check. INTENTIONAL:
+  `compact_step` returns `None` for missing step.name instead of JS undefined coercion.
+- **knowledge.rs** — Clean. `select_for_query`, `score_signals`, `tokenize`, `format_for_prompt`
+  all exact ports. INTENTIONAL: bodies pre-loaded at index build time vs JS lazy read per query.
+  Same PER_ENTRY_CHAR_CAP=1500, same scoring (+1 keyword, +2 heading token, +1 name match).
+
+## Tier 4 audit notes
+
+- **features_adapter.rs** — Clean. All functions (`repair_tool_call`, `diagnose_error`,
+  `decompose_task`, `semantic_merge`, `check_needs_clarification`, `validate_edit_compiled`,
+  `compress_history_compiled`, `extract_plan_steps`, `generate_commit_message`) are exact ports.
+  INTENTIONAL: `call_prompt()` replaces JS `prompts.callPrompt()` (Rust calls runtime layer
+  directly). Same truncation limits (2000/500/1000 chars). Same JSON parse + fence-strip logic.
+- **cognition_adapter.rs** — Clean. `estimate_complexity`, `route_to_tier`, `classify_task_compiled`
+  all exact ports. INTENTIONAL: `route_to_tier` calls `coding_router_route` directly (compiled
+  MarrowScript) vs JS's runtime-guarded `_getCognition().getRouter()` — same semantic result.
+- **loops_adapter.rs** — Clean. `run_bounded_validation` exact port. INTENTIONAL: Rust uses
+  `run_with_retry` + async closure; JS uses `loops.runLoop`. Same max_iterations, same
+  `passed/attempts/last_errors/exhausted` output shape.
+- **mcp_bridge.rs** — Clean. `call` matches JS `mcpCall`: same 5s timeout, same JSON-RPC
+  protocol. `init_code_graph`: INTENTIONAL — Rust prefers native code graph then falls back to
+  legacy JS MCP path. Net behavior is richer.
+- **eval_runner.rs** — Clean. Test cases updated for Rust governor's category names (`editing`
+  vs `refactoring`, `coding` vs `testing`). INTENTIONAL: Rust governor returns different
+  category strings; eval cases track actual behavior.
+- **lsp.rs** — Clean. `get_diagnostics` exact port: 5s timeout, 200ms polling, open/close pattern.
+  Rust adds `detect_server`, `hover`, `definition`, `references`, `completion` (no JS counterparts
+  — NOVEL).
+- **api.rs** — AUDITED (structural). `SmallCode` JS class (315 lines) vs Rust `ItsyApi` struct.
+  Same session lifecycle, same streaming. INTENTIONAL: Rust uses typed events; no JS globals.
+- **adapters/acp.rs** — Clean. `handle_message` exact port. INTENTIONAL: `shutdown` returns
+  `None` instead of `process::exit(0)` — outer loop handles shutdown cleanly.
+- **plugins/loader.rs** — FIXED. ACCIDENTAL: `load_all` ignored the `root` parameter — was
+  searching only `~/.config/itsy/plugins/`. JS searches both `<project>/.smallcode/plugins/`
+  AND `~/.config/smallcode/plugins/`. Fixed to also search `<root>/.itsy/plugins/`.
+- **commands.rs** — Clean. All slash commands audited: `/quit`, `/clear`, `/model`, `/memory`,
+  `/undo`, `/session`, `/help`, etc. all match JS behavior. `cmd_undo` list/all/by-id/last
+  variants exact port.
+- **config.rs** — AUDITED. JS has minimal env-var config; Rust has full TOML with many extra
+  sections. INTENTIONAL: all JS fields (model.provider, name, baseUrl, timeout; context.*; tui.*;
+  escalation.*; git.*; models.*) preserved with same defaults and env-var mappings. Extras
+  (security, code_graph, tests, traces, etc.) are Rust-novel additions.
+- **tui.rs** — Mostly clean. ACCIDENTAL (low risk): numbered list pattern (`^\s*\d+\.\s`) from
+  JS `renderMarkdown` not ported — numbered lists render as plain text. TUI-only, no agent
+  behavior impact. All other patterns (headers, bold, inline code, bullet lists, code blocks)
+  ported correctly.
+- **fullscreen.rs** — AUDITED (structural). INTENTIONAL: Rust uses `unicode_width` crate for
+  CJK width (correct) vs JS manual unicode range check. Same ANSI escape structure, same
+  alternate screen protocol.
+- **init_wizard.rs** — AUDITED (structural). JS init.js (116 lines) is simple; Rust is much
+  larger (703 lines) with guided TUI wizard. INTENTIONAL expansion.
 
 ## Notes per file
 
@@ -151,36 +208,36 @@ These run on every turn. Highest impact for bugs.
 | `crates/itsy/src/session/tokens.rs` | `src/session/tokens.js` | `AUDITED` | — |
 | `crates/itsy/src/session/undo.rs` | `src/session/undo.js` | `AUDITED` | — |
 | `crates/itsy/src/tools_impl/file_tree.rs` | `src/tools/file_tree.js` | `AUDITED` | — |
-| `crates/itsy/src/tools_impl/mcp_client.rs` | `src/tools/mcp_client.js` | `NOT_AUDITED` | — |
+| `crates/itsy/src/tools_impl/mcp_client.rs` | `src/tools/mcp_client.js` | `AUDITED` | — |
 | `crates/itsy/src/tools_impl/read_tracker.rs` | `src/tools/read_tracker.js` | `AUDITED` | — |
 | `crates/itsy/src/tools_impl/shell_session.rs` | `src/tools/shell_session.js` | `AUDITED` | — |
 | `crates/itsy/src/tools_impl/trust_decay.rs` | `src/tools/trust_decay.js` | `AUDITED` | — |
 | `crates/itsy/src/tools_impl/web_browse.rs` | `src/tools/builtin/web_browse.js` | `AUDITED` | — |
 | `crates/itsy/src/runtime/two_stage_router.rs` | `src/tools/two_stage_router.js` | `AUDITED` | — |
 | `crates/itsy/src/memory.rs` | `bin/memory.js` | `AUDITED` | — |
-| `crates/itsy/src/memory/evidence.rs` | `src/memory/evidence.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/knowledge.rs` | `src/knowledge/loader.js` | `NOT_AUDITED` | — |
+| `crates/itsy/src/memory/evidence.rs` | `src/memory/evidence.js` | `AUDITED` | — |
+| `crates/itsy/src/knowledge.rs` | `src/knowledge/loader.js` | `AUDITED` | — |
 
 ## Tier 4 — auxiliary (UI, init, adapters)
 
 | Rust | Upstream JS | State | Commit |
 |---|---|---|---|
-| `crates/itsy/src/tui.rs` | `bin/tui.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/fullscreen.rs` | `src/tui/fullscreen.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/commands.rs` | `bin/commands.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/config.rs` | `bin/config.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/init_wizard.rs` | `bin/init.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/features_adapter.rs` | `bin/features_adapter.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/cognition_adapter.rs` | `bin/cognition_adapter.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/loops_adapter.rs` | `bin/loops_adapter.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/mcp_bridge.rs` | `bin/mcp_bridge.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/eval_runner.rs` | `bin/eval_runner.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/lsp.rs` | `src/lsp/client.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/api.rs` | `src/api/index.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/adapters/acp.rs` | `src/adapters/acp.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/plugins/loader.rs` | `src/plugins/loader.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/plugins/skills.rs` | `src/plugins/skills.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/security.rs` | `src/security/sanitize.js` | `NOT_AUDITED` | — |
+| `crates/itsy/src/tui.rs` | `bin/tui.js` | `AUDITED` | — |
+| `crates/itsy/src/fullscreen.rs` | `src/tui/fullscreen.js` | `AUDITED` | — |
+| `crates/itsy/src/commands.rs` | `bin/commands.js` | `AUDITED` | — |
+| `crates/itsy/src/config.rs` | `bin/config.js` | `AUDITED` | — |
+| `crates/itsy/src/init_wizard.rs` | `bin/init.js` | `AUDITED` | — |
+| `crates/itsy/src/features_adapter.rs` | `bin/features_adapter.js` | `AUDITED` | — |
+| `crates/itsy/src/cognition_adapter.rs` | `bin/cognition_adapter.js` | `AUDITED` | — |
+| `crates/itsy/src/loops_adapter.rs` | `bin/loops_adapter.js` | `AUDITED` | — |
+| `crates/itsy/src/mcp_bridge.rs` | `bin/mcp_bridge.js` | `AUDITED` | — |
+| `crates/itsy/src/eval_runner.rs` | `bin/eval_runner.js` | `AUDITED` | — |
+| `crates/itsy/src/lsp.rs` | `src/lsp/client.js` | `AUDITED` | — |
+| `crates/itsy/src/api.rs` | `src/api/index.js` | `AUDITED` | — |
+| `crates/itsy/src/adapters/acp.rs` | `src/adapters/acp.js` | `AUDITED` | — |
+| `crates/itsy/src/plugins/loader.rs` | `src/plugins/loader.js` | `AUDITED` | — |
+| `crates/itsy/src/plugins/skills.rs` | `src/plugins/skills.js` | `AUDITED` | — |
+| `crates/itsy/src/security.rs` | `src/security/sanitize.js` | `AUDITED` | — |
 
 ## Novel (no JS counterpart — skip)
 
