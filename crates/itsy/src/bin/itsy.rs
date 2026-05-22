@@ -594,6 +594,15 @@ fn build_full_system_prompt(
             prompt.push_str(&itsy::session::contract::render_for_prompt(&c));
             prompt.push_str("\nRules: mark each assertion with `mark_assertion` (passed/failed/skipped) as you verify it. \
                 `close_contract completed` is refused while any assertion is `pending`.\n");
+        } else if matches!(task_type, "coding" | "editing" | "backend" | "debugging" | "multi_step") {
+            // No contract yet, but the task is action-y. Teach the
+            // model about the tool so it has a chance to pick it up.
+            prompt.push_str(
+                "\n\nWhen the task has a clear notion of 'done' (a fix to verify, a feature to ship, files to produce), \
+                start by calling `propose_contract` with a short brief and 2–6 testable assertions you'll prove. \
+                Then do the work, calling `mark_assertion` with command-line evidence as each one is verified. \
+                Finish with `close_contract completed` — it's refused while any assertion is pending, so don't claim done unless every one is verified.\n",
+            );
         }
     }
 
@@ -1005,6 +1014,69 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                         }
                     }
                 };
+
+                // Contract-first gate: when the contract feature is on
+                // and the model is on an action-y task without an
+                // active contract yet, refuse the first mutating tool
+                // calls until it commits to a contract. Read-only
+                // exploration and the contract tools themselves stay
+                // free. Bounded by `MAX_CONTRACT_GATE_REFUSALS` so a
+                // model that genuinely can't produce a contract
+                // doesn't get stuck forever.
+                const MAX_CONTRACT_GATE_REFUSALS: u32 = 3;
+                let is_contract_tool = matches!(
+                    name.as_str(),
+                    "propose_contract"
+                        | "mark_assertion"
+                        | "mark_feature"
+                        | "contract_status"
+                        | "close_contract"
+                );
+                // Gate fires for any task type EXCEPT pure-explanation —
+                // those don't produce mutating side effects anyway.
+                // (Earlier we matched only a whitelist of action tasks
+                // and lost coverage on `search` / `shell` task types
+                // where the model still git-merge'd / git-commit'd.)
+                let task_is_action = !matches!(task_type, "explanation" | "respond");
+                let is_mutating = match name.as_str() {
+                    "write_file" | "append_file" | "patch" | "read_and_patch"
+                    | "create_and_run" | "run" | "memory_remember" | "memory_forget" => true,
+                    "bash" => !itsy::tools_impl::dedup::bash_is_read_only(&args),
+                    _ => false,
+                };
+                if itsy::settings::get().contract
+                    && task_is_action
+                    && itsy::session::contract::current().is_none()
+                    && !is_contract_tool
+                    && is_mutating
+                {
+                    let refused = per_turn_repeats
+                        .entry("__contract_gate".into())
+                        .and_modify(|n| *n += 1)
+                        .or_insert(1);
+                    if *refused <= MAX_CONTRACT_GATE_REFUSALS {
+                        println!(
+                            "  \x1b[33m⚠ blocked `{name}` — define what 'done' means first ({}/{})\x1b[0m",
+                            *refused, MAX_CONTRACT_GATE_REFUSALS
+                        );
+                        session.history.lock().push(json!({
+                            "role": "tool",
+                            "tool_call_id": id,
+                            "content": "[BLOCKED] No contract yet. Before any mutating action, call `propose_contract` \
+                                with: (1) a short title, (2) a 2-3 sentence brief, (3) 2-6 assertions you'll verify \
+                                (each one-line, testable, ≤120 chars; e.g. \"Exit code is 0 when running pytest\", \
+                                \"about.md byte-for-byte matches the lost commit's version\"). Read-only tools \
+                                (read_file, search, find_files, git status/log/show, …) are still allowed."
+                        }));
+                        continue;
+                    }
+                    // Exhausted the gate budget — let the call through
+                    // so the model isn't permanently blocked.
+                    session.trace.lock().record_error(
+                        "contract_gate_exhausted",
+                        "model never proposed a contract; letting tools through",
+                    );
+                }
 
                 // Per-turn hard repeat cap. Backstop for tools that dedup
                 // can't cache (mutating bash, etc.) — after N identical

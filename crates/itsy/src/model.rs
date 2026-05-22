@@ -7,3 +7,4 @@ pub mod adaptive_temp;
 pub mod reviewer;
 pub mod thinking_budget;
 pub mod chain;
+pub mod chat_log;

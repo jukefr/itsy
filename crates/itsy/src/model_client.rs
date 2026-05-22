@@ -148,6 +148,13 @@ pub async fn chat_completion(ctx: &ChatContext<'_>) -> Option<Value> {
         let parsed: Option<Value> = res.json().await.ok();
         let Some(value) = parsed else { return None };
 
+        // Persist the raw request + response (best-effort; never
+        // blocks the agent loop). This is the only place we can see
+        // `reasoning_content` / `<think>` blocks / finish_reason /
+        // token usage verbatim — the rest of the code only looks at
+        // the parsed-out content + tool_calls.
+        crate::model::chat_log::record(&body, &value, attempt);
+
         // Was this an overflow? Empty content + no tool calls +
         // finish_reason="length" means the model ran out of room
         // before producing anything useful. Bump and retry.
