@@ -68,25 +68,23 @@ pub struct FileStateTracker {
 
 impl FileStateTracker {
     fn new() -> Self {
-        let disabled = std::env::var("ITSY_DIFF_CONTEXT").ok().as_deref() != Some("true");
-        let context_lines = std::env::var("ITSY_DIFF_CONTEXT_LINES")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(DEFAULT_CONTEXT_LINES);
-        let max_ratio = std::env::var("ITSY_DIFF_MAX_RATIO")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(DEFAULT_MAX_RATIO);
-        let ttl_minutes = std::env::var("ITSY_DIFF_TTL_MINUTES")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(DEFAULT_TTL_MINUTES);
+        let s = crate::settings::get();
         Self {
             known: Mutex::new(HashMap::new()),
-            disabled,
-            context_lines,
-            max_ratio,
-            ttl: Duration::from_secs(ttl_minutes * 60),
+            disabled: !s.diff_context,
+            context_lines: if s.diff_context_lines > 0 {
+                s.diff_context_lines
+            } else {
+                DEFAULT_CONTEXT_LINES
+            },
+            max_ratio: if s.diff_max_ratio > 0.0 {
+                s.diff_max_ratio
+            } else {
+                DEFAULT_MAX_RATIO
+            },
+            ttl: Duration::from_secs(
+                if s.diff_ttl_minutes > 0 { s.diff_ttl_minutes } else { DEFAULT_TTL_MINUTES } * 60,
+            ),
         }
     }
 

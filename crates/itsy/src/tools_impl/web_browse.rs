@@ -54,7 +54,7 @@ fn assert_url_safe(raw: &str) -> Result<Url> {
     if host == "169.254.169.254" || host == "metadata.google.internal" {
         return Err(anyhow!("refused: cloud-metadata host"));
     }
-    if std::env::var("ITSY_ALLOW_PUBLIC_ENDPOINTS").ok().as_deref() == Some("1") {
+    if crate::settings::get().allow_public_endpoints {
         return Ok(url);
     }
     if host == "localhost" || host == "::1" || host.starts_with("127.") {
@@ -180,8 +180,8 @@ pub async fn web_search(query: &str, limit: usize) -> Result<Vec<WebSearchResult
         }
     }
     // SearXNG fallback (operator-configured).
-    if let Ok(url) = std::env::var("ITSY_SEARX_URL") {
-        if let Ok(mut r) = search_searxng(&client, &url, query, limit).await {
+    if let Some(url) = crate::settings::get().searx_url.as_deref() {
+        if let Ok(mut r) = search_searxng(&client, url, query, limit).await {
             if !r.is_empty() {
                 dedupe_by_url(&mut r);
                 return Ok(r);
@@ -320,7 +320,7 @@ pub async fn web_fetch_page(url: &str, timeout_secs: u64) -> Result<WebPage> {
         .redirect(reqwest::redirect::Policy::limited(3))
         .build()?;
 
-    if std::env::var("ITSY_WEB_RESPECT_ROBOTS").ok().as_deref() == Some("1") {
+    if crate::settings::get().web_respect_robots {
         let robots = fetch_robots(&client, &safe).await;
         if !robots_allows(&robots, safe.path()) {
             return Err(anyhow!("refused: robots.txt disallows `{}`", safe.path()));

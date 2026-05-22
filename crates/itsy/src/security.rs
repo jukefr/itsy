@@ -110,16 +110,13 @@ impl Default for PathOptions {
         // models tend to do). Sensitive paths are still blocked by the
         // SENSITIVE_PATH_RES list further down.
         //
-        // Default ON; set ITSY_ALLOW_OUTSIDE_PATHS=false to force the
-        // legacy strict-confinement behavior.
-        let allow_outside = match std::env::var("ITSY_ALLOW_OUTSIDE_PATHS")
-            .ok()
-            .as_deref()
-        {
-            Some("0") | Some("false") | Some("no") | Some("off") => false,
-            _ => true,
-        };
-        Self { allow_outside, allow_home: false }
+        // Default ON; set `[security].allow_outside_paths = false`
+        // (or `--allow-outside-paths false`) to force the legacy
+        // strict-confinement behavior.
+        Self {
+            allow_outside: crate::settings::get().allow_outside_paths,
+            allow_home: false,
+        }
     }
 }
 

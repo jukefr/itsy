@@ -91,20 +91,16 @@ pub struct SnapshotManager {
 
 impl SnapshotManager {
     pub fn new(workdir: PathBuf) -> Self {
-        let snapshot_dir = std::env::var_os("ITSY_SNAPSHOT_DIR")
-            .map(PathBuf::from)
+        let s = crate::settings::get();
+        let snapshot_dir = s
+            .snapshot_dir
+            .clone()
             .unwrap_or_else(|| crate::paths::snapshots_dir(&workdir));
-        let disabled = std::env::var("ITSY_SNAPSHOT")
-            .map(|v| v == "false")
-            .unwrap_or(false);
-        let auto_rollback = std::env::var("ITSY_SNAPSHOT_AUTO_ROLLBACK")
-            .map(|v| v == "true")
-            .unwrap_or(false);
         Self {
             workdir,
             snapshot_dir,
-            disabled,
-            auto_rollback,
+            disabled: !s.snapshot,
+            auto_rollback: s.snapshot_auto_rollback,
             max_file_size: DEFAULT_MAX_FILE_SIZE,
             active: Mutex::new(None),
         }

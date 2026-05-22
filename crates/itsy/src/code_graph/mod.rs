@@ -82,12 +82,12 @@ impl CodeGraph {
     /// Open (or create) the codegraph DB for the project at `cwd`.
     ///
     /// The path comes from [`crate::paths::codegraph_db`] unless
-    /// `ITSY_CODEGRAPH_DB` overrides it explicitly.
+    /// `[code_graph].db` overrides it explicitly.
     pub fn open(cwd: &Path) -> Result<Self> {
-        let db_path = match std::env::var("ITSY_CODEGRAPH_DB") {
-            Ok(p) if !p.is_empty() => PathBuf::from(p),
-            _ => crate::paths::codegraph_db(cwd),
-        };
+        let db_path = crate::settings::get()
+            .codegraph_db
+            .clone()
+            .unwrap_or_else(|| crate::paths::codegraph_db(cwd));
         Self::open_at(&db_path)
     }
 
@@ -110,7 +110,7 @@ impl CodeGraph {
     /// Returns a fresh summary. Existing rows for the same name are removed
     /// before re-indexing so callers can call this repeatedly.
     pub fn index_repo(&self, path: &Path, name: &str) -> Result<RepoSummary> {
-        if std::env::var("ITSY_CODEGRAPH_DISABLE").as_deref() == Ok("true") {
+        if crate::settings::get().codegraph_disable {
             return Ok(RepoSummary {
                 name: name.to_string(),
                 path: path.display().to_string(),
@@ -151,9 +151,9 @@ static GLOBAL: OnceLock<CodeGraph> = OnceLock::new();
 /// Returns the process-wide [`CodeGraph`], initialising it on first call
 /// from the current working directory.
 ///
-/// If the disable env var is set, or if opening fails, returns `None`.
+/// If `[code_graph].disable` is set, or if opening fails, returns `None`.
 pub fn try_get_code_graph() -> Option<&'static CodeGraph> {
-    if std::env::var("ITSY_CODEGRAPH_DISABLE").as_deref() == Ok("true") {
+    if crate::settings::get().codegraph_disable {
         return None;
     }
     if let Some(g) = GLOBAL.get() {

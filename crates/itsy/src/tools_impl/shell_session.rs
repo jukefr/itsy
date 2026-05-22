@@ -43,7 +43,7 @@ impl Default for ShellOptions {
         Self {
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             timeout: Duration::from_secs(30),
-            contain_cwd: std::env::var("ITSY_SHELL_CONTAIN").ok().as_deref() == Some("true"),
+            contain_cwd: crate::settings::get().shell_contain,
             max_output_bytes: 1024 * 1024,
         }
     }

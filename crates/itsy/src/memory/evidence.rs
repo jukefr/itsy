@@ -613,10 +613,7 @@ pub fn record_evidence<S: MemoryStore>(
     trace: &Trace,
     options: SummarizeOptions,
 ) -> bool {
-    if std::env::var("ITSY_EVIDENCE_DISABLE")
-        .map(|v| v == "true")
-        .unwrap_or(false)
-    {
+    if crate::settings::get().evidence_disable {
         return false;
     }
     let summary = match summarize_trace(trace, options) {

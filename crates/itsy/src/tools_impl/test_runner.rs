@@ -87,15 +87,16 @@ pub fn detect(cwd: &Path) -> TestRunner {
 }
 
 /// Full structured detection. Returns `None` if nothing is found or detection
-/// has been disabled via `ITSY_TEST_DISABLE=true`.
+/// has been disabled via `[tests].disable = true`.
 pub fn detect_full(cwd: &Path) -> Option<DetectedRunner> {
-    if std::env::var("ITSY_TEST_DISABLE").as_deref() == Ok("true") {
+    let s = crate::settings::get();
+    if s.test_disable {
         return None;
     }
-    if let Ok(override_cmd) = std::env::var("ITSY_TEST_RUNNER") {
+    if let Some(override_cmd) = s.test_runner.as_deref() {
         if !override_cmd.is_empty() {
             return Some(DetectedRunner {
-                command: override_cmd,
+                command: override_cmd.to_string(),
                 framework: "custom".into(),
                 lang: "custom".into(),
                 confidence: 1.0,

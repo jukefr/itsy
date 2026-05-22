@@ -274,8 +274,8 @@ pub async fn semantic_merge(file_path: &str, intended_change: &str, current_cont
 
 pub fn is_features_available() -> bool {
     // In the Rust port the features prompts module is statically linked.
-    // Available iff ITSY_MODEL is configured.
-    std::env::var("ITSY_MODEL").ok().filter(|s| !s.is_empty()).is_some()
+    // Available iff a model name is configured.
+    !crate::settings::get().model_name.is_empty()
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────

@@ -120,14 +120,12 @@ impl Default for ListOpts {
 }
 
 fn env_max() -> usize {
-    std::env::var("ITSY_FILETREE_MAX")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(DEFAULT_MAX)
+    let v = crate::settings::get().filetree_max;
+    if v > 0 { v } else { DEFAULT_MAX }
 }
 
 fn env_sort_mtime() -> bool {
-    matches!(std::env::var("ITSY_FILETREE_SORT").as_deref(), Ok("mtime"))
+    crate::settings::get().filetree_sort_mtime
 }
 
 fn now_ms() -> u128 {

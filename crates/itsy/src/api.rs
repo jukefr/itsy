@@ -57,22 +57,12 @@ pub struct RunOptions {
 impl Default for RunOptions {
     fn default() -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let max_tool_calls = std::env::var("ITSY_MAX_TOOL_CALLS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(50);
-        let timeout_ms = std::env::var("ITSY_TIMEOUT_MS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(120_000u64);
-        let verbose = std::env::var("ITSY_VERBOSE")
-            .map(|v| !v.is_empty() && v != "0")
-            .unwrap_or(false);
+        let s = crate::settings::get();
         Self {
-            max_tool_calls,
-            timeout: Duration::from_millis(timeout_ms),
+            max_tool_calls: s.max_tool_calls,
+            timeout: Duration::from_millis(s.request_timeout_ms),
             tools: None,
-            verbose,
+            verbose: s.verbose,
             cwd,
         }
     }

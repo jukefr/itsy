@@ -325,14 +325,14 @@ pub fn get_profile(model_name: &str, detected_context_window: u32) -> EffectiveP
         }
     }
 
-    // Env override last — `ITSY_PROFILE` pins to a specific on-disk file.
-    if let Ok(env_name) = std::env::var("ITSY_PROFILE") {
-        let env_name = env_name.trim();
-        if !env_name.is_empty() {
-            if let Some(disk) = load_profile(env_name) {
+    // Settings override last — `[diag].profile` pins to a specific on-disk file.
+    if let Some(prof) = crate::settings::get().profile.clone() {
+        let prof = prof.trim().to_string();
+        if !prof.is_empty() {
+            if let Some(disk) = load_profile(&prof) {
                 apply_disk_override(&mut eff, &disk);
-                // Make the env-chosen key visible in matched_key for downstream.
-                eff.matched_key = Some(Box::leak(env_name.to_string().into_boxed_str()));
+                // Make the override key visible in matched_key for downstream.
+                eff.matched_key = Some(Box::leak(prof.into_boxed_str()));
             }
         }
     }

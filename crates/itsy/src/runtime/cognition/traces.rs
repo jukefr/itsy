@@ -126,9 +126,7 @@ struct SpanWriter {
 
 impl SpanWriter {
     fn new() -> Self {
-        let disabled = std::env::var("ITSY_TRACES_DISABLE")
-            .map(|v| !v.is_empty() && v != "0" && v.to_lowercase() != "false")
-            .unwrap_or(false);
+        let disabled = crate::settings::get().traces_disable;
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let spans_dir = crate::paths::traces_dir(&cwd).join("spans");
         Self {

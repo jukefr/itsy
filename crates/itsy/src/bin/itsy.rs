@@ -52,18 +52,8 @@ use itsy::tui;
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-/// Maximum tool calls allowed per single user turn before we bail out.
-/// Overridable via `ITSY_MAX_TOOL_CALLS_PER_TURN`; the hard cap matters
-/// for long-running non-interactive runs (benchmarks, batch scripts)
-/// where a 32-call ceiling is hit during exploration alone. 250 is a
-/// generous default that still bounds runaway loops.
-const DEFAULT_MAX_TOOL_CALLS_PER_TURN: u32 = 250;
-
 fn max_tool_calls_per_turn() -> u32 {
-    std::env::var("ITSY_MAX_TOOL_CALLS_PER_TURN")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(DEFAULT_MAX_TOOL_CALLS_PER_TURN)
+    itsy::settings::get().max_tool_calls_per_turn
 }
 /// Maximum auto-improvement iterations per file before we DECOMPOSE.
 const MAX_IMPROVE_ITERATIONS: u32 = 4;
@@ -1611,7 +1601,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
 
         // Auto-commit (Feature: git.auto_commit).
         let auto_commit = session.config.lock().git.auto_commit
-            || std::env::var("ITSY_AUTO_COMMIT").ok().as_deref() == Some("true");
+            || itsy::settings::get().auto_commit;
         if auto_commit {
             try_auto_commit(&session.cwd, &user_msg, &edited_files).await;
         }

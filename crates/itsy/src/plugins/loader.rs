@@ -402,19 +402,20 @@ impl PluginLoader {
 }
 
 fn env_enabled() -> bool {
+    // Plugins on by default; disable by setting `[plugins].spec = "false"`
+    // (or any falsey string).
     !matches!(
-        std::env::var("ITSY_PLUGINS").ok().as_deref(),
+        crate::settings::get().plugins_spec.as_deref(),
         Some("false") | Some("0") | Some("off") | Some("no")
     )
 }
 
-fn env_set(key: &str) -> Option<HashSet<String>> {
-    std::env::var(key).ok().map(|v| {
-        v.split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
-    })
+fn env_set(_key: &str) -> Option<HashSet<String>> {
+    // Legacy env-var hook (`ITSY_PLUGINS_ALLOW`, `ITSY_PLUGINS_DENY`, etc.)
+    // was removed in schema v2. Allow/deny lists now belong in the
+    // manifest; this returns `None` unconditionally so the caller falls
+    // back to "no restriction".
+    None
 }
 
 fn env_set_or_empty(key: &str) -> HashSet<String> {
@@ -451,10 +452,7 @@ fn validate_manifest(m: &PluginManifest) -> bool {
 }
 
 async fn run_subprocess(cmd: &[String], args: &Value, cwd: Option<&Path>) -> Value {
-    let timeout_secs = std::env::var("ITSY_PLUGIN_TIMEOUT_SECS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(15u64);
+    let timeout_secs = crate::settings::get().plugin_timeout_secs;
 
     let (program, rest) = match cmd.split_first() {
         Some(s) => s,

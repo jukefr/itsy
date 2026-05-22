@@ -70,11 +70,9 @@ pub async fn chat_completion(ctx: &ChatContext<'_>) -> Option<Value> {
     // its whole output budget on thinking and emits empty content —
     // the classic IQ2_XXS "empty response" failure mode. Give the
     // content at least 4k headroom past the thinking budget, and
-    // honour ITSY_MAX_OUTPUT_TOKENS for explicit overrides.
-    let max_tokens = std::env::var("ITSY_MAX_OUTPUT_TOKENS")
-        .ok()
-        .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(0)
+    // honour `[limits].max_output_tokens` for explicit overrides.
+    let max_tokens = crate::settings::get()
+        .max_output_tokens
         .max(tokens.saturating_add(4096))
         .max(4096);
 

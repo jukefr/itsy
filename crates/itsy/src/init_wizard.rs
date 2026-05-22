@@ -582,6 +582,8 @@ pub fn run() -> Result<ConfigFile> {
 /// One-shot non-interactive write of a default config. Used by smoke tests
 /// and by `--init --non-interactive`.
 pub fn write_default() -> Result<ConfigFile> {
+    // (write_default no longer reads ITSY_MODEL/ITSY_BASE_URL — pass
+    //  values via --init/--model/--endpoint or fill in the TOML.)
     let file = ConfigFile {
         version: CURRENT_CONFIG_VERSION.into(),
         model: Some(ModelConfig {

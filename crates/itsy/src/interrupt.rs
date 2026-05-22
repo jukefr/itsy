@@ -45,9 +45,10 @@ pub fn install() {
     // default suspend behaviour — Ctrl+Z still works. But before the
     // suspend lands, we log a stderr breadcrumb so the user can confirm
     // whether suspension came from their keyboard / kernel / a misbehaved
-    // child process. Toggle with `ITSY_DEBUG_SIGTSTP=true`.
+    // child process. Toggle with `[diag].debug_sigtstp = true` (or
+    // `--set debug_sigtstp=true`).
     #[cfg(unix)]
-    if std::env::var("ITSY_DEBUG_SIGTSTP").as_deref() == Ok("true") {
+    if crate::settings::get().debug_sigtstp {
         tokio::spawn(async {
             use tokio::signal::unix::{signal, SignalKind};
             let Ok(mut stream) = signal(SignalKind::from_raw(libc_sigtstp())) else {

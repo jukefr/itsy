@@ -381,7 +381,7 @@ fn cmd_profile(ctx: &CommandCtx) -> String {
         (cfg.model.name.clone(), cfg.context.detected_window)
     };
     let profile = get_profile(&name, window);
-    let routing = std::env::var("ITSY_TOOL_ROUTING").unwrap_or_else(|_| "auto".into());
+    let routing = crate::settings::get().tool_routing.clone();
     let mut out = String::from("  Model Profile\n");
     out.push_str(&format!("  Model:     {}\n", name));
     out.push_str(&format!(
@@ -1062,25 +1062,18 @@ async fn cmd_lsp(ctx: &CommandCtx, rest: &[&str]) -> String {
     }
 }
 
-fn set_env(name: &str, value: &str) {
-    // SAFETY: itsy's REPL is single-threaded during slash-command dispatch.
-    // The /web and /auto-approve toggles are a thin wrapper over the env var
-    // so downstream code (`std::env::var(...)`) picks the new value up.
-    unsafe { std::env::set_var(name, value) }
-}
-
 fn cmd_web(rest: &[&str]) -> String {
     match rest.first().copied() {
         Some("on") | Some("enable") => {
-            set_env("ITSY_WEB_BROWSE", "true");
-            "  ✓ Web browsing enabled (ITSY_WEB_BROWSE=true).\n\n".into()
+            crate::settings::update(|s| s.web_browse = true);
+            "  ✓ Web browsing enabled.\n\n".into()
         }
         Some("off") | Some("disable") => {
-            set_env("ITSY_WEB_BROWSE", "false");
+            crate::settings::update(|s| s.web_browse = false);
             "  ✓ Web browsing disabled.\n\n".into()
         }
         _ => {
-            let current = std::env::var("ITSY_WEB_BROWSE").unwrap_or_else(|_| "false".into());
+            let current = crate::settings::get().web_browse;
             format!("  Web browsing: {current}\n  /web on | /web off\n\n")
         }
     }
@@ -1089,15 +1082,15 @@ fn cmd_web(rest: &[&str]) -> String {
 fn cmd_auto_approve(rest: &[&str]) -> String {
     match rest.first().copied() {
         Some("on") | Some("enable") => {
-            set_env("ITSY_AUTO_APPROVE", "true");
-            "  ✓ Auto-approve enabled (ITSY_AUTO_APPROVE=true).\n\n".into()
+            crate::settings::update(|s| s.auto_approve = true);
+            "  ✓ Auto-approve enabled.\n\n".into()
         }
         Some("off") | Some("disable") => {
-            set_env("ITSY_AUTO_APPROVE", "false");
+            crate::settings::update(|s| s.auto_approve = false);
             "  ✓ Auto-approve disabled.\n\n".into()
         }
         _ => {
-            let current = std::env::var("ITSY_AUTO_APPROVE").unwrap_or_else(|_| "false".into());
+            let current = crate::settings::get().auto_approve;
             format!("  Auto-approve: {current}\n  /auto-approve on | /auto-approve off\n\n")
         }
     }

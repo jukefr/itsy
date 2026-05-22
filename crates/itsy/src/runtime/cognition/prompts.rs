@@ -117,21 +117,28 @@ struct ModelSpec {
 }
 
 fn medium_coder() -> ModelSpec {
-    let m = std::env::var("ITSY_MODEL_STRONG")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(|| std::env::var("ITSY_MODEL").ok())
+    let s = crate::settings::get();
+    let m = s
+        .model_strong
+        .clone()
+        .filter(|n| !n.is_empty())
+        .or_else(|| {
+            let mn = &s.model_name;
+            (!mn.is_empty()).then(|| mn.clone())
+        })
         .unwrap_or_else(|| "default".into());
     ModelSpec { name: "MediumCoder", model_name: m, max_output: 8192, temperature: 0.1, cost_class: CostClass::Medium }
 }
 
 fn small_coder() -> ModelSpec {
-    let m = std::env::var("ITSY_MODEL").ok().unwrap_or_else(|| "default".into());
+    let mn = &crate::settings::get().model_name;
+    let m = if mn.is_empty() { "default".into() } else { mn.clone() };
     ModelSpec { name: "SmallCoder", model_name: m, max_output: 4096, temperature: 0.1, cost_class: CostClass::Small }
 }
 
 fn tiny_classifier() -> ModelSpec {
-    let m = std::env::var("ITSY_MODEL").ok().unwrap_or_else(|| "default".into());
+    let mn = &crate::settings::get().model_name;
+    let m = if mn.is_empty() { "default".into() } else { mn.clone() };
     ModelSpec { name: "TinyClassifier", model_name: m, max_output: 64, temperature: 0.0, cost_class: CostClass::Tiny }
 }
 
@@ -144,11 +151,14 @@ fn model_for_tier(tier: &str) -> ModelSpec {
 }
 
 fn base_url() -> String {
-    let raw = std::env::var("ITSY_BASE_URL")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(|| std::env::var("OLLAMA_HOST").ok().map(|h| format!("{h}/v1")))
-        .unwrap_or_else(|| "http://localhost:1234/v1".to_string());
+    let raw = {
+        let bu = &crate::settings::get().base_url;
+        if bu.is_empty() {
+            "http://localhost:1234/v1".to_string()
+        } else {
+            bu.clone()
+        }
+    };
     crate::config::normalize_base_url(&raw)
 }
 

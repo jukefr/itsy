@@ -315,7 +315,7 @@ async fn exec_bash(args: &Value, cwd: &Path, ctx: &ExecCtx<'_>) -> Value {
         }
     }
 
-    let persistent = std::env::var("ITSY_SHELL_PERSIST").ok().as_deref() != Some("false");
+    let persistent = crate::settings::get().shell_persist;
     if persistent {
         let shell = get_shell(ShellOptions { cwd: cwd.to_path_buf(), ..Default::default() });
         let result = shell.run(&command).await;
@@ -396,7 +396,7 @@ async fn maybe_prepend_error_diagnosis(
 }
 
 fn rtk_rewrite(command: &str) -> String {
-    if std::env::var("ITSY_RTK").ok().as_deref() == Some("false") {
+    if !crate::settings::get().rtk {
         return command.to_string();
     }
     if which::which("rtk").is_err() {
@@ -833,8 +833,8 @@ async fn exec_memory(name: &str, args: &Value, ctx: &ExecCtx<'_>) -> Value {
 }
 
 async fn exec_web_search(args: &Value) -> Value {
-    if std::env::var("ITSY_WEB_BROWSE").ok().as_deref() != Some("true") {
-        return json!({"error": "Web browsing disabled. Set ITSY_WEB_BROWSE=true."});
+    if !crate::settings::get().web_browse {
+        return json!({"error": "Web browsing disabled. Set `[tools].web_browse = true` (or pass --web-browse)."});
     }
     let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
     match web_search(query, 5).await {
@@ -856,8 +856,8 @@ async fn exec_web_search(args: &Value) -> Value {
 }
 
 async fn exec_web_fetch(args: &Value) -> Value {
-    if std::env::var("ITSY_WEB_BROWSE").ok().as_deref() != Some("true") {
-        return json!({"error": "Web browsing disabled. Set ITSY_WEB_BROWSE=true."});
+    if !crate::settings::get().web_browse {
+        return json!({"error": "Web browsing disabled. Set `[tools].web_browse = true` (or pass --web-browse)."});
     }
     let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
     match web_fetch(url, 5).await {

@@ -50,13 +50,13 @@ pub struct BootstrapOptions {
 
 impl BootstrapOptions {
     pub fn for_dir(workdir: PathBuf) -> Self {
-        let disable = matches!(std::env::var("ITSY_BOOTSTRAP").as_deref(), Ok("false"));
-        let max_chars = std::env::var("ITSY_BOOTSTRAP_MAX")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .filter(|n| *n > 0)
-            .unwrap_or(DEFAULT_MAX);
-        Self { workdir, disable, max_chars }
+        let s = crate::settings::get();
+        let max_chars = if s.bootstrap_max_chars > 0 {
+            s.bootstrap_max_chars
+        } else {
+            DEFAULT_MAX
+        };
+        Self { workdir, disable: !s.bootstrap, max_chars }
     }
 }
 

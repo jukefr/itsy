@@ -56,26 +56,6 @@ pub static NOISY_TOOLS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     s
 });
 
-fn env_bool(key: &str, default: bool) -> bool {
-    match std::env::var(key).ok().as_deref() {
-        Some("1") | Some("true") | Some("yes") | Some("on") => true,
-        Some("0") | Some("false") | Some("no") | Some("off") => false,
-        _ => default,
-    }
-}
-
-fn env_usize(key: &str, default: usize) -> usize {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
-}
-
-fn env_u64(key: &str, default: u64) -> u64 {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
-}
-
-fn env_f64(key: &str, default: f64) -> f64 {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
-}
-
 /// Per-tool TTL overrides. Anything not listed falls back to the global TTL.
 fn per_tool_ttl(name: &str) -> Option<Duration> {
     match name {
@@ -135,18 +115,17 @@ pub struct ToolDedup {
 
 impl ToolDedup {
     pub fn new() -> Self {
-        let capacity = env_usize("ITSY_DEDUP_WINDOW", 5).max(1);
-        let disabled = !env_bool("ITSY_DEDUP", true);
-        let soft = env_bool("ITSY_DEDUP_SOFT", false);
-        let default_ttl = Duration::from_secs(env_u64("ITSY_DEDUP_TTL_SECS", 30));
-        let similarity_threshold = env_f64("ITSY_DEDUP_SIMILARITY", 0.92).clamp(0.0, 1.0);
+        let s = crate::settings::get();
+        let capacity = s.dedup_window.max(1);
+        let disabled = !s.dedup_enabled;
+        let soft = s.dedup_soft;
+        let default_ttl = Duration::from_secs(s.dedup_ttl_secs);
+        let similarity_threshold = s.dedup_similarity.clamp(0.0, 1.0);
         let mut noisy: HashSet<String> = NOISY_TOOLS.iter().map(|s| s.to_string()).collect();
-        if let Ok(extra) = std::env::var("ITSY_DEDUP_NOISY") {
-            for t in extra.split(',') {
-                let t = t.trim();
-                if !t.is_empty() {
-                    noisy.insert(t.to_string());
-                }
+        for t in &s.dedup_noisy_extra {
+            let t = t.trim();
+            if !t.is_empty() {
+                noisy.insert(t.to_string());
             }
         }
         Self {

@@ -16,13 +16,13 @@
 //! forces us to keep it as an env var. Everything else is config + CLI.
 
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock, RwLockReadGuard};
 
 use crate::config::Config;
 
-/// Global runtime settings. Populated once at startup; subsequent reads
-/// are lock-free.
-static SETTINGS: OnceLock<Settings> = OnceLock::new();
+/// Global runtime settings. Populated once at startup; slash commands
+/// like `/web on` can mutate fields at runtime via [`update`].
+static SETTINGS: OnceLock<RwLock<Settings>> = OnceLock::new();
 
 /// Merged settings derived from CLI + config.toml + defaults.
 ///
@@ -38,6 +38,15 @@ pub struct Settings {
     pub profile: Option<String>,
     /// Print SIGTSTP debug info (was `ITSY_DEBUG_SIGTSTP`). Dev-only.
     pub debug_sigtstp: bool,
+
+    // ── model name + endpoint (mirrors config.model.*) ──────────
+    /// Default model name (was `ITSY_MODEL`).
+    pub model_name: String,
+    /// Endpoint base URL (was `ITSY_BASE_URL`).
+    pub base_url: String,
+    /// Optional "strong" model name for higher-quality tiers
+    /// (was `ITSY_MODEL_STRONG`). Falls back to `model_name` if unset.
+    pub model_strong: Option<String>,
 
     // ── tool budgets ─────────────────────────────────────────────
     /// Hard cap on tool calls per `run()` (was `ITSY_MAX_TOOL_CALLS`).
@@ -156,6 +165,10 @@ impl Settings {
             profile: None,
             debug_sigtstp: false,
 
+            model_name: String::new(),
+            base_url: "http://localhost:1234/v1".into(),
+            model_strong: None,
+
             max_tool_calls: 50,
             max_tool_calls_per_turn: 250,
             request_timeout_ms: 120_000,
@@ -232,6 +245,9 @@ impl Settings {
     /// represented in the config schema stays at its default.
     pub fn from_config(cfg: &Config) -> Self {
         let mut s = Self::defaults();
+        s.model_name = cfg.model.name.clone();
+        s.base_url = cfg.model.base_url.clone();
+        s.model_strong = cfg.models.as_ref().map(|m| m.strong.clone());
         s.bash_timeout = cfg.tools.bash_timeout;
         s.tool_routing = cfg.tools.tool_routing.clone();
         s.shell_persist = cfg.tools.shell_persist;
@@ -394,17 +410,41 @@ impl Settings {
 }
 
 /// Install the merged settings. Call exactly once at startup, before any
-/// other module reads from [`get`]. A second call is a no-op (the value
-/// in the lock wins) so tests that run multiple times stay deterministic.
+/// other module reads from [`get`]. A second call replaces the contents
+/// (useful for tests).
 pub fn init(s: Settings) {
-    let _ = SETTINGS.set(s);
+    match SETTINGS.get() {
+        Some(lock) => {
+            *lock.write().expect("settings lock poisoned") = s;
+        }
+        None => {
+            let _ = SETTINGS.set(RwLock::new(s));
+        }
+    }
 }
 
-/// Read the merged settings. If [`init`] was never called (e.g. unit
-/// tests that don't go through the normal startup path), the defaults
-/// are used.
-pub fn get() -> &'static Settings {
-    SETTINGS.get_or_init(Settings::defaults)
+fn slot() -> &'static RwLock<Settings> {
+    SETTINGS.get_or_init(|| RwLock::new(Settings::defaults()))
+}
+
+/// Read the merged settings. Cheap: takes a read lock, which is
+/// uncontended in steady state. Hold the guard only for as long as
+/// needed (or `clone()` the field you need).
+pub fn get() -> RwLockReadGuard<'static, Settings> {
+    slot().read().expect("settings lock poisoned")
+}
+
+/// Snapshot a cloned `Settings` for callers that want owned data
+/// without holding a lock guard.
+pub fn snapshot() -> Settings {
+    slot().read().expect("settings lock poisoned").clone()
+}
+
+/// Apply a mutation in-place. Used by slash commands like `/web on`
+/// that flip a toggle at runtime.
+pub fn update<F: FnOnce(&mut Settings)>(f: F) {
+    let mut guard = slot().write().expect("settings lock poisoned");
+    f(&mut guard);
 }
 
 /// Populate [`Settings`] from a `Config` and pull in the additional
