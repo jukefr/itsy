@@ -257,6 +257,19 @@ fn sorted_keys_json(v: &Value) -> String {
     }
 }
 
+/// Stable key for idempotent-write dedup (memory_remember / memory_forget).
+/// Re-uses the same sorted-key hash as `ToolDedup::hash` but is a free
+/// function so the caller doesn't need a `ToolDedup` instance.
+pub fn idempotent_write_key(name: &str, args: &Value) -> String {
+    let norm = sorted_keys_json(args);
+    let mut h = Sha256::new();
+    h.update(name.as_bytes());
+    h.update(b"|");
+    h.update(norm.as_bytes());
+    let hex = format!("{:x}", h.finalize());
+    hex.chars().take(16).collect()
+}
+
 // ─── Rust-only utility (not used by dedup) ────────────────────────────
 // Used by the contract gate in `bin/itsy.rs` to classify bash commands
 // as read-only or mutating. Doesn't participate in dedup behaviour —

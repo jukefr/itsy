@@ -965,6 +965,9 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
     // identical-call repeat counter that used to live here was removed —
     // see the "Spiral defense is upstream's" comment in the loop body.
     let mut per_turn_repeats: std::collections::HashMap<String, u32> = Default::default();
+    // Tracks idempotent write tool calls seen this turn (tool_name + arg hash).
+    // memory_remember with the same args twice = nop; return early to break spirals.
+    let mut per_turn_write_seen: std::collections::HashSet<String> = Default::default();
     let mut current_category: Option<String> = stage2_category;
 
     // Reset any pending Ctrl+C presses from earlier turns; the user starts
@@ -1250,6 +1253,24 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                 // cycle that never escapes. Removed: no bench evidence
                 // it helped, the reset bug made the spiral worse than
                 // upstream's bounded "spam until tool-call cap" path.
+
+                // Idempotent-write dedup: memory_remember/memory_forget with
+                // identical args in the same turn is a no-op. Break the spiral
+                // before executing and return a short-circuit result.
+                const IDEMPOTENT_WRITE_TOOLS: &[&str] = &["memory_remember", "memory_forget"];
+                if IDEMPOTENT_WRITE_TOOLS.contains(&name.as_str()) {
+                    let write_key = itsy::tools_impl::dedup::idempotent_write_key(&name, &args);
+                    if !per_turn_write_seen.insert(write_key) {
+                        session.history.lock().push(json!({
+                            "role": "tool",
+                            "tool_call_id": id,
+                            "content": serde_json::to_string(&json!({
+                                "result": "[already stored this turn — identical call skipped]"
+                            })).unwrap_or_default()
+                        }));
+                        continue;
+                    }
+                }
 
                 // Dedup lookup. Mirrors upstream:
                 //   let cached = dedup.lookup(name, args);
