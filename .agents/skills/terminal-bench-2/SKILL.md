@@ -66,14 +66,9 @@ user how to proceed.
 `/usr/local/bin/itsy-bench-net`). It restarts the rootless docker daemon
 with `DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=false` and
 starts a `socat 8000 → 10.0.2.2:8000` hop so harbor task containers can
-reach the host's `llama-server`. The repo also installs a
-SessionStart hook in `.claude/settings.json` that runs the script
-automatically on every Claude Code session boot — so you usually don't
-need to think about it. Re-run by hand when:
-
-* a previous run died mid-trial and orphaned the daemon
-* `curl http://10.0.2.2:8000/v1/models` from a child container fails
-* you're driving harbor from a non-Claude-Code shell
+reach the host's `llama-server`. **Run it before every harbor invocation
+in this skill.** Idempotent — if everything's already healthy it exits
+in <1s.
 
 ```bash
 itsy-bench-net          # idempotent; exits 0 when everything's healthy
