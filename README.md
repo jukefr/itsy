@@ -1,47 +1,88 @@
 # itsy
 
-AI coding agent optimized for small LLMs (8B–35B parameters).
+A coding agent for small local LLMs (8B–35B parameters). Built for the
+moment after you've finally got Qwen3 / DeepSeek / GPT-OSS running on
+your GPU and you want it to actually edit files for you without 32k
+of ceremony per turn.
 
-Designed around models running on consumer hardware: budget-managed
-context, forgiving multi-format tool-call parsing, TODO-decomposed
-planning, search-and-replace patch edits, opt-in cloud escalation,
-native code graph (tree-sitter + SQLite), and FTS5-backed project
-memory. No external runtime dependencies — point it at LM Studio,
-Ollama, vLLM, or any OpenAI-compatible endpoint.
+![](docs/itsy-tui.png)
 
-## Build
+itsy is tuned for quantised models on consumer hardware, so the
+design choices mostly trade tokens for compliance. The tool-call
+parser is forgiving — it eats JSON, XML-ish, and code-fence wrappers
+and figures out which tool the model meant. Context budget is
+capped; edits are search-and-replace patches, not full file
+rewrites; multi-step work decomposes into a small TODO list so the
+model has somewhere to look when it loses the plot. There's a
+SQLite + FTS5 code graph and per-project memory so the agent doesn't
+pay to reintroduce itself every turn.
+
+Talks to anything OpenAI-compatible: LM Studio, Ollama, vLLM,
+llama-server.
+
+## Install
+
+You need Rust 1.85+ (edition 2024) and a running OpenAI-compatible
+endpoint. Everything else is bundled.
 
 ```bash
+git clone https://github.com/Doorman11991/itsy
+cd itsy
 cargo build --release
 ```
 
-Single binary lands at `target/release/itsy`. Requires Rust 1.85+
-(edition 2024).
+The binary lands at `target/release/itsy`. Copy it onto your `$PATH`
+or invoke it from the repo. There's no `cargo install` recipe yet
+because the build picks up native-feature flags from `Cargo.toml`
+that `cargo install` doesn't propagate cleanly.
 
-## First launch
+If you're running against bench images or older base distros that
+ship a too-old glibc, build statically against musl:
 
 ```bash
-./target/release/itsy
+rustup target add x86_64-unknown-linux-musl
+apt-get install -y musl-tools
+cargo build --release --target x86_64-unknown-linux-musl
 ```
 
-If `~/.config/itsy/config.toml` doesn't exist, itsy runs an
-interactive setup wizard that asks for your provider / endpoint /
-model, detects the model's quantization tier and family from its
-name, probes the endpoint for the actual context window, and writes
-a sensible default config to disk. On subsequent launches the wizard
-is skipped. Re-run it any time with `itsy --init`.
+## First run
+
+```bash
+itsy
+```
+
+On the very first launch (no `~/.config/itsy/config.toml`) the wizard
+asks for provider, endpoint, model name, and the safeguards worth
+turning on for your quant tier. It probes `/v1/models` for the real
+context window so you don't have to guess. Re-run the wizard any time
+with `itsy --init`.
+
+After that, every launch drops straight into the REPL:
+
+* `itsy`                — interactive fullscreen REPL (default)
+* `itsy --classic`      — line-based REPL, useful over SSH or in
+                          `docker exec` where the alternate screen
+                          breaks
+* `itsy -p "fix it"`    — one-shot, prints the answer and exits
+* `itsy --mcp`          — talk to itsy from another tool over MCP
+
+Slash commands inside the REPL: `/help`, `/model`, `/endpoint`,
+`/memory`, `/plan`, `/diff`, `/git`, `/checkpoint`, `/rollback`,
+`/sessions`, `/share`, `/quit`. Anything tied to a feature that's
+disabled in your config is a no-op.
 
 ## Configure
 
-Canonical config lives at `~/.config/itsy/config.toml`. It's a
-versioned TOML file:
+Everything lives in `~/.config/itsy/config.toml`. The wizard writes a
+sensible default; you usually only touch this file to swap models or
+flip off a feature flag that's eating your context.
 
 ```toml
-version = "1"
+version = "2"
 
 [model]
 provider = "openai"
-name = "your-model"
+name = "Qwen3-Coder-30B-A3B-Instruct"
 base_url = "http://localhost:1234/v1"
 timeout = 300
 
@@ -51,70 +92,44 @@ max_budget_pct = 70
 
 [tools]
 bash_timeout = 30
-tool_routing = "direct"   # or "two_stage" for small-context models
+tool_routing = "direct"   # or "two_stage" for tiny-context models
+shell_persist = true
+
+[limits]
+max_tool_calls = 50
+max_tool_calls_per_turn = 250
+max_output_tokens = 0     # 0 = auto (thinking_budget + 4k headroom)
+
+[security]
+allow_outside_paths = true   # /data, /tmp ok; sensitive paths still blocked
+
+[features]
+plan = true
+snapshot = true
+write_guard = true
+clarifier = true
+semantic_merge = true
+error_diagnosis = true
+context_retrieval = true
 
 [tui]
 auto_approve = false
+classic = false
 theme = "dark"
-
-[git]
-auto_commit = false
 ```
 
-The `version` field is honored on load and the file is migrated
-forward as the schema evolves. Don't remove it.
+Every field can also be overridden by a CLI flag — see `itsy --help`.
+For the long tail of less common knobs (dedup similarity, code-graph
+DB path, snapshot dir, etc.) use `--set key=value`, e.g.
+`--set dedup.similarity=0.85` or `--set code_graph.disable=true`.
 
-`ITSY_*` env vars override individual fields at runtime; CLI flags
-override env vars. Cloud escalation keys come from the standard
-provider env vars:
+itsy no longer reads `ITSY_*` env vars; everything is config + CLI.
+The standard cloud-provider keys (`OPENAI_API_KEY`,
+`ANTHROPIC_API_KEY`, `DEEPSEEK_API_KEY`) are still consulted when
+cloud escalation is enabled.
 
-```
-OPENAI_API_KEY=sk-...
-ANTHROPIC_API_KEY=sk-ant-...
-DEEPSEEK_API_KEY=sk-...
-```
-
-Project-local `.env` files are **not** read — runtime state and
-config live under `~/.config/itsy/` exclusively.
-
-## Run
-
-```bash
-./target/release/itsy                       # interactive fullscreen REPL
-./target/release/itsy --classic             # classic line-based REPL
-./target/release/itsy -p "fix the build"    # one-shot non-interactive
-./target/release/itsy --print-system-prompt
-./target/release/itsy --eval <suite>        # offline eval suite
-./target/release/itsy --mcp                 # MCP-server mode
-./target/release/itsy --init                # re-run the setup wizard
-```
-
-Slash commands: `/help`, `/model [name]`, `/endpoint [url]`,
-`/stats`, `/tokens`, `/memory`, `/plan`, `/diff`, `/git`,
-`/escalation`, `/sessions`, `/trace`, `/skills`, `/plugins`,
-`/checkpoint`, `/rollback`, `/share`, `/clear`, `/quit`.
-
-## State layout
-
-All runtime state lives under `~/.config/itsy/`:
-
-```
-~/.config/itsy/
-  config.toml              global config
-  plugins/                 user plugins
-  skills/                  user skills
-  projects/<id>/           per-project state, keyed by cwd hash
-    memory.db              SQLite + FTS5 project memory
-    codegraph.db           SQLite + FTS5 symbol index (tree-sitter)
-    sessions/              conversation persistence
-    traces/                agent execution traces
-    snapshots/             auto-rollback checkpoints
-    tool_scores.json       governor's per-tool confidence
-```
-
-The project id is `<slug>-<hash10>` derived from the canonical
-absolute path of your working directory — so each repo gets its own
-isolated memory, code graph, and session history.
+The `version` field is honoured on load and older files get migrated
+forward automatically. Don't remove it.
 
 ## License
 
