@@ -7,7 +7,7 @@ of ceremony per turn.
 
 ![](docs/itsy-tui.png)
 
-<sub>Screenshot rendered from [`docs/itsy-tui.ansi`](docs/itsy-tui.ansi) via [`docs/regen-screenshot.sh`](docs/regen-screenshot.sh).</sub>
+<sub>Composed from actual run logs (a real `cobol-modernization` solve on Qwen3.6-35B IQ2_XXS); the source ANSI lives at [`docs/itsy-tui.ansi`](docs/itsy-tui.ansi) and is re-rendered via [`docs/regen-screenshot.sh`](docs/regen-screenshot.sh).</sub>
 
 itsy is tuned for quantised models on consumer hardware, so the
 design choices mostly trade tokens for compliance. The tool-call
