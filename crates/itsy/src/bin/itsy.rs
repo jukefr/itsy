@@ -742,6 +742,14 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
     let mut tool_calls_this_turn: u32 = 0;
     let mut edited_files: Vec<String> = Vec::new();
     let mut improvement_attempts: std::collections::HashMap<String, u32> = Default::default();
+    // Per-turn "you've already called this" counter, keyed by a hash of
+    // (tool_name, args). Catches identical mutating calls (like `rm -rf X`
+    // 4 times in a row) that the regular dedup doesn't because the tool
+    // is impure.
+    let mut per_turn_repeats: std::collections::HashMap<String, u32> = Default::default();
+    /// Hard cap: after this many identical (name, args) calls in one
+    /// turn we refuse and inject a [SYSTEM] hint instead of executing.
+    const MAX_IDENTICAL_REPEATS_PER_TURN: u32 = 3;
     let mut current_category: Option<String> = stage2_category;
 
     // Reset any pending Ctrl+C presses from earlier turns; the user starts
@@ -925,6 +933,35 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                         }
                     }
                 };
+
+                // Per-turn hard repeat cap. Backstop for tools that dedup
+                // can't cache (mutating bash, etc.) — after N identical
+                // calls we refuse, surface a [SYSTEM] hint, and let the
+                // model recover instead of spinning.
+                let repeat_key = {
+                    use sha2::{Digest, Sha256};
+                    let args_canon = serde_json::to_string(&args).unwrap_or_default();
+                    let mut h = Sha256::new();
+                    h.update(name.as_bytes());
+                    h.update(b"|");
+                    h.update(args_canon.as_bytes());
+                    format!("{:x}", h.finalize())
+                };
+                let repeat_count = per_turn_repeats.entry(repeat_key.clone()).or_insert(0);
+                *repeat_count += 1;
+                if *repeat_count > MAX_IDENTICAL_REPEATS_PER_TURN {
+                    let hint = format!(
+                        "[SYSTEM] You have called `{name}` with identical arguments {} times this turn. The result will not change. Stop repeating it and take a different approach, or describe what's blocking you.",
+                        *repeat_count
+                    );
+                    session.history.lock().push(json!({
+                        "role": "tool",
+                        "tool_call_id": id,
+                        "content": &hint,
+                    }));
+                    println!("  \x1b[33m⚠ {hint}\x1b[0m");
+                    continue;
+                }
 
                 // Dedup lookup.
                 let dedup_outcome = session.dedup.lock().lookup(&name, &args);

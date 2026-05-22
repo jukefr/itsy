@@ -201,10 +201,13 @@ impl ToolDedup {
         if self.disabled {
             return DedupOutcome::Skip;
         }
-        if !PURE_TOOLS.contains(name) {
+        if self.noisy.contains(name) {
             return DedupOutcome::Skip;
         }
-        if self.noisy.contains(name) {
+        // `bash` is impure in general but the model loves to spam
+        // identical read-only commands (`ls`, `cat`, `pwd`, `find`).
+        // Treat bash as pure only if the command is a read-only one-liner.
+        if !PURE_TOOLS.contains(name) && !(name == "bash" && bash_is_read_only(args)) {
             return DedupOutcome::Skip;
         }
         let now = Instant::now();
@@ -263,7 +266,7 @@ impl ToolDedup {
         if self.disabled {
             return;
         }
-        if !PURE_TOOLS.contains(name) {
+        if !PURE_TOOLS.contains(name) && !(name == "bash" && bash_is_read_only(args)) {
             return;
         }
         if self.noisy.contains(name) {
@@ -328,6 +331,73 @@ pub struct DedupStats {
 }
 
 /// Mark a cached result so the model sees it's a hit.
+/// Heuristic: is this `bash` command read-only?
+///
+/// Returns true only if the command is built from read-only utilities
+/// (`ls`, `cat`, `pwd`, `find`, `grep`, `rg`, `echo`, `stat`, `wc`,
+/// `head`, `tail`, `file`, `which`, `du`, `df`) AND contains no
+/// redirection (`>`, `>>`), no obvious mutators (`rm`, `mv`, `cp`,
+/// `mkdir`, `touch`, `chmod`, `chown`, `rmdir`), and no shell-state
+/// changes (`cd`, `export`, `source`). The command can chain with `&&`
+/// / `||` / `|` / `;` — each segment is checked.
+pub fn bash_is_read_only(args: &Value) -> bool {
+    let Some(cmd) = args.get("command").and_then(|v| v.as_str()) else {
+        return false;
+    };
+    if cmd.contains('>') {
+        return false;
+    }
+    const READ_ONLY: &[&str] = &[
+        "ls", "cat", "pwd", "find", "grep", "rg", "echo", "stat", "wc",
+        "head", "tail", "file", "which", "type", "du", "df", "tree",
+        "sort", "uniq", "awk", "sed", "cut", "tr", "diff", "git",
+        "printenv", "env", "uname", "whoami", "date", "hostname",
+        "true", "false", "test", "[",
+    ];
+    const FORBID: &[&str] = &[
+        "rm", "mv", "cp", "mkdir", "rmdir", "touch", "chmod", "chown",
+        "ln", "install", "dd", "sync", "kill", "killall", "pkill",
+        "cd", "export", "unset", "source", ".", "exec", "eval",
+        "tee", "shred",
+    ];
+    for segment in cmd.split(|c: char| matches!(c, '|' | ';' | '&')) {
+        let trimmed = segment.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // first word of segment
+        let head = trimmed.split_whitespace().next().unwrap_or("");
+        // strip a leading subshell `(` if any
+        let head = head.trim_start_matches('(').trim_start_matches('$');
+        // For chained `&&` we just split on `&` which leaves empty
+        // segments between `&&`; the empty-check above handles them.
+        if FORBID.contains(&head) {
+            return false;
+        }
+        // Special-case `sed` and `awk`: read-only unless `-i` is passed.
+        if (head == "sed" || head == "awk") && trimmed.contains("-i") {
+            return false;
+        }
+        // `git` is read-only for status/diff/log/show but mutating for
+        // add/commit/checkout/rebase/etc. Be conservative.
+        if head == "git" {
+            let sub = trimmed.split_whitespace().nth(1).unwrap_or("");
+            const GIT_READONLY: &[&str] = &[
+                "status", "diff", "log", "show", "branch", "remote",
+                "blame", "tag", "config", "ls-files", "ls-tree",
+                "rev-parse", "describe", "shortlog", "stash",
+            ];
+            if !GIT_READONLY.contains(&sub) {
+                return false;
+            }
+        }
+        if !READ_ONLY.contains(&head) {
+            return false;
+        }
+    }
+    true
+}
+
 fn mark_cached(mut v: Value) -> Value {
     if let Some(obj) = v.as_object_mut() {
         if let Some(s) = obj.get_mut("result").and_then(|r| r.as_str().map(String::from)) {
@@ -445,5 +515,58 @@ mod tests {
         let args = json!({"path": "a"});
         d.record("read_file", &args, &json!({"error": "boom"}));
         assert!(matches!(d.lookup("read_file", &args), DedupOutcome::Miss));
+    }
+}
+
+#[cfg(test)]
+mod bash_readonly_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn b(cmd: &str) -> Value {
+        json!({"command": cmd})
+    }
+
+    #[test]
+    fn read_only_commands_are_pure() {
+        assert!(bash_is_read_only(&b("ls -la /tmp")));
+        assert!(bash_is_read_only(&b("pwd && ls")));
+        assert!(bash_is_read_only(&b("find . -name '*.rs' | head -10")));
+        assert!(bash_is_read_only(&b("grep -r foo")));
+        assert!(bash_is_read_only(&b("cat README.md")));
+        assert!(bash_is_read_only(&b("git status")));
+        assert!(bash_is_read_only(&b("git diff --stat")));
+        assert!(bash_is_read_only(&b("echo hello")));
+    }
+
+    #[test]
+    fn mutating_commands_are_impure() {
+        assert!(!bash_is_read_only(&b("rm -rf foo")));
+        assert!(!bash_is_read_only(&b("mkdir new")));
+        assert!(!bash_is_read_only(&b("ls > out.txt")));
+        assert!(!bash_is_read_only(&b("cd src && ls")));
+        assert!(!bash_is_read_only(&b("git commit -m x")));
+        assert!(!bash_is_read_only(&b("ls | tee out.txt")));
+        assert!(!bash_is_read_only(&b("sed -i s/a/b/ file")));
+    }
+
+    #[test]
+    fn identical_readonly_bash_dedups() {
+        let mut d = ToolDedup::new();
+        let args = b("ls -la /tmp");
+        let r = json!({"result": "hello"});
+        d.record("bash", &args, &r);
+        match d.lookup("bash", &args) {
+            DedupOutcome::Hit(_) => {}
+            other => panic!("expected Hit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mutating_bash_skips_dedup() {
+        let mut d = ToolDedup::new();
+        let args = b("rm -rf /tmp/x");
+        d.record("bash", &args, &json!({"result": "ok"}));
+        assert!(matches!(d.lookup("bash", &args), DedupOutcome::Skip));
     }
 }
