@@ -3,3 +3,5 @@ jobs/
 bench/__pycache__/
 **/__pycache__/
 .cache/
+---
+.claude/

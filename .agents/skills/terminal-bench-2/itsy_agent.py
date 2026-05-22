@@ -1,19 +1,25 @@
 """Harbor adapter for the itsy agent.
 
-Uploads a prebuilt `itsy` binary into the bench task container, configures
-it to reach the host's llama-server via the socat hop on claude-sandbox's
-loopback (10.0.2.2:8000 from inside the task container resolves there),
-and runs the agent in one-shot mode against the task instruction.
+Uploads a prebuilt `itsy` binary into the bench task container and runs
+it in one-shot non-interactive mode against the task instruction.
+
+Lives next to the `terminal-bench-2` skill's SKILL.md. Because the
+parent directory contains a hyphen (a Python module-name violation),
+callers point `PYTHONPATH` at this directory so `itsy_agent` imports
+as a flat module.
 
 Usage (from the itsy repo root):
 
-    ITSY_BINARY=$PWD/target/release/itsy \\
-    ITSY_BASE_URL=http://10.0.2.2:8000/v1 \\
-    ITSY_MODEL=unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS \\
+    ITSY_BINARY=$PWD/target/x86_64-unknown-linux-musl/release/itsy \\
+    PYTHONPATH=$PWD/.agents/skills/terminal-bench-2 \\
     uv run --with harbor harbor run \\
         --dataset terminal-bench@2.0 \\
-        --agent-import-path bench.itsy_agent:ItsyAgent \\
-        --task fix-git --n-attempts 1 --n-concurrent 1
+        --agent-import-path itsy_agent:ItsyAgent \\
+        --model unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS \\
+        --include-task-name fix-git --n-attempts 1 --n-concurrent 1
+
+See `SKILL.md` in this directory for the full configuration
+walkthrough, prerequisites, and result interpretation.
 """
 
 from __future__ import annotations
