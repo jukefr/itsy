@@ -292,19 +292,25 @@ impl ShellSession {
                 return;
             }
             let head_sentinel = inner.queue[0].sentinel.clone();
-            // Look for `<sentinel>_<exit>_` anywhere in the buffer.
+            // Mirror upstream JS: look for sentinel_DIGITS_ with numeric exit code.
+            // bash -i echoes our own printf command to stderr (which the stderr reader
+            // merges into the same buffer), producing sentinel_%d_ with a literal %d.
+            // The previous implementation found that echo sentinel first, then confused
+            // the tail of the format string (\n' $?) as the command's stdout output.
+            // Fix: skip any sentinel match whose "exit code" isn't numeric.
             let needle = format!("{head_sentinel}_");
-            let Some(start) = inner.buffer.find(&needle) else { return };
-            // Parse the exit code after the second underscore.
-            let after = &inner.buffer[start + needle.len()..];
-            let Some(end_underscore) = after.find('_') else { return };
-            let exit_str = &after[..end_underscore];
-            let Ok(exit_code) = exit_str.parse::<i32>() else {
-                // Malformed — drop the sentinel from the buffer to avoid looping.
-                let drop_to = start + needle.len() + end_underscore + 1;
-                let buf_len = inner.buffer.len();
-                inner.buffer = inner.buffer.split_off(drop_to.min(buf_len));
-                continue;
+            let mut search_from = 0usize;
+            let (start, exit_code, end_underscore) = loop {
+                let Some(rel) = inner.buffer[search_from..].find(&needle) else { return };
+                let abs = search_from + rel;
+                let after = &inner.buffer[abs + needle.len()..];
+                let Some(end_u) = after.find('_') else { return };
+                let exit_str = &after[..end_u];
+                match exit_str.parse::<i32>() {
+                    Ok(code) => break (abs, code, end_u),
+                    // Non-numeric (e.g. %d from bash echo) — skip this occurrence.
+                    Err(_) => search_from = abs + needle.len(),
+                }
             };
 
             let stdout_raw = inner.buffer[..start].trim_end_matches(['\n', '\r']).to_string();
