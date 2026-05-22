@@ -386,6 +386,14 @@ pub fn bash_is_read_only(args: &Value) -> bool {
                 "status", "diff", "log", "show", "branch", "remote",
                 "blame", "tag", "config", "ls-files", "ls-tree",
                 "rev-parse", "describe", "shortlog", "stash",
+                // additional read-only inspection subcommands the model
+                // reaches for when investigating history / refs / lost
+                // commits — without these, repeat calls bypass dedup.
+                "reflog", "cherry", "for-each-ref", "cat-file",
+                "rev-list", "name-rev", "whatchanged", "fsck",
+                "verify-commit", "verify-tag", "count-objects",
+                "ls-remote", "show-ref", "symbolic-ref",
+                "check-ignore", "check-attr", "grep",
             ];
             if !GIT_READONLY.contains(&sub) {
                 return false;
