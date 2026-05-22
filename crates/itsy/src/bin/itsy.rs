@@ -584,6 +584,19 @@ fn build_full_system_prompt(
         prompt.push_str(&tr);
     }
 
+    // Active contract — the model's own definition of done. We inject
+    // a compact rendering so every turn sees the current assertion
+    // states; that's what stops the "I'm done" lie when assertions
+    // are still pending.
+    if itsy::settings::get().contract {
+        if let Some(c) = itsy::session::contract::current() {
+            prompt.push_str("\n\n");
+            prompt.push_str(&itsy::session::contract::render_for_prompt(&c));
+            prompt.push_str("\nRules: mark each assertion with `mark_assertion` (passed/failed/skipped) as you verify it. \
+                `close_contract completed` is refused while any assertion is `pending`.\n");
+        }
+    }
+
     prompt
 }
 
@@ -1490,6 +1503,73 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             }
         }
 
+        // Contract guard: refuse a "done / shipped / all green" claim
+        // while the active contract still has pending assertions. The
+        // model has to either flip the assertions itself with
+        // `mark_assertion`, or admit they're not done — no claiming
+        // success while the contract disagrees.
+        if itsy::settings::get().contract {
+            if let Some(c) = itsy::session::contract::current() {
+                let counts = c.counts();
+                if counts.pending > 0 {
+                    if let Some(content) = &content_opt {
+                        let lower = content.to_lowercase();
+                        // Match the most common "I'm done" wordings.
+                        // Narrow on purpose: don't fire on plain status
+                        // updates like "step 1 done".
+                        let claims_done = [
+                            "all done", "all set", "fully complete", "we're done",
+                            "task complete", "task is complete", "implementation complete",
+                            "everything works", "all tests pass", "all assertions",
+                            "everything is working", "successfully completed",
+                            "feature complete", "ready to ship",
+                        ]
+                        .iter()
+                        .any(|p| lower.contains(p));
+                        if claims_done {
+                            const MAX_CONTRACT_NUDGES: u32 = 2;
+                            let n = *per_turn_repeats
+                                .entry("__contract_pending".into())
+                                .and_modify(|n| *n += 1)
+                                .or_insert(1);
+                            if n <= MAX_CONTRACT_NUDGES {
+                                println!(
+                                    "  \x1b[33m⚠ Contract still has {} pending assertion(s) — model claimed done ({n}/{MAX_CONTRACT_NUDGES})\x1b[0m",
+                                    counts.pending
+                                );
+                                let pending_ids: Vec<&str> = c
+                                    .assertions
+                                    .iter()
+                                    .filter(|a| a.state
+                                        == itsy::session::contract::AssertionState::Pending)
+                                    .map(|a| a.id.as_str())
+                                    .collect();
+                                let mut hist = session.history.lock();
+                                hist.push(json!({"role": "assistant", "content": content}));
+                                hist.push(json!({
+                                    "role": "user",
+                                    "content": format!(
+                                        "[SYSTEM] You said the work is done, but the active contract still has these pending assertion(s): {}. \
+For each one, either call `mark_assertion` with a real verification command and observation, or `mark_assertion` it `skipped` with a justification. \
+Then call `close_contract` `completed`.",
+                                        pending_ids.join(", ")
+                                    ),
+                                }));
+                                continue;
+                            }
+                            session.trace.lock().record_error(
+                                "contract_pending_at_close",
+                                &format!(
+                                    "model claimed done with {} assertions still pending",
+                                    counts.pending
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         // Greeting guard: detect lost-context greeting after failures.
         if tool_calls_this_turn > 0 {
             if let Some(content) = &content_opt {
@@ -1594,6 +1674,14 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             }
         }
         break;
+    }
+
+    // Show the contract's current state once at end of turn so the user
+    // sees the model's own scoreboard alongside its text reply.
+    if itsy::settings::get().contract {
+        if let Some(c) = itsy::session::contract::current() {
+            println!("{}", tui::render_contract(&c));
+        }
     }
 
     if tool_calls_this_turn > 0 {
@@ -2322,6 +2410,10 @@ async fn main() -> Result<()> {
     let _reachable = check_endpoint(&mut config).await;
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    // Restore the active contract (if any) into the in-memory cache so
+    // tool calls in this session see the same state as the last one.
+    itsy::session::contract::rehydrate(&cwd);
 
     // Native code graph indexes regardless of whether the npm MCP bridge is
     // installed. The MCP bridge is attempted as a bonus; its failure is

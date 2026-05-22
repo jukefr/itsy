@@ -91,6 +91,7 @@ pub struct Settings {
     pub context_retrieval: bool,
     pub reviewer: bool,
     pub chain: bool,
+    pub contract: bool,
 
     // ── tui ──────────────────────────────────────────────────────
     pub auto_approve: bool,
@@ -196,6 +197,7 @@ impl Settings {
             context_retrieval: true,
             reviewer: false,
             chain: false,
+            contract: true,
 
             auto_approve: false,
             tui_classic: false,
@@ -270,6 +272,7 @@ impl Settings {
         s.context_retrieval = cfg.features.context_retrieval;
         s.reviewer = cfg.features.reviewer;
         s.chain = cfg.features.chain;
+        s.contract = cfg.features.contract;
         s
     }
 }
@@ -337,6 +340,7 @@ impl Settings {
             "features.context_retrieval" => self.context_retrieval = parse_bool(value)?,
             "features.reviewer" => self.reviewer = parse_bool(value)?,
             "features.chain" => self.chain = parse_bool(value)?,
+            "features.contract" | "contract" => self.contract = parse_bool(value)?,
 
             // tui
             "tui.auto_approve" | "auto_approve" => self.auto_approve = parse_bool(value)?,

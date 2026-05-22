@@ -509,6 +509,7 @@ pub fn run() -> Result<ConfigFile> {
         context_retrieval,
         reviewer,
         chain,
+        contract: true,
     };
 
     let web_browse = ask_bool("Enable web_search / web_fetch tools?", true);

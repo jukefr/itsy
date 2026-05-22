@@ -236,6 +236,49 @@ pub fn turn_summary(calls: u32) -> String {
     paint(C_GRAY, &format!("  ─── {calls} tool calls this turn ───"))
 }
 
+/// Compact one-block rendering of the active contract — title,
+/// counts, and a per-assertion checkbox grid.
+pub fn render_contract(c: &crate::session::contract::Contract) -> String {
+    use crate::session::contract::{AssertionState, ContractStatus};
+    let counts = c.counts();
+    let status_color = match c.status {
+        ContractStatus::Completed => C_GREEN,
+        ContractStatus::Active => C_CYAN,
+        ContractStatus::Aborted => C_RED,
+        ContractStatus::Draft => C_GRAY,
+    };
+    let mut out = String::new();
+    out.push_str(&paint(C_GRAY, "\n  ── contract ──"));
+    out.push('\n');
+    out.push_str(&format!(
+        "  {} {} {}\n",
+        paint(status_color, &format!("[{}]", c.status.as_str())),
+        paint(&format!("{C_BOLD}"), &c.title),
+        paint(
+            C_GRAY,
+            &format!(
+                "({}/{}/{}/{})",
+                counts.passed, counts.failed, counts.pending, counts.skipped
+            )
+        ),
+    ));
+    for a in &c.assertions {
+        let (badge_color, badge) = match a.state {
+            AssertionState::Passed => (C_GREEN, "✓"),
+            AssertionState::Failed => (C_RED, "✗"),
+            AssertionState::Skipped => (C_GRAY, "~"),
+            AssertionState::Pending => (C_YELLOW, "·"),
+        };
+        out.push_str(&format!(
+            "  {} {}  {}\n",
+            paint(badge_color, badge),
+            paint(C_GRAY, &a.id),
+            a.text,
+        ));
+    }
+    out
+}
+
 pub fn compacted(removed: u32) -> String {
     paint(C_GRAY, &format!("  [compacted {removed} old messages]"))
 }

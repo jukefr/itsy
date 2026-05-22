@@ -144,6 +144,13 @@ pub struct FeaturesConfig {
     /// main agent loop. Costs an extra LLM call.
     #[serde(default)]
     pub chain: bool,
+    /// Enable the on-disk contract feature: model commits to a list of
+    /// testable assertions up front, marks each passed/failed with
+    /// command evidence, and can't close the contract as `completed`
+    /// while any assertion is still pending. Defends against the
+    /// "I'm done" fabrication failure mode.
+    #[serde(default = "default_true")]
+    pub contract: bool,
 }
 
 fn default_bootstrap_max() -> usize {
@@ -169,6 +176,7 @@ impl Default for FeaturesConfig {
             context_retrieval: true,
             reviewer: false,
             chain: false,
+            contract: true,
         }
     }
 }

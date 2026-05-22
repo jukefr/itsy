@@ -62,6 +62,86 @@ pub static TOOLS: Lazy<Vec<Value>> = Lazy::new(|| vec![
     func_tool("memory_forget",
         "Delete a memory object by ID.",
         json!({"type":"object","properties":{"id":{"type":"string","description":"Memory object ID to delete"}},"required":["id"]})),
+
+    // ── contract: the agent's definition-of-done for the current task ──
+    func_tool("propose_contract",
+        "Define what 'done' looks like for the current task BEFORE starting work. \
+        Creates a contract with assertions you commit to verifying. \
+        Each assertion is a single testable statement (≤120 chars). \
+        Use 2-8 assertions for normal tasks. Anything you can't enumerate up front isn't part of the contract — \
+        you can still do the work, but `close_contract complete` will refuse if assertions are pending.",
+        json!({
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Short human title (≤60 chars)"},
+                "brief": {"type": "string", "description": "1-3 paragraph plan: what you'll do, the constraints, the shape of done."},
+                "assertions": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string", "description": "Stable ID, e.g. \"A.001\""},
+                            "text": {"type": "string", "description": "Single testable statement, ≤120 chars"}
+                        },
+                        "required": ["id", "text"]
+                    }
+                },
+                "features": {
+                    "type": "array",
+                    "description": "Optional sub-tasks. Each can fulfill one or more assertion IDs.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "description": {"type": "string"},
+                            "fulfills": {"type": "array", "items": {"type": "string"}}
+                        },
+                        "required": ["id", "description"]
+                    }
+                }
+            },
+            "required": ["title", "brief", "assertions"]
+        })),
+    func_tool("mark_assertion",
+        "Mark a contract assertion `passed` / `failed` / `skipped` with evidence. \
+        `passed` requires evidence + at least one verification command (the actual output you saw). \
+        Lazy observations like \"OK\" or \"tests passed\" are rejected — write what you actually saw.",
+        json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "Assertion ID, e.g. \"A.001\""},
+                "state": {"type": "string", "enum": ["passed", "failed", "skipped"]},
+                "evidence": {"type": "string", "description": "Plain-text explanation of how you verified (≥10 chars)"},
+                "command": {"type": "string", "description": "Command you ran (optional but encouraged for `passed`)"},
+                "exit_code": {"type": "integer", "description": "Exit code of the command"},
+                "observation": {"type": "string", "description": "Specific output you saw — NOT \"passed\""}
+            },
+            "required": ["id", "state", "evidence"]
+        })),
+    func_tool("mark_feature",
+        "Mark a contract feature `in_progress` / `done` / `cancelled`. Optional bookkeeping; not required.",
+        json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "string"},
+                "state": {"type": "string", "enum": ["in_progress", "done", "cancelled"]}
+            },
+            "required": ["id", "state"]
+        })),
+    func_tool("contract_status",
+        "Read the current contract state — which assertions are passed / failed / pending.",
+        json!({"type": "object", "properties": {}})),
+    func_tool("close_contract",
+        "Finalize the active contract. `completed` is refused unless every assertion is in a non-pending state. \
+        `aborted` discards the contract.",
+        json!({
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "enum": ["completed", "aborted"]}
+            },
+            "required": ["status"]
+        })),
 ]);
 
 pub static COMPOUND_TOOLS: Lazy<Vec<Value>> = Lazy::new(|| vec![

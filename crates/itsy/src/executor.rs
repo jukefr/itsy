@@ -62,6 +62,11 @@ pub async fn execute_tool(name: &str, mut args: Value, ctx: &ExecCtx<'_>) -> Val
         }
         "web_search" => exec_web_search(&args).await,
         "web_fetch" => exec_web_fetch(&args).await,
+        "propose_contract" => exec_propose_contract(&args, &cwd).await,
+        "mark_assertion" => exec_mark_assertion(&args, &cwd).await,
+        "mark_feature" => exec_mark_feature(&args, &cwd).await,
+        "contract_status" => exec_contract_status().await,
+        "close_contract" => exec_close_contract(&args, &cwd).await,
         "select_category" => {
             let cat = args.get("category").and_then(|v| v.as_str()).unwrap_or("read");
             json!({"result": format!("Category: {cat}. Proceed with your tool call."), "category": cat})
@@ -897,5 +902,235 @@ fn truncate(s: &str, n: usize) -> String {
             end -= 1;
         }
         s[..end].to_string()
+    }
+}
+
+// ── contract tools ─────────────────────────────────────────────────────────
+
+async fn exec_propose_contract(args: &Value, cwd: &Path) -> Value {
+    use crate::session::contract;
+    let title = match args.get("title").and_then(|v| v.as_str()) {
+        Some(t) if !t.trim().is_empty() && t.len() <= 200 => t.to_string(),
+        Some(_) => return json!({"error": "title must be 1-200 chars"}),
+        None => return json!({"error": "missing `title`"}),
+    };
+    let brief = match args.get("brief").and_then(|v| v.as_str()) {
+        Some(b) if b.trim().len() >= 20 => b.to_string(),
+        Some(_) => {
+            return json!({
+                "error": "`brief` must be at least 20 characters — describe what you'll do and what done looks like"
+            })
+        }
+        None => return json!({"error": "missing `brief`"}),
+    };
+    let assertions_val = args.get("assertions").and_then(|v| v.as_array());
+    let Some(arr) = assertions_val else {
+        return json!({"error": "missing `assertions` array (need at least one)"});
+    };
+    if arr.is_empty() {
+        return json!({"error": "`assertions` must contain at least one item"});
+    }
+    if arr.len() > 24 {
+        return json!({
+            "error": "more than 24 assertions — too many to track. Group related ones or split the contract."
+        });
+    }
+    let mut assertions: Vec<(String, String)> = Vec::with_capacity(arr.len());
+    let mut seen_ids = std::collections::HashSet::new();
+    for (i, a) in arr.iter().enumerate() {
+        let id = match a.get("id").and_then(|v| v.as_str()) {
+            Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+            _ => return json!({"error": format!("assertions[{i}]: missing or empty `id`")}),
+        };
+        if !seen_ids.insert(id.clone()) {
+            return json!({"error": format!("duplicate assertion id `{id}`")});
+        }
+        let text = match a.get("text").and_then(|v| v.as_str()) {
+            Some(s) if s.trim().len() >= 5 && s.len() <= 200 => s.trim().to_string(),
+            Some(_) => {
+                return json!({
+                    "error": format!("assertions[{i}].text must be 5-200 chars; keep it to one testable statement")
+                })
+            }
+            _ => return json!({"error": format!("assertions[{i}]: missing `text`")}),
+        };
+        assertions.push((id, text));
+    }
+    let features = args
+        .get("features")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|f| {
+                    let id = f.get("id").and_then(|v| v.as_str())?.to_string();
+                    let description = f.get("description").and_then(|v| v.as_str())?.to_string();
+                    let fulfills: Vec<String> = f
+                        .get("fulfills")
+                        .and_then(|v| v.as_array())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|x| x.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    Some((id, description, fulfills))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    match contract::create(cwd, title.clone(), brief, assertions, features) {
+        Ok(c) => json!({
+            "result": format!(
+                "Contract `{}` created with {} assertions. \
+                 Work the assertions, marking each with mark_assertion as you go. \
+                 Call close_contract(\"completed\") when every assertion is non-pending.",
+                c.id,
+                c.assertions.len()
+            ),
+            "contract_id": c.id,
+            "title": c.title,
+            "assertion_ids": c.assertions.iter().map(|a| a.id.clone()).collect::<Vec<_>>(),
+        }),
+        Err(e) => json!({"error": format!("propose_contract: {e}")}),
+    }
+}
+
+async fn exec_mark_assertion(args: &Value, cwd: &Path) -> Value {
+    use crate::session::contract::{self, AssertionState, CommandEvidence};
+    let Some(id) = args.get("id").and_then(|v| v.as_str()) else {
+        return json!({"error": "missing assertion `id`"});
+    };
+    let Some(state_s) = args.get("state").and_then(|v| v.as_str()) else {
+        return json!({"error": "missing `state` (passed | failed | skipped)"});
+    };
+    let state = match state_s {
+        "passed" => AssertionState::Passed,
+        "failed" => AssertionState::Failed,
+        "skipped" => AssertionState::Skipped,
+        _ => return json!({"error": "`state` must be one of passed | failed | skipped"}),
+    };
+    let evidence = match args.get("evidence").and_then(|v| v.as_str()) {
+        Some(s) if s.trim().len() >= 10 => s.trim().to_string(),
+        _ => {
+            return json!({
+                "error": "`evidence` must be at least 10 chars — describe how you verified"
+            })
+        }
+    };
+    // Optional command run details.
+    let check = match (
+        args.get("command").and_then(|v| v.as_str()),
+        args.get("exit_code").and_then(|v| v.as_i64()),
+        args.get("observation").and_then(|v| v.as_str()),
+    ) {
+        (Some(cmd), Some(ec), Some(obs)) if !cmd.is_empty() && obs.len() >= 5 => {
+            let lower = obs.trim().to_lowercase();
+            if matches!(
+                lower.as_str(),
+                "ok" | "passed" | "passes" | "done" | "good" | "success" | "tests passed"
+            ) {
+                return json!({
+                    "error": format!(
+                        "observation \"{obs}\" is too vague — write the specific output you saw"
+                    )
+                });
+            }
+            Some(CommandEvidence {
+                command: cmd.to_string(),
+                exit_code: ec,
+                observation: obs.to_string(),
+                timestamp: contract::now_iso(),
+            })
+        }
+        _ => None,
+    };
+    // For `passed`, we want at least *some* anchored evidence. Either
+    // a command result or a meaty evidence string (≥30 chars).
+    if state == AssertionState::Passed && check.is_none() && evidence.len() < 30 {
+        return json!({
+            "error": "marking `passed` without a verification command requires substantive evidence (≥30 chars). \
+                     Re-run the check and include command + observation."
+        });
+    }
+
+    match contract::mark_assertion(cwd, id, state, evidence, check) {
+        Ok(c) => {
+            let counts = c.counts();
+            json!({
+                "result": format!(
+                    "Marked {id} as {} ({} passed / {} failed / {} pending).",
+                    state.as_str(),
+                    counts.passed,
+                    counts.failed,
+                    counts.pending,
+                ),
+                "remaining_pending": counts.pending,
+            })
+        }
+        Err(e) => json!({"error": format!("mark_assertion: {e}")}),
+    }
+}
+
+async fn exec_mark_feature(args: &Value, cwd: &Path) -> Value {
+    use crate::session::contract::{self, FeatureState};
+    let Some(id) = args.get("id").and_then(|v| v.as_str()) else {
+        return json!({"error": "missing feature `id`"});
+    };
+    let Some(state_s) = args.get("state").and_then(|v| v.as_str()) else {
+        return json!({"error": "missing `state` (in_progress | done | cancelled)"});
+    };
+    let state = match state_s {
+        "in_progress" => FeatureState::InProgress,
+        "done" => FeatureState::Done,
+        "cancelled" => FeatureState::Cancelled,
+        _ => return json!({"error": "`state` must be in_progress | done | cancelled"}),
+    };
+    match contract::mark_feature(cwd, id, state) {
+        Ok(_) => json!({"result": format!("Feature {id} marked {}", state.as_str())}),
+        Err(e) => json!({"error": format!("mark_feature: {e}")}),
+    }
+}
+
+async fn exec_contract_status() -> Value {
+    use crate::session::contract;
+    match contract::current() {
+        Some(c) => json!({
+            "result": contract::render_for_prompt(&c),
+            "contract_id": c.id,
+            "status": c.status.as_str(),
+            "counts": {
+                "total": c.counts().total,
+                "passed": c.counts().passed,
+                "failed": c.counts().failed,
+                "pending": c.counts().pending,
+                "skipped": c.counts().skipped,
+            },
+        }),
+        None => json!({"result": "(no active contract)"}),
+    }
+}
+
+async fn exec_close_contract(args: &Value, cwd: &Path) -> Value {
+    use crate::session::contract::{self, ContractStatus};
+    let Some(status_s) = args.get("status").and_then(|v| v.as_str()) else {
+        return json!({"error": "missing `status` (completed | aborted)"});
+    };
+    let status = match status_s {
+        "completed" => ContractStatus::Completed,
+        "aborted" => ContractStatus::Aborted,
+        _ => return json!({"error": "`status` must be completed or aborted"}),
+    };
+    match contract::close(cwd, status) {
+        Ok(c) => {
+            let counts = c.counts();
+            json!({
+                "result": format!(
+                    "Contract `{}` closed as {} — {} passed / {} failed / {} skipped of {}.",
+                    c.id, c.status.as_str(), counts.passed, counts.failed, counts.skipped, counts.total,
+                ),
+            })
+        }
+        Err(e) => json!({"error": format!("close_contract: {e}")}),
     }
 }
