@@ -727,9 +727,21 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
     // are *not* obviously actionable (paths, option-refs, affirmations).
     // Ports the a85c90c fix: instruction is spliced out after the model
     // responds so it doesn't linger across turns.
+    // Ports the assistantAskedQuestion bypass: if the model's last turn ended
+    // with a question mark, the user's reply is an answer, not a new vague task.
     let clarifier_enabled = session.config.lock().features.clarifier;
+    let assistant_asked_question = {
+        let hist = session.history.lock();
+        hist.iter()
+            .rev()
+            .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("assistant"))
+            .and_then(|m| m.get("content").and_then(|c| c.as_str()))
+            .map(|c| c.trim_end().ends_with('?'))
+            .unwrap_or(false)
+    };
     if clarifier_enabled
         && user_msg.len() < 80
+        && !assistant_asked_question
         && !looks_like_path(&user_msg)
         && !looks_like_option_ref(&user_msg)
         && !is_affirmation(&user_msg)
@@ -1806,8 +1818,13 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             }
             // Post-hoc reviewer — costs one extra LLM call per turn so
             // it's off by default. When enabled, surfaces an "LGTM" or
-            // a short list of issues.
-            if session.config.lock().features.reviewer {
+            // a short list of issues. Only fires when files were edited
+            // this turn and the response is non-trivial (> 50 chars) —
+            // mirrors JS: `_editedFilesThisTurn.length > 0 && message.content.length > 50`.
+            if session.config.lock().features.reviewer
+                && !edited_files.is_empty()
+                && content.len() > 50
+            {
                 let cfg = session.config.lock().clone();
                 let review = itsy::model::reviewer::review_response(
                     &user_msg,
