@@ -61,14 +61,33 @@ Verify these before launching. The skill should NOT proceed silently if
 anything's missing — surface the gap and either install/fix it or ask the
 user how to proceed.
 
+**Always run `itsy-bench-net` first.** The bring-up script lives at
+`.agents/skills/terminal-bench-2/itsy-bench-net.sh` (and is mirrored to
+`/usr/local/bin/itsy-bench-net`). It restarts the rootless docker daemon
+with `DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=false` and
+starts a `socat 8000 → 10.0.2.2:8000` hop so harbor task containers can
+reach the host's `llama-server`. The repo also installs a
+SessionStart hook in `.claude/settings.json` that runs the script
+automatically on every Claude Code session boot — so you usually don't
+need to think about it. Re-run by hand when:
+
+* a previous run died mid-trial and orphaned the daemon
+* `curl http://10.0.2.2:8000/v1/models` from a child container fails
+* you're driving harbor from a non-Claude-Code shell
+
+```bash
+itsy-bench-net          # idempotent; exits 0 when everything's healthy
+```
+
 | Need | Check | Fix |
 |---|---|---|
 | Rust toolchain + musl target | `rustup target list --installed \| grep musl` | `rustup target add x86_64-unknown-linux-musl && apt-get install -y musl-tools` |
 | Built musl binary | `ls target/x86_64-unknown-linux-musl/release/itsy` | `cargo build --release --target x86_64-unknown-linux-musl` |
 | `uv` | `which uv` | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
-| Docker daemon reachable | `docker info` | start docker / fix `DOCKER_HOST` |
+| Docker daemon reachable | `docker info` | `itsy-bench-net` |
 | Docker compose plugin | `docker compose version` | drop binary at `~/.docker/cli-plugins/docker-compose` |
-| llama-server (or compatible OpenAI endpoint) | `curl -s $BASE_URL/models` | start `llama-server` or point at the right endpoint |
+| Child container → LLM | `docker run --rm alpine wget -qO- --timeout=5 http://10.0.2.2:8000/v1/models \| head -c 30` | `itsy-bench-net` |
+| llama-server itself | `curl -s http://10.0.2.2:8000/v1/models` from this container | start `llama-server` or point at the right endpoint |
 
 The musl binary matters — bench task images often ship with glibc 2.36ish,
 older than the host, so a glibc-linked binary will fail with
@@ -263,7 +282,7 @@ done | sort
 | `Reached tool call limit` at 32 calls | Pre-fix binary | Rebuild — limit is 250 now |
 | Empty model responses | `max_output_tokens` < `thinking_budget` | Adapter already handles this via `--thinking-budget` plumbing into `max_output_tokens` auto |
 | All trials error with `RuntimeError: Docker compose command failed` | docker compose plugin not installed | Install per "Prerequisites" |
-| 10.0.2.2 not reachable from child container | Container in different netns | Ask user for the right host/IP; some setups need `host.docker.internal` or the docker bridge gateway |
+| 10.0.2.2 not reachable from child container | Rootless docker daemon started with `DISABLE_HOST_LOOPBACK=true`, or no socat hop in this container | Run `itsy-bench-net` — it restarts the daemon with the right env var and brings up socat. Idempotent. |
 
 ## Stopping a run cleanly
 

@@ -3,5 +3,10 @@ jobs/
 bench/__pycache__/
 **/__pycache__/
 .cache/
----
-.claude/
+
+# Claude Code project-local state — most of it is ephemeral (session
+# transcripts, scheduled-task locks, shell snapshots) but we keep
+# settings.json in the repo so the SessionStart hook persists across
+# checkouts.
+.claude/*
+!.claude/settings.json
