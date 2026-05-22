@@ -53,7 +53,18 @@ use itsy::tui;
 // ── Constants ────────────────────────────────────────────────────────────────
 
 /// Maximum tool calls allowed per single user turn before we bail out.
-const MAX_TOOL_CALLS_PER_TURN: u32 = 32;
+/// Overridable via `ITSY_MAX_TOOL_CALLS_PER_TURN`; the hard cap matters
+/// for long-running non-interactive runs (benchmarks, batch scripts)
+/// where a 32-call ceiling is hit during exploration alone. 250 is a
+/// generous default that still bounds runaway loops.
+const DEFAULT_MAX_TOOL_CALLS_PER_TURN: u32 = 250;
+
+fn max_tool_calls_per_turn() -> u32 {
+    std::env::var("ITSY_MAX_TOOL_CALLS_PER_TURN")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_MAX_TOOL_CALLS_PER_TURN)
+}
 /// Maximum auto-improvement iterations per file before we DECOMPOSE.
 const MAX_IMPROVE_ITERATIONS: u32 = 4;
 /// Maximum size of any single tool result before we cap it (chars).
@@ -740,6 +751,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
     }
 
     let mut tool_calls_this_turn: u32 = 0;
+    let max_tool_calls_this_turn = max_tool_calls_per_turn();
     let mut edited_files: Vec<String> = Vec::new();
     let mut improvement_attempts: std::collections::HashMap<String, u32> = Default::default();
     // Per-turn "you've already called this" counter, keyed by a hash of
@@ -758,7 +770,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
 
     // 7) Main while-loop.
     loop {
-        if tool_calls_this_turn >= MAX_TOOL_CALLS_PER_TURN {
+        if tool_calls_this_turn >= max_tool_calls_this_turn {
             println!("\n  \x1b[33m⚠ Reached tool call limit\x1b[0m");
             break;
         }
