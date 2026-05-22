@@ -23,14 +23,14 @@ Vibes are not evidence. "It should help" is not a result. A feature is allowed t
 ## The flow
 
 1. **Pin a baseline commit.** `git rev-parse HEAD` before you touch anything. That's your reference.
-2. **Run a baseline benchmark.** Use the [terminal-bench-2](../terminal-bench-2/SKILL.md) skill. For most changes, run the 11-task scoreboard at `--n-attempts 3 --n-concurrent 1`. Store the resulting `result.json` under `bench/baselines/<commit-sha>.json`.
+2. **Run a baseline benchmark.** Use the [terminal-bench-2](../terminal-bench-2/SKILL.md) skill. For most changes, run the 11-task scoreboard at `--n-attempts 3 --n-concurrent 1`. Snapshot the resulting `jobs/<job-name>/` directory into `.agents/skills/benchmark-driven-development/baselines/<short-name>/` (e.g. `cp -r jobs/main-baseline baselines/main-7c6c26c`).
 3. **Implement the feature.** No rush — the baseline is now your ground truth.
-4. **Run the same benchmark on the feature branch.** Same model, same tasks, same attempts, same concurrency. Store under `bench/baselines/<feature-branch-name>.json`.
-5. **Compare.** Use `bench/baselines/diff.py` (create it if missing — see Implementation). Look at:
+4. **Run the same benchmark on the feature branch.** Same model, same tasks, same attempts, same concurrency. Snapshot the same way under `baselines/<feature-name>/`.
+5. **Compare.** Run `./diff.py baselines/<baseline> baselines/<feature>` (or against a live `jobs/<x>/` dir — `diff.py` accepts either). It prints:
    - Mean reward delta (the headline)
    - Per-task pass-count diff (no task should regress)
    - Wall-clock delta (a 5% reward gain that doubles wall time is usually a bad trade)
-   - Failure-mode distribution shift (did we trade `stuck-loop` for `verifier-correctness`?)
+   - Verdict line + exit code (0 improvement, 1 regression, 2 noise)
 6. **Decide.** Pass → commit. Fail → revert or gate behind a default-off flag. Mixed → write up the trade-off in the commit body so future-you can re-evaluate.
 
 ## Quick reference
@@ -38,46 +38,22 @@ Vibes are not evidence. "It should help" is not a result. A feature is allowed t
 | Step | Where the artifact lives |
 |---|---|
 | Baseline commit SHA | commit message of the feature PR |
-| Baseline result.json | `bench/baselines/<sha>.json` |
-| Feature-branch result.json | `bench/baselines/<branch>.json` |
-| Diff report | `bench/baselines/diff.py <baseline> <feature>` |
+| Baseline snapshot | `.agents/skills/benchmark-driven-development/baselines/<sha-or-name>/` |
+| Feature-branch snapshot | `.agents/skills/benchmark-driven-development/baselines/<name>/` |
+| Diff tool | `.agents/skills/benchmark-driven-development/diff.py` (executable) |
 | Per-task verifier outputs | inherited from terminal-bench-2 layout |
 
 ## Implementation
 
-For the diff tool — keep it simple, one Python file:
+The diff tool lives next to this skill at `diff.py`. Usage:
 
-```python
-# bench/baselines/diff.py — usage: ./diff.py baseline.json feature.json
-import json, sys
-from pathlib import Path
-
-def load(p):
-    d = json.load(open(p))
-    s = d["stats"]
-    eval_block = list(s["evals"].values())[0]
-    return {
-        "mean_reward": eval_block["metrics"][0]["mean"],
-        "n_completed": s["n_completed_trials"],
-        "n_errored":   s["n_errored_trials"],
-        "label":       Path(p).stem,
-    }
-
-def per_task(p):
-    out = {}
-    for d in Path(p).parent.glob(f"{Path(p).parent.name}/*__*"):
-        # Adjust to point at the actual job dir layout.
-        ...
-    return out
-
-a = load(sys.argv[1])
-b = load(sys.argv[2])
-print(f"{'metric':<20} {a['label']:>14} {b['label']:>14}  delta")
-print(f"{'mean_reward':<20} {a['mean_reward']:>14.3f} {b['mean_reward']:>14.3f}  {b['mean_reward']-a['mean_reward']:+.3f}")
-print(f"{'n_errored':<20} {a['n_errored']:>14} {b['n_errored']:>14}  {b['n_errored']-a['n_errored']:+d}")
+```bash
+./diff.py baselines/main-<sha> baselines/<feature-name>
 ```
 
-Wire it up the first time you need it. After that, every feature gets two `bench/baselines/*.json` files referenced in the commit message.
+It exits 0 on improvement (delta ≥ +0.02), 1 on regression, 2 on noise.
+Adjust the threshold with `--threshold 0.05` for tighter or `--threshold 0.01`
+for looser. Reads either a stored snapshot or a live `jobs/<x>/` dir.
 
 ## What counts as "moved the right way"
 
