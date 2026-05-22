@@ -977,19 +977,34 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                 *repeat_count += 1;
                 if *repeat_count >= BREAK_ON_REPEAT {
                     let msg = format!(
-                        "Stuck calling `{name}` with identical args ({} times). Aborting this turn.",
+                        "Stuck calling `{name}` with identical args ({} times) — skipping this call and asking you to take a different approach.",
                         *repeat_count
                     );
                     println!("  \x1b[31m⚠ {msg}\x1b[0m");
                     session.trace.lock().record_error("repeat_spiral", &msg);
                     // Push as a tool result so the conversation history
-                    // stays coherent for the next turn.
+                    // stays coherent — the model now sees that this call
+                    // was refused and (hopefully) tries something else
+                    // on the next iteration. In non-interactive mode
+                    // returning would terminate the whole agent before
+                    // it produced any output, so we keep the loop alive
+                    // by skipping just this tool call. The mid-turn
+                    // tool-call cap still bounds the worst case.
                     session.history.lock().push(json!({
                         "role": "tool",
                         "tool_call_id": id,
-                        "content": format!("[ABORTED] {msg}"),
+                        "content": format!(
+                            "[ABORTED] {msg}\n\
+                             Reflect on what's blocking you. The result \
+                             of this call will not change — pick a \
+                             different file, command, or strategy."
+                        ),
                     }));
-                    return;
+                    // Reset the per-turn repeat counter for THIS key so
+                    // we don't immediately re-abort on the next loop
+                    // iteration if the model picks the same call again.
+                    *repeat_count = 0;
+                    continue;
                 }
                 if *repeat_count > MAX_IDENTICAL_REPEATS_PER_TURN {
                     let hint = format!(
