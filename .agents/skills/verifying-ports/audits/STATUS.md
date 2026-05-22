@@ -41,7 +41,7 @@ These run on every turn. Highest impact for bugs.
 | `crates/itsy/src/tools_impl/dedup.rs` | `src/tools/dedup.js` | `AUDITED` | `e29eb3e` |
 | `crates/itsy/src/executor.rs` | `bin/executor.js` | `PARTIAL` | — (port-incomplete; see notes) |
 | `crates/itsy/src/tools.rs` | `bin/tools.js` | `AUDITED` | (no changes needed) |
-| `crates/itsy/src/model_client.rs` | `bin/model_client.js` | `NOT_AUDITED` | — |
+| `crates/itsy/src/model_client.rs` | `bin/model_client.js` | `AUDITED` | (pending) |
 | `crates/itsy/src/bin/itsy.rs` | `bin/smallcode.js` | `NOT_AUDITED` | — |
 
 ## Tier 2 — model + governance
