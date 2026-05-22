@@ -2,30 +2,25 @@
 //!
 //! Tracks consecutive-failure counts per tool (optionally per task-type) and
 //! provides predicates the router uses to demote or drop unreliable tools.
-//! Extends the upstream JS implementation with:
 //!
-//!   • time-based exponential decay (failures fade with age)
-//!   • per `(tool, task_type)` scoring slots
-//!   • disk persistence (atomic file rewrite)
-//!   • `should_avoid` predicate for fast inline checks
-//!   • configurable reset thresholds
+//! Port of upstream `src/tools/trust_decay.js`. Rust additions beyond the JS:
+//!   • per `(tool, task_type)` scoring slots (`record_combo` / `level_combo`)
+//!   • disk persistence (`load` / `save`)
+//!   • `should_avoid` / `summary` helpers
 //!
 //! Configuration:
-//!   ITSY_TRUST_DECAY=false       disable entirely
-//!   ITSY_TRUST_WARN=3            consecutive fails before soft-demote
-//!   ITSY_TRUST_DROP=5            consecutive fails before hard-drop
-//!   ITSY_TRUST_RESET=true        reset counter on any success (default true)
-//!   ITSY_TRUST_HALFLIFE_SEC=3600 seconds for a failure point to decay by 50%
+//!   ITSY_TRUST_DECAY=false   disable entirely
+//!   ITSY_TRUST_WARN=3        consecutive fails before soft-demote
+//!   ITSY_TRUST_DROP=5        consecutive fails before hard-drop
+//!   ITSY_TRUST_RESET=true    reset counter on any success (default true)
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_WARN: u32 = 3;
 const DEFAULT_DROP: u32 = 5;
-const DEFAULT_HALFLIFE_SEC: i64 = 3600;
 
 /// Trust level for a tool (or tool+task-type combo).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,17 +37,10 @@ pub struct ToolScore {
     pub consecutive_fails: u32,
     pub total_fails: u32,
     pub total_calls: u32,
-    /// Smoothed success rate in `[0.0, 1.0]`. Starts at 0.6 to match the
-    /// previous Rust stub default.
-    pub trust: f64,
-    /// Last-update timestamp (Unix seconds).
-    pub last_update: i64,
 }
 
 impl ToolScore {
-    fn new() -> Self {
-        Self { trust: 0.6, last_update: Utc::now().timestamp(), ..Default::default() }
-    }
+    fn new() -> Self { Self::default() }
 }
 
 /// Per-session trust tracker with optional persistence.
@@ -62,7 +50,6 @@ pub struct TrustState {
     pub warn_threshold: u32,
     pub drop_threshold: u32,
     pub reset_on_success: bool,
-    pub halflife_sec: i64,
     /// Per-tool scores. Keyed by `tool` for the simple API or by
     /// `tool::task_type` for the combo API.
     #[serde(default)]
@@ -72,21 +59,16 @@ pub struct TrustState {
 impl Default for TrustState {
     fn default() -> Self {
         Self {
-            disabled: env_bool("ITSY_TRUST_DECAY", true) == false,
+            disabled: !env_bool("ITSY_TRUST_DECAY", true),
             warn_threshold: env_u32("ITSY_TRUST_WARN", DEFAULT_WARN),
             drop_threshold: env_u32("ITSY_TRUST_DROP", DEFAULT_DROP),
             reset_on_success: env_bool("ITSY_TRUST_RESET", true),
-            halflife_sec: env_i64("ITSY_TRUST_HALFLIFE_SEC", DEFAULT_HALFLIFE_SEC),
             scores: HashMap::new(),
         }
     }
 }
 
 fn env_u32(key: &str, default: u32) -> u32 {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
-}
-
-fn env_i64(key: &str, default: i64) -> i64 {
     std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
@@ -109,45 +91,26 @@ fn key_for(tool: &str, task_type: Option<&str>) -> String {
 impl TrustState {
     pub fn new() -> Self { Self::default() }
 
-    /// Backwards-compatible recording API used by older callers.
+    /// Record a tool outcome. Mirrors upstream `record(toolName, success)`.
     pub fn record(&mut self, tool: &str, success: bool) {
         self.record_combo(tool, None, success);
     }
 
-    /// Record a tool outcome, optionally tagged by task type. Time decay is
-    /// applied lazily before mutating the slot.
+    /// Record a tool outcome, optionally tagged by task type.
     pub fn record_combo(&mut self, tool: &str, task_type: Option<&str>, success: bool) {
         if self.disabled || tool.is_empty() { return; }
         let key = key_for(tool, task_type);
-        let now = Utc::now().timestamp();
-        let halflife = self.halflife_sec.max(1);
         let s = self.scores.entry(key).or_insert_with(ToolScore::new);
-        // Decay consecutive failure pressure based on elapsed time.
-        let elapsed = (now - s.last_update).max(0);
-        if elapsed > 0 && s.consecutive_fails > 0 {
-            let factor = 0.5f64.powf(elapsed as f64 / halflife as f64);
-            let decayed = (s.consecutive_fails as f64 * factor).floor() as u32;
-            s.consecutive_fails = decayed;
-        }
         s.total_calls = s.total_calls.saturating_add(1);
         if success {
             if self.reset_on_success { s.consecutive_fails = 0; }
-            s.trust = (s.trust * 0.7 + 0.3).min(0.99);
         } else {
             s.consecutive_fails = s.consecutive_fails.saturating_add(1);
             s.total_fails = s.total_fails.saturating_add(1);
-            s.trust = (s.trust * 0.7).max(0.0);
         }
-        s.last_update = now;
     }
 
-    /// Backwards-compatible getter — returns the smoothed trust value
-    /// (defaults to 0.6 when unknown).
-    pub fn get(&self, tool: &str) -> f64 {
-        self.scores.get(tool).map(|s| s.trust).unwrap_or(0.6)
-    }
-
-    /// Trust level for a tool, applying current time decay non-destructively.
+    /// Trust level for a tool. Mirrors upstream `level(toolName)`.
     pub fn level(&self, tool: &str) -> TrustLevel {
         self.level_combo(tool, None)
     }
@@ -156,21 +119,15 @@ impl TrustState {
         if self.disabled { return TrustLevel::Ok; }
         let key = key_for(tool, task_type);
         let Some(s) = self.scores.get(&key) else { return TrustLevel::Ok; };
-        let now = Utc::now().timestamp();
-        let elapsed = (now - s.last_update).max(0);
-        let halflife = self.halflife_sec.max(1);
-        let factor = 0.5f64.powf(elapsed as f64 / halflife as f64);
-        let effective = (s.consecutive_fails as f64 * factor) as u32;
-        if effective >= self.drop_threshold { TrustLevel::Drop }
-        else if effective >= self.warn_threshold { TrustLevel::Warn }
+        if s.consecutive_fails >= self.drop_threshold { TrustLevel::Drop }
+        else if s.consecutive_fails >= self.warn_threshold { TrustLevel::Warn }
         else { TrustLevel::Ok }
     }
 
     pub fn is_drop(&self, tool: &str) -> bool { matches!(self.level(tool), TrustLevel::Drop) }
     pub fn is_warn(&self, tool: &str) -> bool { matches!(self.level(tool), TrustLevel::Warn) }
 
-    /// Fast "should the router avoid this tool right now?" predicate. Treats
-    /// both `Warn` and `Drop` as avoid-if-anything-else-works signals.
+    /// Both `Warn` and `Drop` signal avoidance.
     pub fn should_avoid(&self, tool: &str) -> bool {
         !matches!(self.level(tool), TrustLevel::Ok)
     }
@@ -179,12 +136,12 @@ impl TrustState {
         !matches!(self.level_combo(tool, task_type), TrustLevel::Ok)
     }
 
-    /// Reset just one slot (e.g. after the user fixes a tool's auth).
+    /// Reset just one slot.
     pub fn reset_tool(&mut self, tool: &str) {
         self.scores.remove(tool);
     }
 
-    /// Reset all state. Mirrors the upstream `reset()`.
+    /// Reset all state. Mirrors upstream `reset()`.
     pub fn reset(&mut self) { self.scores.clear(); }
 
     /// Brief one-line summary of demoted tools — `None` if nothing is demoted.
@@ -206,7 +163,7 @@ impl TrustState {
     }
 
     /// Filter a tool-name list: drop blacklisted tools, push warned ones to
-    /// the back. Preserves the relative order within each bucket.
+    /// the back. Mirrors upstream `filterAndSort(tools)`.
     pub fn filter_and_sort<T: Clone, F: Fn(&T) -> &str>(&self, items: &[T], name_of: F) -> Vec<T> {
         if self.disabled { return items.to_vec(); }
         let mut ok: Vec<T> = Vec::new();
@@ -256,7 +213,7 @@ mod tests {
 
     #[test]
     fn record_and_thresholds() {
-        let mut st = TrustState { halflife_sec: 1_000_000, ..TrustState::default() };
+        let mut st = TrustState::default();
         st.disabled = false;
         st.warn_threshold = 2;
         st.drop_threshold = 4;
@@ -270,7 +227,7 @@ mod tests {
 
     #[test]
     fn should_avoid_and_summary() {
-        let mut st = TrustState { halflife_sec: 1_000_000, ..TrustState::default() };
+        let mut st = TrustState::default();
         st.disabled = false;
         st.warn_threshold = 1;
         st.drop_threshold = 99;
@@ -281,7 +238,7 @@ mod tests {
 
     #[test]
     fn combo_keys_are_independent() {
-        let mut st = TrustState { halflife_sec: 1_000_000, ..TrustState::default() };
+        let mut st = TrustState::default();
         st.disabled = false;
         st.warn_threshold = 1;
         st.drop_threshold = 2;
@@ -293,7 +250,7 @@ mod tests {
 
     #[test]
     fn filter_and_sort_demotes_and_drops() {
-        let mut st = TrustState { halflife_sec: 1_000_000, ..TrustState::default() };
+        let mut st = TrustState::default();
         st.disabled = false;
         st.warn_threshold = 1;
         st.drop_threshold = 3;

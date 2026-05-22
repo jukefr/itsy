@@ -46,9 +46,13 @@ When that SHA bumps, re-baseline all audits against the new tree.
 - **images.rs** — Clean. INTENTIONAL: trailing punctuation stripped from @path references
   (`.`, `,`, `;`) — improvement over upstream, handles edge cases in prose.
 - **multi.rs** — Clean. Session counter uses atomic instead of `sessions.size` — same behavior.
-- **trust_decay.rs** — UNVERIFIED: Rust adds time-based half-life exponential decay to
-  `consecutive_fails` and a smoothed `trust` 0-1 score. JS has no time decay — just a raw
-  counter. `filter_and_sort` behavior is equivalent. No bench evidence for the decay addition.
+- **trust_decay.rs** — AUDITED (fixed). Time-based exponential decay and `trust` smoothed
+  score reverted (no bench evidence, JS has neither). `record_combo` and `level_combo` now
+  match JS exactly: consecutive_fails counter + reset_on_success, no time math.
+  INTENTIONAL: combo keys, disk persistence, `should_avoid` / `summary` helpers are Rust-only
+  additions with no JS counterpart (clearly marked). NOTE: module is DEAD CODE — never wired
+  into tool pipeline. JS calls `getTrustDecay().filterAndSort(tools)` in `getAllTools` and
+  `.record()` per tool; Rust has no equivalent call sites. Wiring tracked as separate TODO.
 - **web_browse.rs** — Clean. INTENTIONAL: `assert_url_safe` adds scheme check (http/https only)
   and cloud-metadata endpoint check (`169.254.169.254`, `metadata.google.internal`) inline; JS
   delegates these to the `ssrf_guard` compiled provider. Functionally equivalent.
@@ -198,7 +202,7 @@ These run on every turn. Highest impact for bugs.
 | `crates/itsy/src/tools_impl/dedup.rs` | `src/tools/dedup.js` | `AUDITED` | `e29eb3e` |
 | `crates/itsy/src/executor.rs` | `bin/executor.js` | `AUDITED` | — |
 | `crates/itsy/src/tools.rs` | `bin/tools.js` | `AUDITED` | (no changes needed) |
-| `crates/itsy/src/model_client.rs` | `bin/model_client.js` | `AUDITED` | (pending) |
+| `crates/itsy/src/model_client.rs` | `bin/model_client.js` | `AUDITED` | `f3b6f31` |
 | `crates/itsy/src/bin/itsy.rs` | `bin/smallcode.js` | `AUDITED` | `6c81eee` |
 
 ## Tier 2 — model + governance
