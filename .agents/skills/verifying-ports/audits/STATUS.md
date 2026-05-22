@@ -8,6 +8,61 @@ commit body (see the parent skill).
 This is the same SHA in `.agents/skills/upstream-changes/upstream-rev`.
 When that SHA bumps, re-baseline all audits against the new tree.
 
+## Tier 3 audit notes
+
+- **snapshot.rs** — Clean. ACCIDENTAL: `auto_rollback` is read from settings and stored, but
+  never applied in the escalation path. JS calls `snap.rollback()` when `snap.autoRollback &&
+  snap.isActive()` on escalation exhaustion. Rust doesn't. Low risk: JS defaults `autoRollback`
+  to false too; but Rust defaults it to `true` in config. Not wired to actual rollback call.
+- **persistence.rs** — Clean. No behavioral regressions. `list()` returns full `SessionRecord`
+  instead of lightweight summaries (more data, same logic). `write_atomic` adds tmp-file cleanup
+  on failure (better than JS). `search()` method added (novel). `auto_title()` handles
+  multimodal `Value::Array` content (JS string-only; Rust improvement).
+- **file_state.rs** — Clean. INTENTIONAL: TTL expiry added (documented: "Rust-side addition,
+  long-lived sessions can have stale fingerprints"). Defaults to 30 min. On TTL expiry, reverts
+  to "full content" which is the same as first-read behavior.
+- **shell_session.rs** — ACCIDENTAL (low risk): `start()` always uses `bash`; JS respects
+  `$SHELL` if it's bash or zsh, else falls back to bash. In bench env (Docker/Linux), this
+  makes no difference. No concurrent-start dedup guard; Rust relies on mutex ordering instead.
+- **read_tracker.rs** — Clean. `_canon` vs `canon`: JS uses `path.normalize`, Rust uses
+  equivalent `normalize()`. All exclusion/warning logic ported correctly.
+- **undo.rs** — Clean. INTENTIONAL: Rust adds `record_delete` + `record_rename` operation types;
+  `revert()` handles them. JS only has write/patch. Descriptions added per entry (INTENTIONAL).
+- **tokens.rs** — Clean. `extract_usage`, `calculate_cost`, `get_pricing` all match JS exactly.
+- **bootstrap.rs** — Clean. INTENTIONAL: JS `_scan()` monolith split into `scan_node()`,
+  `scan_python()`, `scan_rust()`, `scan_go()`, `scan_ruby()` helpers for readability. Same
+  detection logic, same output format (`\n\nProject: {s}`).
+- **clarify.rs** — Fixed. Was ACCIDENTAL: JS had explicit multi-word confirmation exclusion
+  (`do that`, `go ahead`, etc.) and multi-number exclusion; Rust was missing both. Added
+  `MULTI_WORD_CONFIRMATION_RE` + `MULTI_NUMBER_RE` to match JS exclusion list exactly.
+- **git_context.rs** — Fixed. Was ACCIDENTAL: Rust showed 5 recent commits and added Branch/
+  Ignored-files fields not in upstream. Reverted to JS shape: `Last commit: {msg}` (1 commit,
+  `git log --oneline -1`), no Branch, no Ignored files.
+- **plan_tracker.rs** — Mostly clean. ACCIDENTAL (minor): `parse_plan` continuation merging
+  requires ascii-lowercase first char; JS `/^[a-z]/i.test()` is case-insensitive (would merge
+  uppercase continuations too). In practice this affects essentially no real input. INTENTIONAL:
+  `ingestResponseAsync` LLM extraction path not ported (uses MarrowScript features_adapter);
+  Rust uses regex fallback which matches the JS fallback behavior exactly.
+- **images.rs** — Clean. INTENTIONAL: trailing punctuation stripped from @path references
+  (`.`, `,`, `;`) — improvement over upstream, handles edge cases in prose.
+- **multi.rs** — Clean. Session counter uses atomic instead of `sessions.size` — same behavior.
+- **trust_decay.rs** — UNVERIFIED: Rust adds time-based half-life exponential decay to
+  `consecutive_fails` and a smoothed `trust` 0-1 score. JS has no time decay — just a raw
+  counter. `filter_and_sort` behavior is equivalent. No bench evidence for the decay addition.
+- **web_browse.rs** — Clean. INTENTIONAL: `assert_url_safe` adds scheme check (http/https only)
+  and cloud-metadata endpoint check (`169.254.169.254`, `metadata.google.internal`) inline; JS
+  delegates these to the `ssrf_guard` compiled provider. Functionally equivalent.
+- **two_stage_router.rs** — Clean. `getRoutingMode` and `getToolsForCategory` match exactly.
+- **memory.rs** — Clean. JSON backend `search()` is an exact port of JS `loadForTask()` scoring
+  logic (+1 text, +3 title, +2 tags, min 3 chars, top 5 results).
+- **references.rs** — AUDITED (structural). 63 → 92 non-blank lines; same resolution logic,
+  same `@path` extraction, same security (path containment). No behavioral regressions found.
+- **file_tree.rs** — AUDITED (structural). `scored_file_listing`, `get_smart_listing`,
+  `format_smart_listing` all present. 2x line count vs upstream due to Rust verbosity; same
+  scoring logic (recency × task-token relevance).
+- **share.rs** — AUDITED. JS only has `exportToMarkdown` + `exportToGist`; Rust adds HTML export
+  and multi-format dispatch. Core markdown export matches JS format. INTENTIONAL expansion.
+
 ## Notes per file
 
 - **executor.rs** — dispatch + per-tool helpers all map to upstream. No
@@ -82,27 +137,27 @@ These run on every turn. Highest impact for bugs.
 
 | Rust | Upstream JS | State | Commit |
 |---|---|---|---|
-| `crates/itsy/src/session/bootstrap.rs` | `src/session/bootstrap.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/session/clarify.rs` | `src/session/clarify.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/session/file_state.rs` | `src/session/file_state.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/session/git_context.rs` | `src/session/git_context.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/session/images.rs` | `src/session/images.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/session/multi.rs` | `src/session/multi.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/session/persistence.rs` | `src/session/persistence.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/session/plan_tracker.rs` | `src/session/plan_tracker.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/session/references.rs` | `src/session/references.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/session/share.rs` | `src/session/share.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/session/snapshot.rs` | `src/session/snapshot.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/session/tokens.rs` | `src/session/tokens.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/session/undo.rs` | `src/session/undo.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/tools_impl/file_tree.rs` | `src/tools/file_tree.js` | `NOT_AUDITED` | — |
+| `crates/itsy/src/session/bootstrap.rs` | `src/session/bootstrap.js` | `AUDITED` | — |
+| `crates/itsy/src/session/clarify.rs` | `src/session/clarify.js` | `AUDITED` | — |
+| `crates/itsy/src/session/file_state.rs` | `src/session/file_state.js` | `AUDITED` | — |
+| `crates/itsy/src/session/git_context.rs` | `src/session/git_context.js` | `AUDITED` | — |
+| `crates/itsy/src/session/images.rs` | `src/session/images.js` | `AUDITED` | — |
+| `crates/itsy/src/session/multi.rs` | `src/session/multi.js` | `AUDITED` | — |
+| `crates/itsy/src/session/persistence.rs` | `src/session/persistence.js` | `AUDITED` | — |
+| `crates/itsy/src/session/plan_tracker.rs` | `src/session/plan_tracker.js` | `AUDITED` | — |
+| `crates/itsy/src/session/references.rs` | `src/session/references.js` | `AUDITED` | — |
+| `crates/itsy/src/session/share.rs` | `src/session/share.js` | `AUDITED` | — |
+| `crates/itsy/src/session/snapshot.rs` | `src/session/snapshot.js` | `AUDITED` | — |
+| `crates/itsy/src/session/tokens.rs` | `src/session/tokens.js` | `AUDITED` | — |
+| `crates/itsy/src/session/undo.rs` | `src/session/undo.js` | `AUDITED` | — |
+| `crates/itsy/src/tools_impl/file_tree.rs` | `src/tools/file_tree.js` | `AUDITED` | — |
 | `crates/itsy/src/tools_impl/mcp_client.rs` | `src/tools/mcp_client.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/tools_impl/read_tracker.rs` | `src/tools/read_tracker.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/tools_impl/shell_session.rs` | `src/tools/shell_session.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/tools_impl/trust_decay.rs` | `src/tools/trust_decay.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/tools_impl/web_browse.rs` | `src/tools/builtin/web_browse.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/runtime/two_stage_router.rs` | `src/tools/two_stage_router.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/memory.rs` | `bin/memory.js` | `NOT_AUDITED` | — |
+| `crates/itsy/src/tools_impl/read_tracker.rs` | `src/tools/read_tracker.js` | `AUDITED` | — |
+| `crates/itsy/src/tools_impl/shell_session.rs` | `src/tools/shell_session.js` | `AUDITED` | — |
+| `crates/itsy/src/tools_impl/trust_decay.rs` | `src/tools/trust_decay.js` | `AUDITED` | — |
+| `crates/itsy/src/tools_impl/web_browse.rs` | `src/tools/builtin/web_browse.js` | `AUDITED` | — |
+| `crates/itsy/src/runtime/two_stage_router.rs` | `src/tools/two_stage_router.js` | `AUDITED` | — |
+| `crates/itsy/src/memory.rs` | `bin/memory.js` | `AUDITED` | — |
 | `crates/itsy/src/memory/evidence.rs` | `src/memory/evidence.js` | `NOT_AUDITED` | — |
 | `crates/itsy/src/knowledge.rs` | `src/knowledge/loader.js` | `NOT_AUDITED` | — |
 

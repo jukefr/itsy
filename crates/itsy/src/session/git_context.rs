@@ -35,13 +35,10 @@ pub fn should_inject_git_context(message: &str) -> bool {
 /// Structured view of the repository state.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GitContext {
-    pub branch: Option<String>,
     pub unstaged_stat: Option<String>,
     pub staged_stat: Option<String>,
     pub diff_excerpt: Option<String>,
-    pub recent_commits: Vec<String>,
     pub last_commit: Option<String>,
-    pub ignored_file_count: Option<usize>,
 }
 
 fn run_git(cwd: &Path, args: &[&str], timeout_secs: u64) -> Option<String> {
@@ -63,10 +60,6 @@ pub fn collect_git_context(cwd: &Path) -> Option<GitContext> {
         return None;
     }
     let mut ctx = GitContext::default();
-
-    ctx.branch = run_git(cwd, &["rev-parse", "--abbrev-ref", "HEAD"], 3)
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
 
     if let Some(unstaged) = run_git(cwd, &["diff", "--stat", "--no-color"], 5) {
         let trimmed = unstaged.trim();
@@ -90,18 +83,11 @@ pub fn collect_git_context(cwd: &Path) -> Option<GitContext> {
         }
     }
 
-    if let Some(commits) = run_git(cwd, &["log", "--oneline", "-5"], 3) {
-        ctx.recent_commits = commits
-            .lines()
-            .map(|l| sanitize_tool_output(l.trim()))
-            .filter(|l| !l.is_empty())
-            .collect();
-        ctx.last_commit = ctx.recent_commits.first().cloned();
-    }
-
-    if let Some(ignored) = run_git(cwd, &["ls-files", "--others", "-i", "--exclude-standard"], 5) {
-        let n = ignored.lines().filter(|l| !l.trim().is_empty()).count();
-        ctx.ignored_file_count = Some(n);
+    if let Some(commit) = run_git(cwd, &["log", "--oneline", "-1"], 3) {
+        let trimmed = sanitize_tool_output(commit.trim());
+        if !trimmed.is_empty() {
+            ctx.last_commit = Some(trimmed);
+        }
     }
 
     Some(ctx)
@@ -138,28 +124,17 @@ pub fn get_git_diff_context(cwd: &Path) -> Option<String> {
 
 fn format_context(ctx: &GitContext) -> String {
     let mut body = String::new();
-    if let Some(b) = &ctx.branch {
-        body.push_str(&format!("Branch: {}\n", b));
-    }
     if let Some(s) = &ctx.unstaged_stat {
-        body.push_str(&format!("\nUnstaged changes:\n{}\n", s));
+        body.push_str(&format!("Unstaged changes:\n{}\n\n", s));
     }
     if let Some(d) = &ctx.diff_excerpt {
-        body.push_str(&format!("\n{}\n", d));
+        body.push_str(&format!("{}\n", d));
     }
     if let Some(s) = &ctx.staged_stat {
         body.push_str(&format!("\nStaged changes:\n{}\n", s));
     }
-    if !ctx.recent_commits.is_empty() {
-        body.push_str("\nRecent commits:\n");
-        for c in &ctx.recent_commits {
-            body.push_str(&format!("  {}\n", c));
-        }
-    }
-    if let Some(n) = ctx.ignored_file_count {
-        if n > 0 {
-            body.push_str(&format!("\nIgnored files: {}\n", n));
-        }
+    if let Some(c) = &ctx.last_commit {
+        body.push_str(&format!("\nLast commit: {}\n", c));
     }
     if body.trim().is_empty() {
         return String::new();

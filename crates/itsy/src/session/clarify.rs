@@ -29,6 +29,14 @@ static VAGUE_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
 static CONFIRMATION_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)^(yes|no|ok|sure|go|do it|y|n|yep|nope|yeah|nah)$").unwrap());
 
+static MULTI_WORD_CONFIRMATION_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)^(go ahead|go for it|just do it|do that|do both|read it|show me|that one|sounds good|let's do it|let's go|that works)\b")
+        .unwrap()
+});
+
+static MULTI_NUMBER_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)^(both\s+)?\d+(\s*,\s*|\s+and\s+)\d+$").unwrap());
+
 /// Boolean check: does this message look too vague to act on?
 pub fn is_vague(message: &str) -> bool {
     let msg = message.trim();
@@ -36,6 +44,12 @@ pub fn is_vague(message: &str) -> bool {
         return false;
     }
     if CONFIRMATION_RE.is_match(msg) {
+        return false;
+    }
+    if MULTI_WORD_CONFIRMATION_RE.is_match(msg) {
+        return false;
+    }
+    if MULTI_NUMBER_RE.is_match(msg) {
         return false;
     }
     VAGUE_PATTERNS.iter().any(|re| re.is_match(msg))
