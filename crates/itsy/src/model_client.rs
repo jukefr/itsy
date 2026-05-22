@@ -65,30 +65,19 @@ pub async fn chat_completion(ctx: &ChatContext<'_>) -> Option<Value> {
     let tokens = crate::model::thinking_budget::thinking_budget(task, 0);
 
     // max_tokens is a hard cap on TOTAL output (thinking + content).
-    // If the thinking budget is bigger than max_tokens, the model burns
-    // its whole output budget on thinking and emits empty content —
-    // the classic IQ2_XXS "empty response" failure mode. Give the
-    // content at least 4k headroom past the thinking budget, and
-    // honour `[limits].max_output_tokens` for explicit overrides.
-    let max_tokens = crate::settings::get()
-        .max_output_tokens
-        .max(tokens.saturating_add(4096))
-        .max(4096);
-
-    let mut body = json!({
-        "model": ctx.config.model.name,
-        "messages": messages,
-        "tools": ctx.tools,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-    });
-
-    crate::model::thinking_budget::apply_thinking_budget(
-        &mut body,
-        &ctx.config.model.base_url,
-        tokens,
-        /* disable = */ false,
-    );
+    // We start small for speed, then double on detected overflow —
+    // see the retry loop below. The explicit `max_output_tokens`
+    // setting forces a single fixed cap if set (>0).
+    let explicit_cap = crate::settings::get().max_output_tokens;
+    let initial_max_tokens = if explicit_cap > 0 {
+        explicit_cap
+    } else {
+        // Start with thinking headroom + small content slack. Most
+        // turns end well below this, especially short tool-call
+        // exchanges. The retry loop expands it when the model
+        // actually runs out of room.
+        tokens.saturating_add(1024).max(4096)
+    };
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(ctx.config.model.timeout))
@@ -96,34 +85,112 @@ pub async fn chat_completion(ctx: &ChatContext<'_>) -> Option<Value> {
         .ok()?;
 
     let url = format!("{}/chat/completions", ctx.config.model.base_url);
-    let res = match client.post(&url).headers(build_auth_headers(ctx.config)).json(&body).send().await {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("  \x1b[31m✗ {e}\x1b[0m");
+
+    // Adaptive max_tokens: most turns finish within the small cap, so
+    // we save wall-clock there. When the response comes back empty
+    // because the model exhausted its budget mid-think (finish_reason
+    // == "length" with no content + no tool calls), we double the cap
+    // and re-issue the same request. Hard ceiling at ~32k so we never
+    // spend forever on a single call.
+    let absolute_max = explicit_cap.max(32768);
+    let mut max_tokens = initial_max_tokens.min(absolute_max);
+    let mut attempt: u32 = 0;
+    let max_attempts: u32 = if explicit_cap > 0 { 1 } else { 3 };
+
+    loop {
+        attempt += 1;
+
+        let mut body = json!({
+            "model": ctx.config.model.name,
+            "messages": messages,
+            "tools": ctx.tools,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        });
+        crate::model::thinking_budget::apply_thinking_budget(
+            &mut body,
+            &ctx.config.model.base_url,
+            tokens,
+            /* disable = */ false,
+        );
+
+        let res = match client
+            .post(&url)
+            .headers(build_auth_headers(ctx.config))
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("  \x1b[31m✗ {e}\x1b[0m");
+                return None;
+            }
+        };
+
+        if !res.status().is_success() {
+            let status = res.status().as_u16();
+            let text = res.text().await.unwrap_or_default();
+            if status >= 400 && status < 500 && attempt == 1 {
+                // One transient-error retry on 4xx, mirroring the
+                // pre-adaptive behaviour.
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+            let redacted = crate::security::redact_string(&text);
+            eprintln!(
+                "  \x1b[31m✗ API error {status}: {}\x1b[0m",
+                &redacted[..redacted.len().min(200)]
+            );
             return None;
         }
-    };
 
-    if !res.status().is_success() {
-        let status = res.status().as_u16();
-        let text = res.text().await.unwrap_or_default();
-        if status >= 400 && status < 500 {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            if let Ok(retry) = client.post(&url).headers(build_auth_headers(ctx.config)).json(&body).send().await {
-                if retry.status().is_success() {
-                    return retry.json().await.ok();
-                }
+        let parsed: Option<Value> = res.json().await.ok();
+        let Some(value) = parsed else { return None };
+
+        // Was this an overflow? Empty content + no tool calls +
+        // finish_reason="length" means the model ran out of room
+        // before producing anything useful. Bump and retry.
+        if attempt < max_attempts && looks_like_budget_overflow(&value) {
+            let next = max_tokens.saturating_mul(2).min(absolute_max);
+            if next > max_tokens {
+                eprintln!(
+                    "  \x1b[90m… token budget overflow at {max_tokens} → retrying at {next}\x1b[0m"
+                );
+                max_tokens = next;
+                continue;
             }
         }
-        let redacted = crate::security::redact_string(&text);
-        eprintln!(
-            "  \x1b[31m✗ API error {status}: {}\x1b[0m",
-            &redacted[..redacted.len().min(200)]
-        );
-        return None;
+        return Some(value);
     }
+}
 
-    res.json().await.ok()
+/// Heuristic: does this chat-completion response look like the model
+/// hit the `max_tokens` cap mid-thinking? Three signals together:
+///   - `finish_reason` == `"length"`
+///   - empty `content` (none, or only whitespace)
+///   - no `tool_calls` array (or empty)
+/// All three are needed because a "length"-truncated long reply WITH
+/// content is still useful — we don't want to discard those.
+fn looks_like_budget_overflow(value: &Value) -> bool {
+    let Some(choice) = value.pointer("/choices/0") else { return false };
+    let finish = choice
+        .get("finish_reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if finish != "length" {
+        return false;
+    }
+    let content_empty = choice
+        .pointer("/message/content")
+        .map(|c| c.as_str().map(|s| s.trim().is_empty()).unwrap_or(true))
+        .unwrap_or(true);
+    let no_tools = choice
+        .pointer("/message/tool_calls")
+        .and_then(|v| v.as_array())
+        .map(|a| a.is_empty())
+        .unwrap_or(true);
+    content_empty && no_tools
 }
 
 /// Stream a final text response (no tools, just summarize).
@@ -317,4 +384,85 @@ pub fn build_system_prompt(
         prompt.push_str(&format!("\nModel: {}", config.model.name));
     }
     prompt
+}
+
+#[cfg(test)]
+mod budget_overflow_tests {
+    use super::looks_like_budget_overflow;
+    use serde_json::json;
+
+    #[test]
+    fn empty_content_no_tools_finish_length_is_overflow() {
+        let v = json!({
+            "choices": [{
+                "finish_reason": "length",
+                "message": {"role": "assistant", "content": ""}
+            }]
+        });
+        assert!(looks_like_budget_overflow(&v));
+    }
+
+    #[test]
+    fn whitespace_content_counts_as_empty() {
+        let v = json!({
+            "choices": [{
+                "finish_reason": "length",
+                "message": {"role": "assistant", "content": "  \n  "}
+            }]
+        });
+        assert!(looks_like_budget_overflow(&v));
+    }
+
+    #[test]
+    fn null_content_counts_as_empty() {
+        let v = json!({
+            "choices": [{
+                "finish_reason": "length",
+                "message": {"role": "assistant", "content": null}
+            }]
+        });
+        assert!(looks_like_budget_overflow(&v));
+    }
+
+    #[test]
+    fn length_with_partial_content_is_not_overflow() {
+        // We do NOT discard a partial-but-useful reply that hit max_tokens.
+        let v = json!({
+            "choices": [{
+                "finish_reason": "length",
+                "message": {"role": "assistant", "content": "Half a thought…"}
+            }]
+        });
+        assert!(!looks_like_budget_overflow(&v));
+    }
+
+    #[test]
+    fn tool_calls_with_empty_content_is_not_overflow() {
+        // The model produced a real tool call — keep it.
+        let v = json!({
+            "choices": [{
+                "finish_reason": "length",
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"id": "x", "type": "function",
+                                    "function": {"name": "bash", "arguments": "{}"}}]
+                }
+            }]
+        });
+        assert!(!looks_like_budget_overflow(&v));
+    }
+
+    #[test]
+    fn stop_with_empty_is_not_overflow() {
+        // Empty body but finish_reason=stop — model genuinely gave up
+        // (and our existing empty-response retry path handles that).
+        let v = json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": ""}
+            }]
+        });
+        assert!(!looks_like_budget_overflow(&v));
+    }
 }
