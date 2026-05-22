@@ -1488,13 +1488,25 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                             };
                             println!("  \x1b[33m◇ DECOMPOSE: {reason}\x1b[0m");
                             println!("  \x1b[90m  Strategy: {kind}\x1b[0m");
-                            // Optional escalation when local model is exhausted.
-                            let can_escalate = session.escalation.lock().can_escalate();
-                            if can_escalate {
+                            // Mirrors upstream __decompose:${filePath} counter:
+                            // only escalate to the stronger model on the 2nd decompose
+                            // attempt for this file. The first attempt uses the
+                            // local model with a new strategy.
+                            let decompose_key = format!("__decompose:{file_path}");
+                            let decompose_n = improvement_attempts
+                                .entry(decompose_key.clone())
+                                .and_modify(|n| *n += 1)
+                                .or_insert(1);
+                            let should_escalate = *decompose_n >= 2
+                                && session.escalation.lock().can_escalate();
+                            if should_escalate {
                                 println!(
-                                    "  \x1b[35m⬆ Escalation available ({})\x1b[0m",
-                                    session.escalation.lock().status()
+                                    "  \x1b[35m⬆ Escalating to {} (decompose attempt {})\x1b[0m",
+                                    session.escalation.lock().status(),
+                                    decompose_n,
                                 );
+                                improvement_attempts.insert(file_path.clone(), 0);
+                                improvement_attempts.insert(decompose_key, 0);
                                 let recent = {
                                     let h = session.history.lock();
                                     h.iter()
@@ -1507,7 +1519,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                                         .collect::<Vec<_>>()
                                 };
                                 let prompt = format!(
-                                    "Fix these errors in {file_path}. The code:\n```\n{}\n```\n\nErrors:\n{}\n\nPrevious local attempts failed. Fix it correctly.",
+                                    "Fix these errors in {file_path}. The code:\n```\n{}\n```\n\nErrors:\n{}\n\nPrevious attempts failed. Fix it correctly.",
                                     file_content.chars().take(12000).collect::<String>(),
                                     errors.join("\n"),
                                 );
@@ -1532,14 +1544,22 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                                     }
                                     _ => {
                                         eprintln!("  \x1b[31m✗ Escalation failed\x1b[0m");
+                                        session.history.lock().push(json!({
+                                            "role": "user",
+                                            "content": "[ESCALATION FAILED] Even the stronger model couldn't fix this. Deliver the best version you have and explain what's still broken.",
+                                        }));
                                     }
                                 }
+                            } else {
+                                // First decompose for this file — try local model with
+                                // a new strategy. Matches JS: only reset the file counter,
+                                // not the decompose counter.
+                                improvement_attempts.insert(file_path.clone(), 0);
                             }
                             session.history.lock().push(json!({
                                 "role": "user",
                                 "content": format!("[DECOMPOSE] After {MAX_IMPROVE_ITERATIONS} failed fix attempts, changing strategy.\n\n{instruction}\n\nFile length: {lines} lines."),
                             }));
-                            improvement_attempts.insert(file_path.clone(), 0);
                             // Avoid using the unused field by recording the
                             // governor's chosen strategy in the trace.
                             let _ = pick_decompose_strategy(
@@ -1583,41 +1603,108 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                             "content": format!("[AUTO-FIX] The command FAILED (attempt {attempt_n}/2). Do NOT claim success. The error was:\n{err}\n\nRead the error, identify the bug, and fix it."),
                         }));
                     } else {
-                        let strategy = features_adapter::decompose_task(
-                            &user_msg,
-                            result
+                        // Mirrors upstream __decompose:bash counter:
+                        // only escalate on the 2nd decompose attempt.
+                        let decompose_bash_n = improvement_attempts
+                            .entry("__decompose:bash".into())
+                            .and_modify(|n| *n += 1)
+                            .or_insert(1);
+                        let should_escalate_bash = *decompose_bash_n >= 2
+                            && session.escalation.lock().can_escalate();
+                        if should_escalate_bash {
+                            println!(
+                                "  \x1b[35m⬆ Escalating to {} (bash decompose attempt {})\x1b[0m",
+                                session.escalation.lock().status(),
+                                decompose_bash_n,
+                            );
+                            improvement_attempts.insert("__bash".into(), 0);
+                            improvement_attempts.insert("__decompose:bash".into(), 0);
+                            let recent = {
+                                let h = session.history.lock();
+                                h.iter()
+                                    .rev()
+                                    .take(8)
+                                    .cloned()
+                                    .collect::<Vec<_>>()
+                                    .into_iter()
+                                    .rev()
+                                    .collect::<Vec<_>>()
+                            };
+                            let bash_err = result
                                 .get("result")
                                 .and_then(|v| v.as_str())
-                                .unwrap_or(""),
-                            args.get("command")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or(""),
-                        )
-                        .await
-                        .map(|s| (s.strategy, s.reason, s.instruction))
-                        .unwrap_or_else(|| {
-                            let g = pick_decompose_strategy(
-                                "",
-                                &[result
+                                .unwrap_or("")
+                                .chars()
+                                .take(1500)
+                                .collect::<String>();
+                            let mut messages: Vec<Value> = recent;
+                            messages.push(json!({
+                                "role": "user",
+                                "content": format!("The command keeps failing. Fix the underlying issue. Error: {bash_err}"),
+                            }));
+                            let tools_snapshot = {
+                                let cfg = session.config.lock();
+                                let plugins = session.plugins.lock();
+                                get_all_tools(
+                                    &cfg,
+                                    None,
+                                    &ToolDeps {
+                                        plugin_tools: plugins.get_tools(),
+                                        mcp_tools: Vec::new(),
+                                    },
+                                )
+                            };
+                            let mut esc = session.escalation.lock();
+                            match esc.escalate(messages, tools_snapshot, "").await {
+                                Ok(Some(resp)) if resp.get("error").is_none() => {
+                                    session.history.lock().push(resp);
+                                }
+                                _ => {
+                                    eprintln!("  \x1b[31m✗ Escalation failed\x1b[0m");
+                                    session.history.lock().push(json!({
+                                        "role": "user",
+                                        "content": "[ESCALATION FAILED] Move on. Explain what you tried and what's still broken.",
+                                    }));
+                                }
+                            }
+                        } else {
+                            // First bash decompose — try local model with new strategy.
+                            let strategy = features_adapter::decompose_task(
+                                &user_msg,
+                                result
                                     .get("result")
                                     .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .chars()
-                                    .take(300)
-                                    .collect::<String>()],
-                                args.get("command").and_then(|v| v.as_str()).unwrap_or(""),
+                                    .unwrap_or(""),
+                                args.get("command")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(""),
+                            )
+                            .await
+                            .map(|s| (s.strategy, s.reason, s.instruction))
+                            .unwrap_or_else(|| {
+                                let g = pick_decompose_strategy(
+                                    "",
+                                    &[result
+                                        .get("result")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .chars()
+                                        .take(300)
+                                        .collect::<String>()],
+                                    args.get("command").and_then(|v| v.as_str()).unwrap_or(""),
+                                );
+                                (g.kind, g.reason, g.instruction)
+                            });
+                            println!(
+                                "  \x1b[33m◇ DECOMPOSE bash: {}\x1b[0m",
+                                strategy.1
                             );
-                            (g.kind, g.reason, g.instruction)
-                        });
-                        println!(
-                            "  \x1b[33m◇ DECOMPOSE bash: {}\x1b[0m",
-                            strategy.1
-                        );
-                        session.history.lock().push(json!({
-                            "role": "user",
-                            "content": format!("[DECOMPOSE] The command has failed 3 times. STOP retrying the same approach.\n\n{}", strategy.2),
-                        }));
-                        improvement_attempts.insert("__bash".into(), 0);
+                            session.history.lock().push(json!({
+                                "role": "user",
+                                "content": format!("[DECOMPOSE] The command has failed 3 times. STOP retrying the same approach.\n\n{}", strategy.2),
+                            }));
+                            improvement_attempts.insert("__bash".into(), 0);
+                        }
                     }
                 } else if (name == "bash" || name == "run")
                     && result.get("error").is_none()
