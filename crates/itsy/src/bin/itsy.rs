@@ -185,8 +185,19 @@ fn cap_tool_result(content: &str) -> String {
     if content.len() <= MAX_TOOL_RESULT_CHARS {
         return content.to_string();
     }
-    let head = &content[..MAX_TOOL_RESULT_CHARS - 200];
-    let tail = &content[content.len() - 200..];
+    // Snap both cuts to char boundaries — content may contain
+    // multi-byte UTF-8 (e.g. the `│` line-number gutter used by
+    // read_file output) and naive byte slicing panics.
+    let mut head_end = MAX_TOOL_RESULT_CHARS - 200;
+    while head_end > 0 && !content.is_char_boundary(head_end) {
+        head_end -= 1;
+    }
+    let mut tail_start = content.len().saturating_sub(200);
+    while tail_start < content.len() && !content.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    let head = &content[..head_end];
+    let tail = &content[tail_start..];
     format!(
         "{head}\n\n...(truncated, {} chars total)...\n{tail}",
         content.len()
