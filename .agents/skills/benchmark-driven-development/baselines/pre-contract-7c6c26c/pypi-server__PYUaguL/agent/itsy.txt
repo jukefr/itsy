@@ -1,0 +1,59 @@
+  Connected: http://10.0.2.2:8000/v1
+  Model: unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS
+
+[1m[36m  ⚡ itsy[0m[90m v0.1.0[0m
+
+  Model:    unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS
+  Endpoint: [90mhttp://10.0.2.2:8000/v1[0m
+  Graph:    [32m✓ indexed[0m
+  Dir:      [90m/app[0m
+
+[90m  Type a message to chat. /help for commands. /quit to exit.[0m
+
+  [36m⚙[0m [36mbash[0m 
+  [31m✗[0m Exit code 1
+  [36m⚙[0m [36mbash[0m 
+  [31m✗[0m Exit code 1
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mls /app[0m [90m2ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mpwd[0m [90m1ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mecho hello[0m [90m1ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mecho "test"[0m [90m1ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mecho test123[0m [90m1ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mls[0m [90m2ms[0m
+  [36m⚙[0m [36mcreate_and_run[0m 
+  [32m✓[0m Created [1m/tmp/test.sh[0m (2 lines) [90m3ms[0m
+  [36m⚙[0m [36mwrite_file[0m 
+  [32m✓[0m Created [1m/app/vectorops/__init__.py[0m (4 lines) [90m0ms[0m
+  [36m⚙[0m [36mwrite_file[0m 
+  [32m✓[0m Created [1m/app/vectorops/core.py[0m (4 lines) [90m0ms[0m
+  [36m⚙[0m [36mwrite_file[0m 
+  [32m✓[0m Created [1m/app/vectorops/pyproject.toml[0m (13 lines) [90m0ms[0m
+  [36m⚙[0m [36mwrite_file[0m 
+  [32m✓[0m Created [1m/app/pyproject.toml[0m (13 lines) [90m0ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mrm /app/vectorops/pyproject.toml[0m [90m2ms[0m
+  [36m⚙[0m [36mcreate_and_run[0m 
+  [32m✓[0m Created [1m/tmp/cleanup.sh[0m (3 lines) [90m2ms[0m
+  [36m⚙[0m [36mcreate_and_run[0m 
+  [32m✓[0m Created [1m/tmp/install_build.sh[0m (2 lines) [90m676ms[0m
+  [36m⚙[0m [36mcreate_and_run[0m 
+  [31m✗[0m Command failed
+  [36m⚙[0m [36mcreate_and_run[0m 
+  [31m✗[0m Command failed
+  [36m⚙[0m [36mcreate_and_run[0m 
+  [32m✓[0m Created [1m/tmp/check_setuptools.sh[0m (2 lines) [90m125ms[0m
+  [36m⚙[0m [36mwrite_file[0m 
+  [32m✓[0m Created [1m/app/setup.py[0m (10 lines) [90m0ms[0m
+  [36m⚙[0m [36mcreate_and_run[0m 
+  [32m✓[0m Created [1m/tmp/build_v2.sh[0m (2 lines) [90m438ms[0m
+  [36m⚙[0m [36mcreate_and_run[0m 
+  [32m✓[0m Created [1m/tmp/install_pypiserver.sh[0m (2 lines) [90m790ms[0m
+  [36m⚙[0m [36mcreate_and_run[0m 
+  [32m✓[0m Created [1m/tmp/setup_packages.sh[0m (2 lines) [90m5ms[0m
+  [36m⚙[0m [36mcreate_and_run[0m 

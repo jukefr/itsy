@@ -1,0 +1,100 @@
+  Connected: http://10.0.2.2:8000/v1
+  Model: unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS
+
+[1m[36m  ⚡ itsy[0m[90m v0.1.0[0m
+
+  Model:    unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS
+  Endpoint: [90mhttp://10.0.2.2:8000/v1[0m
+  Graph:    [32m✓ indexed[0m
+  Dir:      [90m/app[0m
+
+[90m  Type a message to chat. /help for commands. /quit to exit.[0m
+
+  [36m⚙[0m [36mread_file[0m 
+  [32m✓[0m /app/filter.py (44 lines):
+   1│ import sys
+   2│ 
+   3│ from bs4 import B… [90m1ms[0m
+  [36m⚙[0m [36mread_file[0m 
+  [32m✓[0m /app/test_outputs.py (98 lines):
+   1│ # BENCHMARK DATA SHOULD NEVER APPEAR IN… [90m0ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mecho '<!DOCTYPE html>
+<html>
+<head>
+<meta http-equiv="refresh" content="0;url=javascript:alert("XSS")">
+</head>
+<body></body>
+</html>' > /app/out.html[0m [90m3ms[0m
+  [36m⚙[0m [36mread_file[0m 
+  [32m✓[0m /app/out.html (8 lines):
+   1│ <!DOCTYPE html>
+   2│ <html>
+   3│ <head>
+ … [90m0ms[0m
+  [36m⚙[0m [36mwrite_file[0m 
+  [32m✓[0m Updated [1m/app/out.html[0m (8 lines) [90m0ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mcd /app && python -m pytest test_outputs.py -v 2>&1 | head -50[0m [90m27ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [31m✗[0m Exit code 1
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mcd /app && python -m pytest test_outputs.py -v 2>&1 | cat[0m [90m10ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mpython -m pytest /app/test_outputs.py -v 2>&1 | tail -30[0m [90m10ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mpython -m pytest /app/test_outputs.py -v > /tmp/test_output.txt 2>&1; cat /tmp/test_output.txt[0m [90m10ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mpip install pytest selenium beautifulsoup4 2>&1 | tail -5[0m [90m1368ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mpip install pytest selenium beautifulsoup4 2>&1 | tail -5[0m [90m237ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mpython -c "import pytest; print('pytest installed')" 2>&1[0m [90m104ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mpython3 -c "print('hello')"[0m [90m9ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mecho test > /tmp/test.txt && cat /tmp/test.txt[0m [90m2ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mls /app/[0m [90m2ms[0m
+  [36m⚙[0m [36mfind_files[0m 
+  [32m✓[0m No files found. [90m1ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mls -la /app/[0m [90m2ms[0m
+  [36m⚙[0m [36mread_file[0m 
+  [32m✓[0m /app/out.html (8 lines):
+   1│ <!DOCTYPE html>
+   2│ <html>
+   3│ <head>
+ … [90m0ms[0m
+  [36m⚙[0m [36mcreate_and_run[0m 
+  [32m✓[0m Created [1m/tmp/test_filter.py[0m (21 lines) [90m0ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mpython3 /tmp/test_filter.py 2>&1[0m [90m61ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mpip3 install pytest selenium 2>&1 | tail -3[0m [90m233ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mwhich python3 && python3 --version[0m [90m3ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mpython3 -c "import pytest; print('ok')" 2>&1 || echo "pytest not installed"[0m [90m79ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mpython3 -m pytest /app/test_outputs.py -v 2>&1 || echo "test done"[0m [90m236ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mpython3 -m pytest /app/test_outputs.py -v 2>&1 > /tmp/result.txt; echo "DONE"; cat /tmp/result.txt[0m [90m198ms[0m
+  [36m⚙[0m [36mread_file[0m 
+  [32m✓[0m /tmp/result.txt (45 lines):
+   1│ ============================= test session s… [90m0ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mls -la /tests/ 2>&1 || echo "no /tests dir"[0m [90m2ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mtest -d /tests && echo "exists" || echo "not found"[0m [90m1ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mmkdir -p /tests && ln -sf /app/filter.py /tests/filter.py[0m [90m3ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mls -la /tests/filter.py && python3 -m pytest /app/test_outputs.py -v 2>&1 > /tmp/result.txt; cat /tmp/result.txt[0m [90m6664ms[0m
+  [36m⚙[0m [36mread_file[0m 
+  [32m✓[0m /tmp/result.txt (97 lines):
+   1│ ============================= test session s… [90m0ms[0m
+  [90m… token budget overflow at 9024 → retrying at 18048[0m
+  [31m✗ error sending request for url (http://10.0.2.2:8000/v1/chat/completions)[0m
+  [31m✗ No response from model[0m
+[90m  ─── 32 tool calls this turn ───[0m

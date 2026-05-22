@@ -1,0 +1,192 @@
+  Connected: http://10.0.2.2:8000/v1
+  Model: unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS
+
+[1m[36m  ⚡ itsy[0m[90m v0.1.0[0m
+
+  Model:    unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS
+  Endpoint: [90mhttp://10.0.2.2:8000/v1[0m
+  Graph:    [32m✓ indexed[0m
+  Dir:      [90m/app[0m
+
+[90m  Type a message to chat. /help for commands. /quit to exit.[0m
+
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mcd /app/repo && git log --all --oneline[0m [90m8ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mcd /app/repo && git fsck --no-refs --unreachable --lost-refs 2>/dev/null | head -50[0m [90m2ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mcd /app/repo && git log --all --oneline --reflog 2>/dev/null; echo "---"; ls -la /app/repo/; echo "---"; git status[0m [90m7ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mls -la /app/repo/ 2>&1; echo "==="; ls -la /app/ 2>&1[0m [90m3ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mls /app/[0m [90m2ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mecho "START"; ls /app/; echo "END"[0m [90m2ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mpwd && ls -la /app/[0m [90m2ms[0m
+  [36m⚙[0m [36mfind_files[0m 
+  [32m✓[0m No files found. [90m1ms[0m
+  [36m⚙[0m [36mfind_files[0m 
+  [32m✓[0m No files found. [90m1ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mls -la /app 2>&1; echo "EXIT:$?"[0m [90m2ms[0m
+  [36m⚙[0m [36mfind_files[0m 
+  [32m✓[0m No files found. [90m1ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mtest -d /app/repo && echo "EXISTS" || echo "NOT FOUND"[0m [90m1ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mls -la /app/repo/[0m [90m2ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mgit -C /app/repo log --all --oneline 2>&1; echo "RC=$?"[0m [90m3ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mgit -C /app/repo log --all --oneline > /tmp/git_log.txt 2>&1; echo "DONE"[0m [90m3ms[0m
+  [36m⚙[0m [36mread_file[0m 
+  [32m✓[0m /tmp/git_log.txt (3 lines):
+   1│ c6d9997 chore: init e665d1a2-04a7-4e61-b523-… [90m1ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mgit -C /app/repo log --all --oneline --reflog > /tmp/git_log_full.txt 2>&1; echo "DONE"[0m [90m3ms[0m
+  [36m⚙[0m [36mread_file[0m 
+  [32m✓[0m /tmp/git_log_full.txt (4 lines):
+   1│ c6d9997 chore: init e665d1a2-04a7-4e61-… [90m0ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mgit -C /app/repo fsck --unreachable --no-refs --no-obj-only-dirty --no-empty > /tmp/fsck.txt 2>&1; echo "DONE"[0m [90m3ms[0m
+  [36m⚙[0m [36mread_file[0m 
+  [32m✓[0m /tmp/fsck.txt (22 lines):
+   1│ error: unknown option `no-refs'
+   2│ usage:… [90m0ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mgit -C /app/repo fsck --unreachable > /tmp/fsck2.txt 2>&1; echo "DONE"[0m [90m9ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mgit -C /app/repo reflog > /tmp/reflog.txt 2>&1; echo "DONE"[0m [90m3ms[0m
+  [36m⚙[0m [36mread_file[0m 
+  [32m✓[0m /tmp/fsck2.txt (1 lines):
+   1│  [90m0ms[0m
+  [36m⚙[0m [36mread_file[0m 
+  [32m✓[0m /tmp/reflog.txt (5 lines):
+   1│ c6d9997 HEAD@{0}: commit: chore: init e665d1a… [90m0ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mgit -C /app/repo show c6d9997 > /tmp/commit_current.txt 2>&1; echo "DONE"[0m [90m3ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mgit -C /app/repo show 7a2420e > /tmp/commit_before_reset.txt 2>&1; echo "DONE"[0m [90m2ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mgit -C /app/repo show 6b4c75c > /tmp/commit_removed.txt 2>&1; echo "DONE"[0m [90m2ms[0m
+  [36m⚙[0m [36mread_file[0m 
+  [32m✓[0m /tmp/commit_current.txt (14 lines):
+   1│ commit c6d99979c3ef74db39532137fb895… [90m0ms[0m
+  [36m⚙[0m [36mread_file[0m 
+  [32m✓[0m /tmp/commit_before_reset.txt (14 lines):
+   1│ commit 7a2420e8b3537348565a4cd0… [90m0ms[0m
+  [36m⚙[0m [36mread_file[0m 
+  [32m✓[0m /tmp/commit_removed.txt (14 lines):
+   1│ commit 6b4c75caa9a2aa9a630e16764007b… [90m0ms[0m
+  [36m⚙[0m [36mwrite_file[0m 
+  [32m✓[0m Created [1m/app/secret.txt[0m (1 lines) [90m0ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mgit -C /app/repo reflog expire --all --expire=now > /tmp/reflog_expire.txt 2>&1; echo "DONE"[0m [90m4ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mgit -C /app/repo prune --expire=now > /tmp/prune.txt 2>&1; echo "DONE"[0m [90m6ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mgit -C /app/repo gc --prune=now > /tmp/gc.txt 2>&1; echo "DONE"[0m [90m36ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mgit -C /app/repo log --all --source --remotes --tags > /tmp/all_refs.txt 2>&1; echo "DONE"[0m [90m3ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mgit -C /app/repo rev-list --all > /tmp/rev_list.txt 2>&1; echo "DONE"[0m [90m3ms[0m
+  [36m⚙[0m [36mread_file[0m 
+  [32m✓[0m /tmp/rev_list.txt (3 lines):
+   1│ c6d99979c3ef74db39532137fb89516c2d707785
+  … [90m0ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mgit -C /app/repo cat-file -e 6b4c75caa9a2aa9a630e16764007b0109b1f5c07 2>&1; echo "RC=$?"[0m [90m3ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mgit -C /app/repo cat-file -t 6b4c75caa9a2aa9a630e16764007b0109b1f5c07 2>&1; echo "RC=$?"[0m [90m3ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mgit -C /app/repo cat-file -t 6b4c75caa9a2aa9a630e16764007b0109b1f5c07 > /tmp/check_obj.txt 2>&1; echo "DONE"[0m [90m3ms[0m
+  [36m⚙[0m [36mread_file[0m 
+  [32m✓[0m /tmp/check_obj.txt (2 lines):
+   1│ fatal: git cat-file: could not get object … [90m0ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mgit -C /app/repo fsck --dangling > /tmp/fsck_dangling.txt 2>&1; echo "DONE"[0m [90m6ms[0m
+  [36m⚙[0m [36mread_file[0m 
+  [32m✓[0m /tmp/fsck_dangling.txt (1 lines):
+   1│  [90m0ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mgit -C /app/repo verify-pack -v .git/objects/pack/*.idx > /tmp/verify.txt 2>&1; echo "DONE"[0m [90m5ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mls /app/repo/.git/objects/ 2>&1; echo "==="; find /app/repo/.git/objects -type f 2>&1 | head -30[0m [90m4ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mgit -C /app/repo verify-pack -v .git/objects/pack/*.idx > /tmp/verify.txt 2>&1; echo "DONE"; ls /app/repo/.git/objects/pack/ > /tmp/pack_list.txt 2>&1; echo "DONE"[0m [90m5ms[0m
+  [36m⚙[0m [36mread_file[0m 
+  [32m✓[0m /tmp/verify.txt (10 lines):
+   1│ c6d99979c3ef74db39532137fb89516c2d707785 com… [90m0ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mgit -C /app/repo rev-list --objects --all > /tmp/all_objects.txt 2>&1; echo "DONE"[0m [90m3ms[0m
+  [36m⚙[0m [36mread_file[0m 
+  [32m✓[0m /tmp/all_objects.txt (7 lines):
+   1│ c6d99979c3ef74db39532137fb89516c2d707785… [90m0ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mgit -C /app/repo log --all --source --oneline > /tmp/final_log.txt 2>&1; echo "DONE"[0m [90m3ms[0m
+  [36m⚙[0m [36mread_file[0m 
+  [32m✓[0m /tmp/final_log.txt (3 lines):
+   1│ c6d9997	refs/heads/master chore: init e665… [90m0ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mgit -C /app/repo reflog > /tmp/final_reflog.txt 2>&1; echo "DONE"[0m [90m3ms[0m
+  [36m⚙[0m [36mread_file[0m 
+  [32m✓[0m /tmp/final_reflog.txt (1 lines):
+   1│  [90m0ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mgit -C /app/repo verify-pack -v .git/objects/pack/*.idx > /tmp/final_verify.txt 2>&1; echo "DONE"[0m [90m4ms[0m
+  [36m⚙[0m [36mread_file[0m 
+  [32m✓[0m /tmp/final_verify.txt (10 lines):
+   1│ c6d99979c3ef74db39532137fb89516c2d7077… [90m0ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mfind /app/repo/.git/objects -type f ! -path '*/info/*' ! -path '*/pack/*' 2>&1; echo "DONE"[0m [90m2ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mgit -C /app/repo count-objects > /tmp/count.txt 2>&1; echo "DONE"[0m [90m3ms[0m
+  [36m⚙[0m [36mread_file[0m 
+  [32m✓[0m /tmp/count.txt (2 lines):
+   1│ 0 objects, 0 kilobytes
+   2│  [90m0ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mgit -C /app/repo count-objects -v > /tmp/count_v.txt 2>&1; echo "DONE"[0m [90m3ms[0m
+  [36m⚙[0m [36mread_file[0m 
+  [32m✓[0m /tmp/count_v.txt (9 lines):
+   1│ count: 0
+   2│ size: 0
+   3│ in-pack: 6
+… [90m0ms[0m
+  [36m⚙[0m [36mread_file[0m 
+  [32m✓[0m /app/secret.txt (1 lines):
+   1│ secret[lost_and_found_in_git] [90m0ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mgit -C /app/repo status > /tmp/status.txt 2>&1; echo "DONE"[0m [90m3ms[0m
+  [36m⚙[0m [36mread_file[0m 
+  [32m✓[0m /tmp/status.txt (3 lines):
+   1│ On branch master
+   2│ nothing to commit, w… [90m0ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mgit -C /app/repo ls-files > /tmp/files.txt 2>&1; echo "DONE"[0m [90m3ms[0m
+  [36m⚙[0m [36mread_file[0m 
+  [32m✓[0m /tmp/files.txt (2 lines):
+   1│ README.md
+   2│  [90m0ms[0m
+  [36m⚙[0m [36mread_file[0m 
+  [32m✓[0m /app/repo/README.md (3 lines):
+   1│ demo project
+   2│ some changes
+   3│… [90m0ms[0m
+Done! Here's a summary of what was accomplished:
+
+[1m1. Recovered the secret:[0m `secret[lost_and_found_in_git]` — found in commit `6b4c75c` ("feat: add scratch notes") which was removed by a history rewrite (reset).
+
+[1m2. Wrote it to `/app/secret.txt`.[0m
+
+[1m3. Cleaned up the repo:[0m
+- Expired all reflogs ([33mgit reflog expire --all --expire=now[0m)
+- Pruned unreachable objects ([33mgit prune --expire=now[0m)
+- Ran garbage collection ([33mgit gc --prune=now[0m)
+
+The secret commit and its blob are completely gone from the repository. The only remaining files are:
+- [33mREADME.md[0m (untouched)
+- [33m/app/secret.txt[0m (the recovered secret)
+
+[90m  ─── 66 tool calls this turn ───[0m

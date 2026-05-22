@@ -1,0 +1,88 @@
+{
+    "id": "25e189e8-d97d-4411-9962-0645e3693286",
+    "started_at": "2026-05-22T10:47:32.103940",
+    "updated_at": "2026-05-22T15:49:17.396202",
+    "finished_at": "2026-05-22T15:49:17.396202",
+    "n_total_trials": 33,
+    "stats": {
+        "n_completed_trials": 33,
+        "n_errored_trials": 10,
+        "n_running_trials": 0,
+        "n_pending_trials": 0,
+        "n_cancelled_trials": 0,
+        "n_retries": 0,
+        "evals": {
+            "itsy__Qwen3.6-35B-A3B-GGUF:IQ2_XXS__terminal-bench": {
+                "n_trials": 33,
+                "n_errors": 10,
+                "metrics": [
+                    {
+                        "mean": 0.48484848484848486
+                    }
+                ],
+                "pass_at_k": {
+                    "2": 0.5757575757575758
+                },
+                "reward_stats": {
+                    "reward": {
+                        "0.0": [
+                            "break-filter-js-from-html__CAUS5nQ",
+                            "pypi-server__dSFQoTh",
+                            "overfull-hbox__r9ee3sJ",
+                            "regex-log__JGq3tSK",
+                            "filter-js-from-html__NuxqekZ",
+                            "break-filter-js-from-html__pqpeoXf",
+                            "pypi-server__ZxeUNQX",
+                            "cobol-modernization__G9s3x7g",
+                            "overfull-hbox__oZZwbEN",
+                            "fix-git__PCek3QD",
+                            "regex-log__M8Zv7Pu",
+                            "filter-js-from-html__VNrCrqQ",
+                            "break-filter-js-from-html__9tDFeqK",
+                            "overfull-hbox__YfRbd9E",
+                            "fix-git__hFN6oVH",
+                            "regex-log__Av2QXb7",
+                            "filter-js-from-html__zwzDdWG"
+                        ],
+                        "1.0": [
+                            "prove-plus-comm__U2jbECA",
+                            "multi-source-data-merger__DLJtrv8",
+                            "cobol-modernization__jLDraKk",
+                            "fix-git__xk74k7n",
+                            "kv-store-grpc__Z9PJHAo",
+                            "git-leak-recovery__HrjkT4p",
+                            "prove-plus-comm__RGFiBxZ",
+                            "multi-source-data-merger__FwDo9Do",
+                            "kv-store-grpc__ZpaxhUT",
+                            "git-leak-recovery__b4hPuow",
+                            "prove-plus-comm__ovyXjKo",
+                            "pypi-server__PYUaguL",
+                            "multi-source-data-merger__doE8Ugc",
+                            "cobol-modernization__qK6cp3U",
+                            "kv-store-grpc__GEyRmx7",
+                            "git-leak-recovery__iVNP2is"
+                        ]
+                    }
+                },
+                "exception_stats": {
+                    "AgentTimeoutError": [
+                        "pypi-server__dSFQoTh",
+                        "overfull-hbox__r9ee3sJ",
+                        "kv-store-grpc__Z9PJHAo",
+                        "regex-log__JGq3tSK",
+                        "overfull-hbox__oZZwbEN",
+                        "kv-store-grpc__ZpaxhUT",
+                        "pypi-server__PYUaguL",
+                        "cobol-modernization__qK6cp3U",
+                        "kv-store-grpc__GEyRmx7",
+                        "regex-log__Av2QXb7"
+                    ]
+                }
+            }
+        },
+        "n_input_tokens": null,
+        "n_cache_tokens": null,
+        "n_output_tokens": null,
+        "cost_usd": null
+    }
+}

@@ -1,0 +1,59 @@
+  Connected: http://10.0.2.2:8000/v1
+  Model: unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS
+
+[1m[36m  ⚡ itsy[0m[90m v0.1.0[0m
+
+  Model:    unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS
+  Endpoint: [90mhttp://10.0.2.2:8000/v1[0m
+  Graph:    [32m✓ indexed[0m
+  Dir:      [90m/app[0m
+
+[90m  Type a message to chat. /help for commands. /quit to exit.[0m
+
+  [36m⚙[0m [36mread_file[0m 
+  [32m✓[0m /app/filter.py (44 lines):
+   1│ import sys
+   2│ 
+   3│ from bs4 import B… [90m1ms[0m
+  [36m⚙[0m [36mread_file[0m 
+  [32m✓[0m /app/test_outputs.py (98 lines):
+   1│ # BENCHMARK DATA SHOULD NEVER APPEAR IN… [90m0ms[0m
+  [36m⚙[0m [36mread_file[0m 
+  [31m✗[0m File not found: /tests/filter.py
+  [36m⚙[0m [36mbash[0m 
+  [31m✗[0m Exit code 1
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mfind / -name "filter.py" 2>/dev/null | head -10[0m [90m144ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mls /tests/ 2>/dev/null || echo "no /tests dir"[0m [90m3ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mls /app/[0m [90m2ms[0m
+  [36m⚙[0m [36mfind_files[0m 
+  [32m✓[0m No files found. [90m1ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mecho "hello"[0m [90m1ms[0m
+  [36m⚙[0m [36mfind_files[0m 
+  [32m✓[0m No files found. [90m1ms[0m
+  [36m⚙[0m [36mread_file[0m 
+  [32m✓[0m /app/filter.py (44 lines):
+   1│ import sys
+   2│ 
+   3│ from bs4 import B… [90m0ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mpwd[0m [90m1ms[0m
+  [36m⚙[0m [36mwrite_file[0m 
+  [32m✓[0m Created [1m/app/out.html[0m (8 lines) [90m0ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mls -la /tests/ 2>&1; echo "---"; ls -la /app/ 2>&1[0m [90m3ms[0m
+  [36m⚙[0m [36mfind_files[0m 
+  [32m✓[0m No files found. [90m1ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mpython -m pytest /app/test_outputs.py -v 2>&1 | head -50[0m [90m21ms[0m
+  [36m⚙[0m [36mcreate_and_run[0m 
+  [31m✗[0m Command failed
+  [36m⚙[0m [36mcreate_and_run[0m 
+  [32m✓[0m Created [1m/tmp/install.sh[0m (2 lines) [90m1382ms[0m
+  [36m⚙[0m [36mcreate_and_run[0m 
+  [31m✗[0m Command failed
+
+[90m  ─── 19 tool calls this turn ───[0m

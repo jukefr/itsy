@@ -514,6 +514,28 @@ fn build_full_system_prompt(
     messages: &[Value],
     session: &AgentSession,
 ) -> String {
+    // Contract-mode short-circuit: when the contract feature is on AND
+    // the current turn is action-y, the contract is the entire job for
+    // this turn. Return a focused contract-shaped system prompt
+    // instead of the generic kitchen-sink one. We learned the hard way
+    // that a 1.5k-char generic prompt with a paragraph about
+    // `propose_contract` buried in it loses every time — the model's
+    // reasoning layer notices the requirement but the tool-call
+    // decoder picks an easier neighbour. The fix is to make the
+    // contract the WHOLE prompt.
+    if itsy::settings::get().contract
+        && !matches!(task_type, "explanation" | "respond")
+    {
+        let active = itsy::session::contract::current();
+        let cwd = std::env::current_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if let Some(c) = active {
+            return build_contract_active_prompt(&c, &cwd, config);
+        }
+        return build_contract_proposal_prompt(&cwd, config);
+    }
+
     let memory = session.memory.lock();
     let mem_ctx = get_memory_context(messages, &memory);
     drop(memory);
@@ -584,29 +606,93 @@ fn build_full_system_prompt(
         prompt.push_str(&tr);
     }
 
-    // Active contract — the model's own definition of done. We inject
-    // a compact rendering so every turn sees the current assertion
-    // states; that's what stops the "I'm done" lie when assertions
-    // are still pending.
-    if itsy::settings::get().contract {
-        if let Some(c) = itsy::session::contract::current() {
-            prompt.push_str("\n\n");
-            prompt.push_str(&itsy::session::contract::render_for_prompt(&c));
-            prompt.push_str("\nRules: mark each assertion with `mark_assertion` (passed/failed/skipped) as you verify it. \
-                `close_contract completed` is refused while any assertion is `pending`.\n");
-        } else if matches!(task_type, "coding" | "editing" | "backend" | "debugging" | "multi_step") {
-            // No contract yet, but the task is action-y. Teach the
-            // model about the tool so it has a chance to pick it up.
-            prompt.push_str(
-                "\n\nWhen the task has a clear notion of 'done' (a fix to verify, a feature to ship, files to produce), \
-                start by calling `propose_contract` with a short brief and 2–6 testable assertions you'll prove. \
-                Then do the work, calling `mark_assertion` with command-line evidence as each one is verified. \
-                Finish with `close_contract completed` — it's refused while any assertion is pending, so don't claim done unless every one is verified.\n",
-            );
-        }
-    }
+    // (Contract-mode prompts are handled at the top of this function
+    // as a complete short-circuit — when there's an active contract or
+    // we need to propose one, the rest of the layering is skipped.)
 
     prompt
+}
+
+/// Contract-mode prompt for turn 1 (no contract yet). Short, focused,
+/// laser-targeted: the model's only job right now is to call
+/// `propose_contract`. The kitchen-sink prompt is intentionally
+/// absent here — small models latch onto whatever's loudest, and a
+/// 1.5k-char "you're a coding assistant who can also propose
+/// contracts" loses to a 300-char "you must propose a contract."
+fn build_contract_proposal_prompt(cwd: &str, config: &Config) -> String {
+    let model_line = if config.model.name.is_empty() {
+        String::new()
+    } else {
+        format!("\nModel: {}", config.model.name)
+    };
+    format!(
+        "You are itsy, working in CONTRACT mode. Working directory: {cwd}.{model_line}\n\
+        \n\
+        YOUR FIRST ACTION MUST BE `propose_contract`. No exceptions, no exploration first.\n\
+        \n\
+        A contract is the definition of done for the user's task. It is 2–6 short, testable assertions \
+        — each one a single thing you can later prove with a shell command:\n\
+        \n\
+          GOOD:  \"the file /app/regex.txt exists\"\n\
+          GOOD:  \"running `python3 /tmp/check.py` exits 0\"\n\
+          GOOD:  \"`pytest /tests/test_outputs.py -q` reports 3 passed\"\n\
+          BAD:   \"the code is correct\"          (not testable)\n\
+          BAD:   \"the implementation is complete\" (not testable)\n\
+          BAD:   \"all tests pass\"              (vague — which tests?)\n\
+        \n\
+        Until propose_contract returns, NO other tools are available. \
+        `write_file`, `patch`, mutating `bash`, etc. will refuse. \
+        Read-only tools (read_file, search) are available but you should not need them — \
+        you're not exploring, you're stating what 'done' means.\n\
+        \n\
+        Skip the planning preamble. Skip the analysis. Emit `propose_contract` now with:\n\
+        - title:       short human title for the task\n\
+        - brief:       1–2 sentences describing the work\n\
+        - assertions:  array of {{id, text}} — pick 2–6\n\
+        \n\
+        After it returns the toolkit opens up and you can do the work.\n",
+        cwd = cwd,
+        model_line = model_line,
+    )
+}
+
+/// Contract-mode prompt for turn 2+ (contract is active). The
+/// assertions and their current states ARE the prompt — the model
+/// works through them one by one. We don't include the generic
+/// instructions/code-graph hints — the contract is enough.
+fn build_contract_active_prompt(
+    c: &itsy::session::contract::Contract,
+    cwd: &str,
+    config: &Config,
+) -> String {
+    let model_line = if config.model.name.is_empty() {
+        String::new()
+    } else {
+        format!("\nModel: {}", config.model.name)
+    };
+    let body = itsy::session::contract::render_for_prompt(c);
+    format!(
+        "You are itsy, working under an active contract. Working directory: {cwd}.{model_line}\n\
+        \n\
+        {body}\n\
+        \n\
+        How to work:\n\
+        - Do the work for each pending assertion (write_file / patch / bash — all available now).\n\
+        - When you've verified an assertion, call `mark_assertion` with:\n\
+            id          the assertion id (A.001, A.002, …)\n\
+            state       \"passed\" / \"failed\" / \"skipped\"\n\
+            evidence    one-sentence summary of how you verified\n\
+            command     (recommended for passed) the shell command you ran\n\
+            exit_code   the exit code\n\
+            observation the actual output you saw — NOT \"OK\" or \"passed\"\n\
+        - When every assertion is non-pending, call `close_contract completed` to finish.\n\
+        - `close_contract completed` is refused while any assertion is still pending — \
+          there's no way to claim 'done' without resolving each one.\n\
+        - If you genuinely cannot verify an assertion, mark it `failed` or `skipped` with an honest reason.\n",
+        cwd = cwd,
+        model_line = model_line,
+        body = body,
+    )
 }
 
 // ── Agent turn ───────────────────────────────────────────────────────────────
@@ -729,6 +815,30 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             augmented.push_str(&ctx);
         }
     }
+
+    // Contract-proposal reframe. When the contract feature is on and
+    // there's no active contract yet, wrap the user's prompt with a
+    // "define done for the following" preamble. Probe data (see
+    // benchmark-driven-development/baselines/) showed this is the only
+    // shape that gets the model to emit propose_contract reliably while
+    // keeping thinking ON — system-prompt directives alone don't work
+    // because the model's reasoning layer locks onto the user task
+    // before it consults the system message. The wrap moves the
+    // priority into the user role where the model actually weighs it.
+    //
+    // We wrap unconditionally (don't bother with task-type classification
+    // here — the contract-mode prompt + downstream gate already skip
+    // the explanation case). If the prompt is genuinely chat-y the
+    // model will just emit a quick 2-3 assertion contract and we move on.
+    if itsy::settings::get().contract && itsy::session::contract::current().is_none() {
+        augmented = format!(
+            "Define what 'done' means for the following task by calling \
+             propose_contract. Do not start the task yet — just enumerate \
+             the checks that would prove it's done.\n\n\
+             TASK:\n{augmented}"
+        );
+    }
+
     session
         .history
         .lock()
@@ -874,7 +984,36 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     mcp_tools: Vec::new(),
                 }
             };
-            let tools = get_all_tools(&cfg, current_category.as_deref(), &deps);
+            let mut tools = get_all_tools(&cfg, current_category.as_deref(), &deps);
+            // Contract-first: when the feature is on, the task is
+            // action-y, and there's no active contract yet, strip the
+            // mutating tools from what the model sees. Reasoning-layer
+            // dissociation (model thinks "propose contract" but emits
+            // `write_file` anyway) is impossible if `write_file` isn't
+            // in the toolset. Once a contract is active, the full
+            // toolkit returns.
+            if itsy::settings::get().contract
+                && itsy::session::contract::current().is_none()
+                && !matches!(task_type, "explanation" | "respond")
+            {
+                let mutating: &[&str] = &[
+                    "write_file",
+                    "append_file",
+                    "patch",
+                    "read_and_patch",
+                    "create_and_run",
+                    "run",
+                    "memory_remember",
+                    "memory_forget",
+                ];
+                tools.retain(|t| {
+                    let name = t
+                        .pointer("/function/name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    !mutating.contains(&name)
+                });
+            }
             (cfg, hist, tools)
         };
 

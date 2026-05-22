@@ -1,0 +1,65 @@
+  Connected: http://10.0.2.2:8000/v1
+  Model: unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS
+
+[1m[36m  ⚡ itsy[0m[90m v0.1.0[0m
+
+  Model:    unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS
+  Endpoint: [90mhttp://10.0.2.2:8000/v1[0m
+  Graph:    [32m✓ indexed[0m
+  Dir:      [90m/app[0m
+
+[90m  Type a message to chat. /help for commands. /quit to exit.[0m
+
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mpip install grpcio==1.73.0 grpcio-tools==1.73.0[0m [90m2812ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mpip install grpcio==1.73.0 grpcio-tools==1.73.0 2>&1 | tail -5[0m [90m218ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mpython3 -c "import grpc; print(grpc.__version__)"[0m [90m98ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mpip3 install grpcio==1.73.0 grpcio-tools==1.73.0[0m [90m216ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mpip3 install grpcio==1.73.0 grpcio-tools==1.73.0 > /tmp/install.log 2>&1; echo "DONE: $?"[0m [90m215ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mcat /tmp/install.log[0m [90m2ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mpip3 list | grep -i grpc[0m [90m117ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mpython3 -c "import grpc; print(grpc.__version__)" 2>&1[0m [90m54ms[0m
+  [36m⚙[0m [36mcreate_and_run[0m 
+  [32m✓[0m Created [1m/tmp/check_grpc.py[0m (2 lines) [90m55ms[0m
+  [36m⚙[0m [36mwrite_file[0m 
+  [32m✓[0m Created [1m/app/kv-store.proto[0m (26 lines) [90m0ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mpython3 -m grpc_tools.protoc -I/app --python_out=/app --grpc_python_out=/app /app/kv-store.proto[0m [90m37ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mls -la /app/*pb2* 2>&1[0m [90m2ms[0m
+  [36m⚙[0m [36mfind_files[0m 
+  [32m✓[0m No files found. [90m1ms[0m
+  [36m⚙[0m [36mcreate_and_run[0m 
+  [32m✓[0m Created [1m/tmp/gen_proto.py[0m (6 lines) [90m36ms[0m
+  [36m⚙[0m [36mcreate_and_run[0m 
+  [32m✓[0m Created [1m/tmp/gen_proto2.py[0m (5 lines) [90m34ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mcd /app && python3 -m grpc_tools.protoc -I/app --python_out=. --grpc_python_out=. kv-store.proto 2>&1; echo "EXIT: $?"[0m [90m35ms[0m
+  [36m⚙[0m [36mfind_files[0m 
+  [32m✓[0m No files found. [90m1ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mls -la /app/[0m [90m3ms[0m
+  [36m⚙[0m [36mfind_files[0m 
+  [32m✓[0m No files found. [90m1ms[0m
+  [36m⚙[0m [36mread_file[0m 
+  [32m✓[0m /app/kv-store.proto (26 lines):
+   1│ syntax = "proto3";
+   2│ 
+   3│ pack… [90m0ms[0m
+  [36m⚙[0m [36mcreate_and_run[0m 
+  [32m✓[0m Created [1m/tmp/gen_proto3.py[0m (10 lines) [90m35ms[0m
+  [36m⚙[0m [36mfind_files[0m 
+  [32m✓[0m No files found. [90m1ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mpython3 -c "import grpc_tools.protoc; grpc_tools.protoc.main(['--proto_path=/app', '--python_out=/app', '--grpc_python_out=/app', 'kv-store.proto'])" && ls /app/*pb2*[0m [90m38ms[0m
+  [36m⚙[0m [36mcreate_and_run[0m 
+  [32m✓[0m Created [1m/tmp/gen_proto4.py[0m (15 lines) [90m52ms[0m
+  [36m⚙[0m [36mwrite_file[0m 
+  [32m✓[0m Created [1m/app/server.py[0m (28 lines) [90m0ms[0m

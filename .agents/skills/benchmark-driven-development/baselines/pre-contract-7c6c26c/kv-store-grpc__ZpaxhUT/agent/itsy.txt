@@ -1,0 +1,91 @@
+  Connected: http://10.0.2.2:8000/v1
+  Model: unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS
+
+[1m[36m  ⚡ itsy[0m[90m v0.1.0[0m
+
+  Model:    unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS
+  Endpoint: [90mhttp://10.0.2.2:8000/v1[0m
+  Graph:    [32m✓ indexed[0m
+  Dir:      [90m/app[0m
+
+[90m  Type a message to chat. /help for commands. /quit to exit.[0m
+
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mpip install grpcio==1.73.0 grpcio-tools==1.73.0[0m [90m2761ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mpip install grpcio==1.73.0 grpcio-tools==1.73.0 2>&1 | tail -5[0m [90m224ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mpython3 -c "import grpc; print(grpc.__version__)"[0m [90m99ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mpip3 install grpcio==1.73.0 grpcio-tools==1.73.0[0m [90m218ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mpip3 install grpcio==1.73.0 grpcio-tools==1.73.0 > /tmp/install.log 2>&1; echo "DONE: $?"[0m [90m213ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mcat /tmp/install.log[0m [90m2ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mecho hello[0m [90m1ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mpwd && ls /app/[0m [90m2ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mls /app/ 2>&1[0m [90m2ms[0m
+  [36m⚙[0m [36mwrite_file[0m 
+  [32m✓[0m Created [1m/app/kv-store.proto[0m (26 lines) [90m2ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mpip3 install grpcio==1.73.0 grpcio-tools==1.73.0 2>&1; echo "INSTALL_STATUS=$?"[0m [90m210ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mpython3 -m grpc_tools.protoc --proto_path=/app --python_out=/app --grpc_python_out=/app /app/kv-store.proto 2>&1; echo "STATUS=$?"[0m [90m36ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mls /app/*pb2* 2>&1[0m [90m2ms[0m
+  [36m⚙[0m [36mfind_files[0m 
+  [32m✓[0m No files found. [90m1ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mls -la /app/[0m [90m2ms[0m
+  [36m⚙[0m [36mfind_files[0m 
+  [32m✓[0m No files found. [90m1ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mfind /app -type f 2>&1 | head -20[0m [90m2ms[0m
+  [36m⚙[0m [36mread_file[0m 
+  [32m✓[0m /app/kv-store.proto (26 lines):
+   1│ syntax = "proto3";
+   2│ 
+   3│ pack… [90m0ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mpip3 install --quiet grpcio==1.73.0 grpcio-tools==1.73.0 && echo "INSTALL_OK" || echo "INSTALL_FAIL"[0m [90m210ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mpython3 -c "import grpc; print('grpc version:', grpc.__version__)" 2>&1[0m [90m52ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mpython3 << 'EOF'
+import subprocess
+result = subprocess.run(['pip3', 'install', 'grpcio==1.73.0', 'grpcio-tools==1.73.0'], capture_output=True, text=True)
+print("STDOUT:", result.stdout[-500:] if len(result.stdout) > 500 else result.stdout)
+print("STDERR:", result.stderr[-500:] if len(result.stderr) > 500 else result.stderr)
+print("Return code:", result.returncode)
+EOF
+[0m [90m232ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mpython3 -c "import os; print(os.listdir('/app'))" > /tmp/listing.txt 2>&1[0m [90m9ms[0m
+  [36m⚙[0m [36mread_file[0m 
+  [32m✓[0m /tmp/listing.txt (2 lines):
+   1│ ['kv-store.proto', 'kv_store_pb2_grpc.py', '… [90m0ms[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mpython3 -c "import grpc; print('OK')" > /tmp/grpc_check.txt 2>&1[0m [90m54ms[0m
+  [36m⚙[0m [36mread_file[0m 
+  [32m✓[0m /tmp/grpc_check.txt (2 lines):
+   1│ OK
+   2│  [90m0ms[0m
+  [36m⚙[0m [36mwrite_file[0m 
+  [32m✓[0m Created [1m/app/server.py[0m (34 lines) [90m0ms[0m
+  [33m⟳ 1 error(s) — fix attempt 1/4[0m
+    [31mRuntime error: Traceback (most recent call last):
+  File "/app/server.py", line 33, in <module>
+    serve()
+    ~~~~~^^
+  File "/app/server.py", line 23, in serve
+    grpc_server.add_insecure_listener('0.0.0.0:5328')
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: '_Server' object has no attribute 'add_insec[0m
+  [36m⚙[0m [36mpatch[0m 
+[90m    ┌─ /app/server.py:23
+[0m[31m    │ -    grpc_server.add_insecure_listener('0.0.0.0:5328')
+[0m[32m    │ +    grpc_server.add_insecure_port('0.0.0.0:5328')
+[0m[90m    └─[0m  [33m✓[0m Edited /app/server.py:23 [90m0ms[0m

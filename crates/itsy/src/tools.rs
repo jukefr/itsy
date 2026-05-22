@@ -65,11 +65,20 @@ pub static TOOLS: Lazy<Vec<Value>> = Lazy::new(|| vec![
 
     // ── contract: the agent's definition-of-done for the current task ──
     func_tool("propose_contract",
-        "Define what 'done' looks like for the current task BEFORE starting work. \
-        Creates a contract with assertions you commit to verifying. \
-        Each assertion is a single testable statement (≤120 chars). \
-        Use 2-8 assertions for normal tasks. Anything you can't enumerate up front isn't part of the contract — \
-        you can still do the work, but `close_contract complete` will refuse if assertions are pending.",
+        "MUST be your first tool call on any action task. Records the definition-of-done as a list of \
+        testable assertions, each ≤120 chars. After this returns, `write_file` / `patch` / mutating \
+        `bash` become available.\n\n\
+        EXAMPLE — for the prompt \"write /app/foo.py that prints 42\":\n\
+        {\n\
+          \"title\": \"foo.py prints 42\",\n\
+          \"brief\": \"Create /app/foo.py so that `python3 /app/foo.py` writes `42` to stdout.\",\n\
+          \"assertions\": [\n\
+            {\"id\": \"A.001\", \"text\": \"/app/foo.py exists\"},\n\
+            {\"id\": \"A.002\", \"text\": \"running /app/foo.py prints exactly '42'\"}\n\
+          ]\n\
+        }\n\n\
+        Rules: 2-6 assertions, each a single concrete check (file exists / a command exits 0 / output \
+        contains X). NO vague ones like \"works correctly\". Skip wrapping prose.",
         json!({
             "type": "object",
             "properties": {
