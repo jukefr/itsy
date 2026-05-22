@@ -371,6 +371,24 @@ pub fn bash_is_read_only(args: &Value) -> bool {
         let head = head.trim_start_matches('(').trim_start_matches('$');
         // For chained `&&` we just split on `&` which leaves empty
         // segments between `&&`; the empty-check above handles them.
+        //
+        // Special-case `cd <path>` (no shell-glob expansion, no
+        // subshell): the model commonly prepends `cd /app/repo && ...`
+        // to chained read-only inspection. The cd itself is effectively
+        // a no-op for caching — same `(cd, args)` always lands in the
+        // same directory and the chained commands are still read-only.
+        if head == "cd" {
+            let rest: Vec<&str> = trimmed.split_whitespace().collect();
+            // Allow exactly `cd <single-target>` with no flags / globs.
+            let cd_safe = rest.len() == 2
+                && !rest[1].contains('*')
+                && !rest[1].contains('$')
+                && !rest[1].contains('`');
+            if cd_safe {
+                continue;
+            }
+            return false;
+        }
         if FORBID.contains(&head) {
             return false;
         }
@@ -576,5 +594,28 @@ mod bash_readonly_tests {
         let args = b("rm -rf /tmp/x");
         d.record("bash", &args, &json!({"result": "ok"}));
         assert!(matches!(d.lookup("bash", &args), DedupOutcome::Skip));
+    }
+}
+
+#[cfg(test)]
+mod cd_prefix_tests {
+    use super::*;
+    use serde_json::json;
+    fn b(cmd: &str) -> Value { json!({"command": cmd}) }
+    #[test]
+    fn cd_then_readonly_is_pure() {
+        assert!(bash_is_read_only(&b("cd /app/repo && git log --oneline")));
+        assert!(bash_is_read_only(&b("cd /app && ls -la")));
+        assert!(bash_is_read_only(&b("cd /app/repo && git reflog | head -30")));
+    }
+    #[test]
+    fn cd_with_glob_or_flags_is_impure() {
+        assert!(!bash_is_read_only(&b("cd $HOME && ls")));
+        assert!(!bash_is_read_only(&b("cd /tmp/* && ls")));
+        assert!(!bash_is_read_only(&b("cd -P /app && ls")));
+    }
+    #[test]
+    fn cd_then_mutating_is_impure() {
+        assert!(!bash_is_read_only(&b("cd /app && rm -rf foo")));
     }
 }
