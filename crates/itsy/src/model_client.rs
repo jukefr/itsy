@@ -60,18 +60,32 @@ pub async fn chat_completion(ctx: &ChatContext<'_>) -> Option<Value> {
         0.1
     };
 
+    // Provider-gated reasoning fields (Anthropic `thinking`, OpenAI
+    // `reasoning_effort`, Qwen / llama.cpp `chat_template_kwargs`).
+    let task = ctx.current_task_type.unwrap_or("coding");
+    let tokens = crate::model::thinking_budget::thinking_budget(task, 0);
+
+    // max_tokens is a hard cap on TOTAL output (thinking + content).
+    // If the thinking budget is bigger than max_tokens, the model burns
+    // its whole output budget on thinking and emits empty content —
+    // the classic IQ2_XXS "empty response" failure mode. Give the
+    // content at least 4k headroom past the thinking budget, and
+    // honour ITSY_MAX_OUTPUT_TOKENS for explicit overrides.
+    let max_tokens = std::env::var("ITSY_MAX_OUTPUT_TOKENS")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0)
+        .max(tokens.saturating_add(4096))
+        .max(4096);
+
     let mut body = json!({
         "model": ctx.config.model.name,
         "messages": messages,
         "tools": ctx.tools,
         "temperature": temperature,
-        "max_tokens": 4096,
+        "max_tokens": max_tokens,
     });
 
-    // Provider-gated reasoning fields (Anthropic `thinking`, OpenAI
-    // `reasoning_effort`, Qwen / llama.cpp `chat_template_kwargs`).
-    let task = ctx.current_task_type.unwrap_or("coding");
-    let tokens = crate::model::thinking_budget::thinking_budget(task, 0);
     crate::model::thinking_budget::apply_thinking_budget(
         &mut body,
         &ctx.config.model.base_url,
