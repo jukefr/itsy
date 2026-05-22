@@ -40,6 +40,32 @@ pub fn install() {
             PRESSED.fetch_add(1, Ordering::SeqCst);
         }
     });
+
+    // Diagnostic SIGTSTP listener (Unix only). Doesn't suppress the
+    // default suspend behaviour — Ctrl+Z still works. But before the
+    // suspend lands, we log a stderr breadcrumb so the user can confirm
+    // whether suspension came from their keyboard / kernel / a misbehaved
+    // child process. Toggle with `ITSY_DEBUG_SIGTSTP=true`.
+    #[cfg(unix)]
+    if std::env::var("ITSY_DEBUG_SIGTSTP").as_deref() == Ok("true") {
+        tokio::spawn(async {
+            use tokio::signal::unix::{signal, SignalKind};
+            let Ok(mut stream) = signal(SignalKind::from_raw(libc_sigtstp())) else {
+                return;
+            };
+            while stream.recv().await.is_some() {
+                eprintln!("\n  [itsy] received SIGTSTP — process will suspend. Resume with `fg`.");
+            }
+        });
+    }
+}
+
+#[cfg(unix)]
+fn libc_sigtstp() -> i32 {
+    // Standard POSIX signal number for SIGTSTP (terminal stop) is 20 on
+    // Linux/Darwin and 18 on some BSDs — but we use libc's constant via
+    // the `nix` crate which is already in the dep set.
+    nix::sys::signal::Signal::SIGTSTP as i32
 }
 
 /// How many Ctrl+C presses have been received since the last [`take`].

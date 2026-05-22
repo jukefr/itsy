@@ -936,8 +936,11 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
 
                 // Per-turn hard repeat cap. Backstop for tools that dedup
                 // can't cache (mutating bash, etc.) — after N identical
-                // calls we refuse, surface a [SYSTEM] hint, and let the
-                // model recover instead of spinning.
+                // calls we refuse + inject a [SYSTEM] hint. If the model
+                // keeps trying past `BREAK_ON_REPEAT`, we abort the whole
+                // turn so the user gets the prompt back instead of watching
+                // 22 yellow warnings scroll by.
+                const BREAK_ON_REPEAT: u32 = 5;
                 let repeat_key = {
                     use sha2::{Digest, Sha256};
                     let args_canon = serde_json::to_string(&args).unwrap_or_default();
@@ -949,6 +952,22 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                 };
                 let repeat_count = per_turn_repeats.entry(repeat_key.clone()).or_insert(0);
                 *repeat_count += 1;
+                if *repeat_count >= BREAK_ON_REPEAT {
+                    let msg = format!(
+                        "Stuck calling `{name}` with identical args ({} times). Aborting this turn.",
+                        *repeat_count
+                    );
+                    println!("  \x1b[31m⚠ {msg}\x1b[0m");
+                    session.trace.lock().record_error("repeat_spiral", &msg);
+                    // Push as a tool result so the conversation history
+                    // stays coherent for the next turn.
+                    session.history.lock().push(json!({
+                        "role": "tool",
+                        "tool_call_id": id,
+                        "content": format!("[ABORTED] {msg}"),
+                    }));
+                    return;
+                }
                 if *repeat_count > MAX_IDENTICAL_REPEATS_PER_TURN {
                     let hint = format!(
                         "[SYSTEM] You have called `{name}` with identical arguments {} times this turn. The result will not change. Stop repeating it and take a different approach, or describe what's blocking you.",
@@ -1339,12 +1358,45 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
         }
 
         // 7b) No tool calls → model is responding with text.
-        // Counter guard: action-task gave no-tool short response.
-        //
-        // Skip the badger when the router pinned us to `respond` — the
-        // model literally has no tools available, so prodding it to "use
-        // tools" would just spin the loop until MAX_TOOL_CALLS_PER_TURN.
         let content_opt = msg.get("content").and_then(|c| c.as_str()).map(String::from);
+        let content_trimmed_len = content_opt.as_deref().map(|c| c.trim().len()).unwrap_or(0);
+
+        // Empty-response retry: model returned no content AND no tool
+        // calls. This is the IQ2_XXS "I give up" failure mode. Push the
+        // empty assistant turn (so the model sees its own no-op) and ask
+        // it to try again. Bounded by `MAX_EMPTY_RETRIES` to prevent
+        // spinning on a model that keeps refusing.
+        if tool_calls_this_turn == 0
+            && current_category.as_deref() != Some("respond")
+            && content_trimmed_len == 0
+        {
+            const MAX_EMPTY_RETRIES: u32 = 2;
+            let n = *per_turn_repeats.entry("__empty_response".into()).and_modify(|n| *n += 1).or_insert(1);
+            if n <= MAX_EMPTY_RETRIES {
+                println!("  \x1b[33m⚠ Model returned empty response — retrying ({n}/{MAX_EMPTY_RETRIES})\x1b[0m");
+                session.history.lock().push(json!({
+                    "role": "assistant",
+                    "content": content_opt.clone().unwrap_or_default(),
+                }));
+                session.history.lock().push(json!({
+                    "role": "user",
+                    "content": "[SYSTEM] Your previous turn was empty. Please respond — either call a tool to gather information, or give a direct text answer. Do not return an empty turn.",
+                }));
+                continue;
+            }
+            // Exhausted retries: surface to user, stop spinning.
+            println!("  \x1b[31m✗ Model returned empty responses {n} times — giving up on this turn.\x1b[0m");
+            session.trace.lock().record_error("empty_response", &format!("{n} consecutive empty responses"));
+            session.history.lock().push(json!({
+                "role": "assistant",
+                "content": "(no response from model after multiple retries)",
+            }));
+            break;
+        }
+
+        // Badger: action-task gave no-tool short response. Skip when the
+        // router pinned us to `respond` (no tools available — badgering
+        // would spin the loop), and only fire when there's actual content.
         if tool_calls_this_turn == 0
             && current_category.as_deref() != Some("respond")
             && matches!(task_type, "coding" | "editing" | "backend")
