@@ -3,7 +3,6 @@
 //! defensive: any model failure falls back to a safe default rather than
 //! crashing the agent. Mirrors `bin/features_adapter.js`.
 
-use anyhow::Result;
 use serde_json::{json, Value};
 
 use crate::runtime::features::prompts::call_prompt;

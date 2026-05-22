@@ -850,20 +850,6 @@ pub fn normalize_base_url(raw: &str) -> String {
     }
 }
 
-fn extract_value(line: &str) -> Option<String> {
-    let after_eq = line.find('=')?;
-    let mut v = line[after_eq + 1..].trim();
-    if let Some(idx) = v.find('#') {
-        v = v[..idx].trim();
-    }
-    let v = v.trim_matches(|c| c == '"' || c == '\'').trim();
-    if v.is_empty() {
-        None
-    } else {
-        Some(v.to_string())
-    }
-}
-
 /// Build auth headers for API requests (mirrors `buildAuthHeaders`).
 pub fn build_auth_headers(config: &Config) -> HeaderMap {
     let mut headers = HeaderMap::new();

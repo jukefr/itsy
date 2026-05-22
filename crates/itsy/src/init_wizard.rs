@@ -19,6 +19,10 @@ use crate::paths;
 
 #[derive(Debug, Clone, Copy)]
 struct Provider {
+    /// Display name shown in the wizard banner. Constructed but not
+    /// read in the current code path — kept for completeness so future
+    /// banner tweaks don't have to redefine the table.
+    #[allow(dead_code)]
     name: &'static str,
     default_url: &'static str,
     needs_key: bool,

@@ -9,7 +9,7 @@ use std::os::unix::fs::PermissionsExt;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::security::{redact_string, redact_value};
 

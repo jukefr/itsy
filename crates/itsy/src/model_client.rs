@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use anyhow::Result;
 use futures::StreamExt;
 use serde::Serialize;
 use serde_json::{json, Value};

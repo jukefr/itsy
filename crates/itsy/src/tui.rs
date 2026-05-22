@@ -5,11 +5,9 @@ use crate::Config;
 
 const C_RESET: &str = "\x1b[0m";
 const C_BOLD: &str = "\x1b[1m";
-const C_DIM: &str = "\x1b[2m";
 const C_RED: &str = "\x1b[31m";
 const C_GREEN: &str = "\x1b[32m";
 const C_YELLOW: &str = "\x1b[33m";
-const C_BLUE: &str = "\x1b[34m";
 const C_MAGENTA: &str = "\x1b[35m";
 const C_CYAN: &str = "\x1b[36m";
 const C_GRAY: &str = "\x1b[90m";
