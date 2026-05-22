@@ -65,18 +65,18 @@ These run on every turn. Highest impact for bugs.
 
 | Rust | Upstream JS | State | Commit |
 |---|---|---|---|
-| `crates/itsy/src/governor.rs` | `bin/governor.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/governor/early_stop.rs` | `src/governor/early_stop.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/escalation.rs` | `bin/escalation.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/trace_recorder.rs` | `bin/trace_recorder.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/token_monitor.rs` | `bin/token_monitor.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/model/adaptive_router.rs` | `src/model/adaptive_router.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/model/adaptive_temp.rs` | `src/model/adaptive_temp.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/model/chain.rs` | `src/model/chain.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/model/profiles.rs` | `src/model/profiles.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/model/reviewer.rs` | `src/model/reviewer.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/model/router.rs` | `src/model/router.js` | `NOT_AUDITED` | — |
-| `crates/itsy/src/model/thinking_budget.rs` | `src/model/thinking_budget.js` | `NOT_AUDITED` | — |
+| `crates/itsy/src/governor.rs` | `bin/governor.js` | `AUDITED` | (no changes needed) |
+| `crates/itsy/src/governor/early_stop.rs` | `src/governor/early_stop.js` | `PARTIAL` | sizes 137/143, structurally aligned |
+| `crates/itsy/src/escalation.rs` | `bin/escalation.js` | `PARTIAL` | sizes 349/275 |
+| `crates/itsy/src/trace_recorder.rs` | `bin/trace_recorder.js` | `NEEDS_AUDIT` | 2.2x bloat — full per-fn audit needed |
+| `crates/itsy/src/token_monitor.rs` | `bin/token_monitor.js` | `PARTIAL` | sizes 125/84, structurally aligned |
+| `crates/itsy/src/model/adaptive_router.rs` | `src/model/adaptive_router.js` | `UNVERIFIED` | 4.2x bloat (Wilson bounds, persistence); DEAD code — not called |
+| `crates/itsy/src/model/adaptive_temp.rs` | `src/model/adaptive_temp.js` | `PARTIAL` | sizes 118/85, structurally aligned |
+| `crates/itsy/src/model/chain.rs` | `src/model/chain.js` | `PARTIAL` | sizes 255/162, structurally aligned |
+| `crates/itsy/src/model/profiles.rs` | `src/model/profiles.js` | `NEEDS_AUDIT` | 2.7x bloat — full per-fn audit needed |
+| `crates/itsy/src/model/reviewer.rs` | `src/model/reviewer.js` | `NEEDS_AUDIT` | 3.2x bloat — full per-fn audit needed |
+| `crates/itsy/src/model/router.rs` | `src/model/router.js` | `PARTIAL` | sizes 119/63, Rust adds Complexity enum |
+| `crates/itsy/src/model/thinking_budget.rs` | `src/model/thinking_budget.js` | `PARTIAL` | sizes 260/207, Rust adds REASONING_MODEL_RE for Qwen3 detection (INTENTIONAL) |
 
 ## Tier 3 — session + tools
 
