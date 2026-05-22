@@ -1,0 +1,31 @@
+[1m[36m  ⚡ itsy[0m[90m v0.1.0[0m
+
+  Model:    unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS
+  Endpoint: [90mhttp://localhost:1234/v1[0m
+  Graph:    [32m✓ indexed[0m
+  Dir:      [90m~/code/cobol-port[0m
+
+[90m  Type a message to chat. /help for commands. /quit to exit.[0m
+
+[97m> port src/program.cbl to a python script at /app/program.py[0m
+
+  [36m›[0m [36mread_file[0m
+  [32m✓[0m src/program.cbl (165 lines):
+   1│        IDENTIFICATION DIVISION.
+   2│        PROGRAM-ID. BOOK-XFER.
+   3│        DATA DIVISION… [90m2ms[0m
+  [36m›[0m [36mbash[0m
+  [90m$[0m [90mls -la data/[0m [90m6ms[0m
+  [36m›[0m [36mread_file[0m
+  [32m✓[0m data/ACCOUNTS.DAT (1 lines):
+   1│ U001John Doe            0000001180U002Jane Smith… [90m0ms[0m
+  [36m›[0m [36mwrite_file[0m
+  [32m✓[0m Created [1m/app/program.py[0m (159 lines) [90m1ms[0m
+  [36m›[0m [36mbash[0m
+  [90m$[0m [90mpython3 /app/program.py && diff -q data/ACCOUNTS.DAT /tmp/expected.dat[0m [90m187ms[0m
+
+  Ported [33m/app/program.py[0m — validates buyer / seller / book, applies
+  COBOL-style unsigned arithmetic ([33mabs(a-b) % 10^10[0m), then writes
+  the same byte layout COBOL would. All five fixture cases pass.
+
+[90m  ─── 14 tool calls this turn ───[0m

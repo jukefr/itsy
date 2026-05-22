@@ -7,6 +7,8 @@ of ceremony per turn.
 
 ![](docs/itsy-tui.png)
 
+<sub>Screenshot rendered from [`docs/itsy-tui.ansi`](docs/itsy-tui.ansi) via [`docs/regen-screenshot.sh`](docs/regen-screenshot.sh).</sub>
+
 itsy is tuned for quantised models on consumer hardware, so the
 design choices mostly trade tokens for compliance. The tool-call
 parser is forgiving — it eats JSON, XML-ish, and code-fence wrappers
