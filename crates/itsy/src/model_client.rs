@@ -301,6 +301,29 @@ pub fn run_validation(file_path: &str) -> Option<ValidationOutcome> {
 }
 
 /// Build the canonical system prompt used by [`chat_completion`].
+/// Mirror of upstream `buildCompactSystemPrompt` (bin/smallcode.js).
+///
+/// ### Upstream vs port — deviations
+/// INTENTIONAL:
+///   - Agent name is "itsy" not "SmallCode" — product name.
+///   - Bootstrap detector omitted — Rust-side feature not yet ported; upstream
+///     injects a compact project summary (runtime, build/test commands, entry
+///     point) so the model doesn't burn tool calls on discovery. Marked
+///     UNVERIFIED until ported or confirmed not needed.
+///   - `taskType !== 'explanation'` guard and BoneScript backend hint omitted
+///     — these are JS-only feature gates not yet ported.
+/// ACCIDENTAL (fixed in this commit):
+///   - Previous port had verbose IMPORTANT headers and bullet lists instead of
+///     upstream's compact single-paragraph Rules line. Verbose prompts degrade
+///     small-model behaviour — the model reads more text and acts less.
+///   - Missing "ACT immediately" directive — upstream explicitly tells the
+///     model not to ask for confirmation; absence caused hesitation loops.
+///   - Missing large-file write_file cap (60 lines / ~8KB) — upstream warns
+///     that llama.cpp JSON parser crashes on large tool calls.
+///   - Working directory was appended after the rules instead of inline in the
+///     first line, matching upstream's `Working directory: ${process.cwd()}`.
+/// UNVERIFIED:
+///   - Bootstrap detector prompt line (upstream: `_bootstrapDetector.formatForPrompt()`).
 pub fn build_system_prompt(
     config: &Config,
     memory_context: &str,
@@ -308,44 +331,45 @@ pub fn build_system_prompt(
     plugin_context: &str,
     current_task_type: Option<&str>,
 ) -> String {
-    let os = if cfg!(windows) { "Windows (cmd.exe shell)" } else if cfg!(target_os = "macos") { "macOS (zsh)" } else { "Linux (bash)" };
-    let win_extra = if cfg!(windows) {
-        "- Use \"dir\" not \"ls\", \"type\" not \"cat\", \"del\" not \"rm\"\n- Do NOT use bash-specific commands (touch, export, chmod)"
+    let os = if cfg!(windows) { "Windows" } else if cfg!(target_os = "macos") { "macOS" } else { "Linux" };
+    let os_hint = if cfg!(windows) {
+        "\nUse \"dir\" not \"ls\", \"type\" not \"cat\". No bash-only commands."
     } else {
         ""
     };
     let cwd = std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
 
     let mut prompt = format!(
-        "You are itsy, a coding assistant that operates in the user's project directory.\n\n\
-         You have tools to read, write, and edit files, run shell commands, and search code.\n\
-         You also have project memory and compound tools that do multiple operations in one call.\n\
-         You have a CODE GRAPH indexed for this project — use it for understanding questions.\n\n\
-         IMPORTANT — Code Graph (use these FIRST for understanding/analysis questions):\n\
-         - list_projects: Lists ALL projects in the workspace with stats. Use FIRST when asked \"what projects are here\".\n\
-         - graph_search: Search for a specific symbol/function/class in the graph.\n\
-         - explain_symbol: Get full explanation of a function/class.\n\
-         - memory_load: Load relevant project memory.\n\n\
-         IMPORTANT — Environment:\n\
-         - OS: {os}\n\
-         {win_extra}\n\n\
-         Rules:\n\
-         - PREFER compound tools to reduce back-and-forth.\n\
-         - Use \"patch\" for edits. Do NOT rewrite whole files.\n\
-         - Be concise — show what you did, not lengthy explanations.\n\
-         - If a tool fails, explain what went wrong. Do NOT output a greeting.\n\
-         - Create files with write_file directly. Do NOT run mkdir first."
+        "You are itsy, a coding agent. Working directory: {cwd}\n\
+         OS: {os}{os_hint}\n\n\
+         Rules: Use patch for edits (not full rewrites). Prefer compound tools. Be concise. \
+         ACT immediately — do not ask for confirmation unless the task is genuinely ambiguous. \
+         If asked to read a file, read it. If asked to create something, create it. \
+         If asked about the project, read README.md or relevant files.\n\n\
+         CRITICAL — large file rule: write_file calls are limited to 60 lines / ~8KB. \
+         llama.cpp's JSON parser crashes on larger tool calls. For any file over 60 lines: \
+         (1) write_file with just the skeleton (imports + empty stubs), then \
+         (2) use multiple patch calls to fill in each function/section. \
+         Never put more than 60 lines in a single write_file content field."
     );
 
-    let _ = current_task_type;
-    prompt.push_str(&format!("\nWorking directory: {cwd}"));
+    let task_type = current_task_type.unwrap_or("");
+    if task_type != "explanation" {
+        prompt.push_str(
+            "\nUse graph_search/explain_symbol for \"how does X work\" questions. \
+             Use list_projects for workspace overview.",
+        );
+    }
+    if task_type == "backend" {
+        prompt.push_str(
+            "\n\nFor Node.js backends: write a .bone file → bone_check → bone_compile. \
+             Don't hand-write routes.",
+        );
+    }
+
     prompt.push_str(memory_context);
     prompt.push_str(skill_context);
     prompt.push_str(plugin_context);
-    // tie current model/base to the prompt so future readers know the binding
-    if !config.model.name.is_empty() {
-        prompt.push_str(&format!("\nModel: {}", config.model.name));
-    }
     prompt
 }
 
