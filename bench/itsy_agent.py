@@ -92,49 +92,41 @@ class ItsyAgent(BaseInstalledAgent):
                 "Model name required. Pass --model or set ITSY_MODEL env var."
             )
 
-        # All state under /tmp/itsy-home so the container's filesystem stays
-        # untouched outside the task's working directory.
-        env: dict[str, str] = {
-            "ITSY_HOME": "/tmp/itsy-home",
-            "ITSY_BASE_URL": base_url,
-            "ITSY_MODEL": model,
-            "ITSY_PROVIDER": "openai",
-            "ITSY_AUTO_APPROVE": "true",
-            # Generous timeouts — small models on tight quants can take a
-            # while per turn, and bench tasks have their own outer timeouts.
-            "ITSY_MODEL_TIMEOUT": "600",
-            "ITSY_BASH_TIMEOUT": "120",
-            # Safeguards on by default — they're cheap and catch the
-            # patch / bash / write_guard pitfalls that plague IQ2 quants.
-            "ITSY_PLAN": "true",
-            "ITSY_SNAPSHOT": "true",
-            "ITSY_WRITE_GUARD": "true",
-            "ITSY_BOOTSTRAP": "true",
-            "ITSY_TRUST_DECAY": "true",
-            "ITSY_TEMP_ADAPT": "true",
-            "ITSY_SEMANTIC_MERGE": "true",
-            "ITSY_ERROR_DIAGNOSIS": "true",
-            "ITSY_CONTEXT_RETRIEVAL": "true",
-            # No reviewer / chain / clarifier — they cost extra LLM round
-            # trips and don't fit a one-shot non-interactive benchmark run.
-            "ITSY_REVIEWER": "false",
-            "ITSY_CHAIN": "false",
-            "ITSY_CLARIFIER": "false",
-            "ITSY_THINKING_BUDGET": "8000",
-            # No tty inside docker exec — keep itsy in line mode.
-            "ITSY_TUI_CLASSIC": "true",
-        }
+        # ITSY_HOME is the lone env var itsy still consults — it resolves
+        # before the config file does, so it has to be an env var by
+        # construction. Every other knob is a CLI flag.
+        env: dict[str, str] = {"ITSY_HOME": "/tmp/itsy-home"}
 
         escaped = shlex.quote(instruction)
-        await self.exec_as_agent(
-            environment,
-            command=(
-                f"mkdir -p /tmp/itsy-home /logs/agent && "
-                f"{self._BINARY_TARGET} --classic --non-interactive -p {escaped} "
-                f"2>&1 </dev/null | tee /logs/agent/{self._OUTPUT_FILENAME}"
-            ),
-            env=env,
+        # CLI flags supplant the old ITSY_* env-var bridge. Order matters:
+        # named flags first, then --set key=value for the long tail.
+        flags = [
+            f"--model={shlex.quote(model)}",
+            f"--endpoint={shlex.quote(base_url)}",
+            "--provider=openai",
+            "--auto-approve",
+            "--classic",
+            "--non-interactive",
+            # Generous timeouts — small models on tight quants take a
+            # while per turn; bench tasks have their own outer timeouts.
+            "--bash-timeout=120",
+            "--request-timeout-ms=600000",
+            # Reasoning headroom — IQ2_XXS will exhaust output budget on
+            # thinking unless max_output_tokens > thinking_budget.
+            "--thinking-budget=8000",
+            # Safeguards on by default — cheap and catch patch/bash/
+            # write_guard pitfalls. Disable the expensive extras
+            # (reviewer / chain / clarifier).
+            "--set=features.reviewer=false",
+            "--set=features.chain=false",
+            "--set=features.clarifier=false",
+        ]
+        cmd = (
+            f"mkdir -p /tmp/itsy-home /logs/agent && "
+            f"{self._BINARY_TARGET} {' '.join(flags)} -p {escaped} "
+            f"2>&1 </dev/null | tee /logs/agent/{self._OUTPUT_FILENAME}"
         )
+        await self.exec_as_agent(environment, command=cmd, env=env)
 
     def populate_context_post_run(self, context: AgentContext) -> None:
         out = self.logs_dir / self._OUTPUT_FILENAME
