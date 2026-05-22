@@ -95,10 +95,32 @@ pub struct SafePath {
     pub display_path: String,
 }
 
-#[derive(Default, Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub struct PathOptions {
     pub allow_outside: bool,
     pub allow_home: bool,
+}
+
+impl Default for PathOptions {
+    fn default() -> Self {
+        // Many real-world tasks instruct the model to read or write files
+        // outside the working directory (e.g. `/data/...`, `/tmp/...`,
+        // `/etc/...`). Refusing them outright forces the model into
+        // brittle workarounds (or fabricating the data, as IQ2-quant
+        // models tend to do). Sensitive paths are still blocked by the
+        // SENSITIVE_PATH_RES list further down.
+        //
+        // Default ON; set ITSY_ALLOW_OUTSIDE_PATHS=false to force the
+        // legacy strict-confinement behavior.
+        let allow_outside = match std::env::var("ITSY_ALLOW_OUTSIDE_PATHS")
+            .ok()
+            .as_deref()
+        {
+            Some("0") | Some("false") | Some("no") | Some("off") => false,
+            _ => true,
+        };
+        Self { allow_outside, allow_home: false }
+    }
 }
 
 /// Resolve a user-supplied path safely against `cwd`. Mirrors
