@@ -24,7 +24,7 @@ These run on every turn. Highest impact for bugs.
 
 | Rust | Upstream JS | State | Commit |
 |---|---|---|---|
-| `crates/itsy/src/tools_impl/dedup.rs` | `src/tools/dedup.js` | `NOT_AUDITED` | — |
+| `crates/itsy/src/tools_impl/dedup.rs` | `src/tools/dedup.js` | `AUDITED` | (pending) |
 | `crates/itsy/src/executor.rs` | `bin/executor.js` | `NOT_AUDITED` | — |
 | `crates/itsy/src/tools.rs` | `bin/tools.js` | `NOT_AUDITED` | — |
 | `crates/itsy/src/model_client.rs` | `bin/model_client.js` | `NOT_AUDITED` | — |

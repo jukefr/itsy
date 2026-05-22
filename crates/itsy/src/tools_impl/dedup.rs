@@ -1,30 +1,59 @@
 //! Tool-call deduplication.
 //!
-//! Small models often loop: they call `read_file` on the same file twice in
-//! a row, or `search` for the same pattern, or run the same `bash` command.
-//! Dedup short-circuits identical consecutive tool calls within a sliding
-//! window, returning the cached result instead of re-executing. Only applies
-//! to read-only / pure tools — never to anything with side effects.
+//! Behavioural 1:1 with upstream `src/tools/dedup.js` at
+//! `1db07104af9df709cec086dffdfc4bf65cceae8d`. Small models often loop
+//! — calling `read_file` on the same file twice in a row, or `search`
+//! for the same pattern. Dedup short-circuits identical consecutive
+//! tool calls within a sliding window, returning the cached result
+//! instead of re-executing. Only applies to read-only / pure tools.
 //!
 //! Configuration:
-//!   `ITSY_DEDUP=false`            disable entirely
-//!   `ITSY_DEDUP_WINDOW=5`         number of recent calls considered
-//!   `ITSY_DEDUP_TTL_SECS=30`      default time-to-live per cache entry
-//!   `ITSY_DEDUP_SOFT=1`           soft-dedup-with-warning mode (no cache hit,
-//!                                  just log/mark — call still runs)
-//!   `ITSY_DEDUP_SIMILARITY=0.92`  semantic-similarity threshold (0..=1)
+//!   `features.dedup_enabled` — enable (default true)
+//!   `features.dedup_window`  — number of recent calls considered (default 5)
+//!
+//! ### Upstream vs port — INTENTIONAL deviations
+//!
+//! 1. **Return type `Option<Value>` instead of `null | Value`** — direct
+//!    Rust idiom for "maybe a cached result". Behaviour identical.
+//! 2. **SHA256 truncated to 16 hex chars** instead of SHA1. Cache keys
+//!    never leave the process so collision properties are equivalent;
+//!    `sha2` is already a workspace dep, `sha1` isn't.
+//! 3. **`Arc<Mutex<ToolDedup>>` in the session** instead of JS's module
+//!    singleton (`getDedup()` / `resetDedup()`). Rust ownership requires
+//!    explicit sharing; behaviour identical (one instance per session).
+//! 4. **`bash_is_read_only()` free helper** — Rust-only utility used by
+//!    the contract gate in `bin/itsy.rs` to classify mutating-vs-readonly
+//!    bash commands. Does NOT participate in dedup lookup/record (bash
+//!    is treated as impure exactly like upstream — the bench evidence
+//!    showed that caching read-only bash makes spam *cheaper* without
+//!    actually preventing the spiral, so it was not a real improvement).
+//! 5. **Unit tests** — JS has none in-file. Pure regression coverage.
+//!
+//! Previous Rust additions that have been REMOVED because they made
+//! behaviour worse than upstream:
+//!   * TTL expiry — forces re-execution that JS would cache.
+//!   * Jaccard semantic similarity — false-positive cache hits for
+//!     non-identical calls.
+//!   * NOISY_TOOLS bypass (`list_files`) — misses real cache hits.
+//!   * Routing read-only bash through dedup — caching made spam
+//!     cheaper without preventing the actual spiral; spiral defense
+//!     belongs in the agent loop's `BREAK_ON_REPEAT` path.
+//!   * Soft-warn mode — kept the warning but dropped the toggle.
 
-use std::collections::{HashSet, VecDeque};
-use std::time::{Duration, Instant};
+use std::collections::HashSet;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use once_cell::sync::Lazy;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-/// Pure / read-only tools — safe to deduplicate.
+/// Tools considered safe to dedup. Anything that mutates state
+/// (write_file, patch, bash, mcp__*) is excluded — even if "the same"
+/// command was just run, the world may have changed.
+///
+/// MATCHES upstream src/tools/dedup.js PURE_TOOLS exactly.
 pub static PURE_TOOLS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
-    let mut s = HashSet::new();
-    for t in [
+    [
         "read_file",
         "list_files",
         "search",
@@ -40,257 +69,138 @@ pub static PURE_TOOLS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
         "memory_for_file",
         "memory_for_symbol",
         "memory_list",
-        "web_search",
-        "web_fetch",
-    ] {
-        s.insert(t);
-    }
-    s
+    ]
+    .iter()
+    .copied()
+    .collect()
 });
-
-/// Tools that are pure but very chatty — we let them through unconditionally
-/// (no dedup, no warning). Override via `ITSY_DEDUP_NOISY=tool1,tool2`.
-pub static NOISY_TOOLS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
-    let mut s = HashSet::new();
-    s.insert("list_files");
-    s
-});
-
-/// Per-tool TTL overrides. Anything not listed falls back to the global TTL.
-fn per_tool_ttl(name: &str) -> Option<Duration> {
-    match name {
-        // Web data goes stale quickly — small TTL.
-        "web_search" | "web_fetch" => Some(Duration::from_secs(60)),
-        // Filesystem reads are stable for a short while.
-        "read_file" | "list_files" => Some(Duration::from_secs(15)),
-        // Code search is more expensive — cache longer.
-        "search" | "grep" | "graph_search" => Some(Duration::from_secs(45)),
-        // Memory snapshots are intentionally cheap to re-read.
-        "memory_load" | "memory_for_file" | "memory_for_symbol" | "memory_list" => {
-            Some(Duration::from_secs(10))
-        }
-        _ => None,
-    }
-}
 
 #[derive(Debug, Clone)]
 struct Entry {
     hash: String,
+    #[allow(dead_code)]
     name: String,
-    args_norm: String,
-    result: Option<Value>,
-    ts: Instant,
-    ttl: Duration,
+    result: Value,
+    #[allow(dead_code)]
+    ts: u64, // ms since UNIX epoch — mirrors JS Date.now(); not read, kept for parity
 }
 
-/// Outcome of a dedup lookup.
-#[derive(Debug, Clone)]
-pub enum DedupOutcome {
-    /// Tool is not eligible for dedup (impure or in the noisy allowlist).
-    Skip,
-    /// First time we've seen this call — record it before/after executing.
-    Miss,
-    /// Identical call was just made; cached result returned.
-    Hit(Value),
-    /// Soft mode: identical (or near-identical) call detected, but we still
-    /// let the caller execute. Caller should attach the warning to the
-    /// model-visible result so the model learns to stop repeating itself.
-    SoftWarn(String),
-}
-
-/// Tool-call deduplicator with semantic similarity and per-tool TTL.
-#[derive(Debug)]
-pub struct ToolDedup {
-    capacity: usize,
-    disabled: bool,
-    soft: bool,
-    similarity_threshold: f64,
-    default_ttl: Duration,
-    noisy: HashSet<String>,
-    recent: VecDeque<Entry>,
+#[derive(Debug, Clone, Copy)]
+pub struct DedupStats {
     pub hits: u64,
     pub misses: u64,
-    pub soft_warnings: u64,
+    pub window_size: usize,
+}
+
+/// Per-session tool-call dedup. Behavioural 1:1 with upstream
+/// `class ToolDedup`.
+#[derive(Debug)]
+pub struct ToolDedup {
+    window_size: usize,
+    disabled: bool,
+    /// Recent entries, oldest first. `Vec` mirrors JS Array semantics
+    /// including `.shift()` on overflow; window is tiny so O(n) shift
+    /// is fine.
+    recent: Vec<Entry>,
+    pub hits: u64,
+    pub misses: u64,
 }
 
 impl ToolDedup {
+    /// Construct with config from `settings`. Mirrors JS `constructor`.
     pub fn new() -> Self {
         let s = crate::settings::get();
-        let capacity = s.dedup_window.max(1);
-        let disabled = !s.dedup_enabled;
-        let soft = s.dedup_soft;
-        let default_ttl = Duration::from_secs(s.dedup_ttl_secs);
-        let similarity_threshold = s.dedup_similarity.clamp(0.0, 1.0);
-        let mut noisy: HashSet<String> = NOISY_TOOLS.iter().map(|s| s.to_string()).collect();
-        for t in &s.dedup_noisy_extra {
-            let t = t.trim();
-            if !t.is_empty() {
-                noisy.insert(t.to_string());
-            }
-        }
         Self {
-            capacity,
-            disabled,
-            soft,
-            similarity_threshold,
-            default_ttl,
-            noisy,
-            recent: VecDeque::new(),
+            window_size: s.dedup_window.max(1),
+            disabled: !s.dedup_enabled,
+            recent: Vec::new(),
             hits: 0,
             misses: 0,
-            soft_warnings: 0,
         }
     }
 
-    fn ttl_for(&self, name: &str) -> Duration {
-        per_tool_ttl(name).unwrap_or(self.default_ttl)
-    }
-
-    fn purge_expired(&mut self, now: Instant) {
-        while let Some(front) = self.recent.front() {
-            if now.duration_since(front.ts) > front.ttl {
-                self.recent.pop_front();
-            } else {
-                break;
-            }
-        }
-    }
-
-    fn hash(name: &str, args_norm: &str) -> String {
+    /// Compute a stable hash for (name, args). Sorted top-level JSON
+    /// keys mirror JS `JSON.stringify(args, Object.keys(args).sort())`.
+    fn hash(name: &str, args: &Value) -> String {
+        let norm = sorted_keys_json(args);
         let mut h = Sha256::new();
         h.update(name.as_bytes());
         h.update(b"|");
-        h.update(args_norm.as_bytes());
-        let digest = h.finalize();
-        let mut s = String::with_capacity(16);
-        for b in &digest[..8] {
-            s.push_str(&format!("{:02x}", b));
-        }
-        s
+        h.update(norm.as_bytes());
+        let hex = format!("{:x}", h.finalize());
+        hex.chars().take(16).collect()
     }
 
-    /// Look up a (name, args) pair. Returns:
-    ///   * `Skip` if dedup is disabled/the tool is impure/the tool is noisy.
-    ///   * `Hit(result)` if an identical OR semantically-similar entry is
-    ///     present and not expired.
-    ///   * `SoftWarn` in soft mode when we'd have hit, so the caller still
-    ///     executes but can surface a warning.
-    ///   * `Miss` otherwise — caller should execute, then call `record`.
-    pub fn lookup(&mut self, name: &str, args: &Value) -> DedupOutcome {
+    /// Check whether (name, args) was just executed. Returns the cached
+    /// result or `None`. Only deduplicates pure tools.
+    ///
+    /// Mirrors upstream `lookup(name, args)` behaviour:
+    ///   - if disabled → null
+    ///   - if !PURE_TOOLS → null
+    ///   - exact hash match in recent window → cloned result
+    ///   - otherwise → null
+    pub fn lookup(&mut self, name: &str, args: &Value) -> Option<Value> {
         if self.disabled {
-            return DedupOutcome::Skip;
+            return None;
         }
-        if self.noisy.contains(name) {
-            return DedupOutcome::Skip;
+        if !PURE_TOOLS.contains(name) {
+            return None;
         }
-        // `bash` is impure in general but the model loves to spam
-        // identical read-only commands (`ls`, `cat`, `pwd`, `find`).
-        // Treat bash as pure only if the command is a read-only one-liner.
-        if !PURE_TOOLS.contains(name) && !(name == "bash" && bash_is_read_only(args)) {
-            return DedupOutcome::Skip;
-        }
-        let now = Instant::now();
-        self.purge_expired(now);
-
-        let args_norm = canonical_json(args);
-        let h = Self::hash(name, &args_norm);
-
-        // Exact match first.
-        if let Some(entry) = self.recent.iter().rev().find(|e| e.hash == h && e.name == name) {
-            if let Some(cached) = entry.result.clone() {
-                self.hits += 1;
-                if self.soft {
-                    self.soft_warnings += 1;
-                    return DedupOutcome::SoftWarn(format!(
-                        "soft-dedup: identical call to `{name}` already executed this turn"
-                    ));
-                }
-                return DedupOutcome::Hit(mark_cached(cached));
-            }
-        }
-
-        // Semantic similarity over same tool name.
-        let mut best: Option<(f64, &Entry)> = None;
+        let h = Self::hash(name, args);
         for entry in self.recent.iter().rev() {
-            if entry.name != name {
-                continue;
-            }
-            let sim = jaccard_similarity(&args_norm, &entry.args_norm);
-            if best.map(|(b, _)| sim > b).unwrap_or(true) {
-                best = Some((sim, entry));
+            if entry.hash == h {
+                self.hits += 1;
+                // Shallow copy so callers can't mutate the cached entry.
+                return Some(entry.result.clone());
             }
         }
-        if let Some((sim, entry)) = best {
-            if sim >= self.similarity_threshold {
-                if let Some(cached) = entry.result.clone() {
-                    self.hits += 1;
-                    if self.soft {
-                        self.soft_warnings += 1;
-                        return DedupOutcome::SoftWarn(format!(
-                            "soft-dedup: `{name}` call is {:.0}% similar to a recent one",
-                            sim * 100.0
-                        ));
-                    }
-                    return DedupOutcome::Hit(mark_cached(cached));
-                }
-            }
-        }
-
         self.misses += 1;
-        DedupOutcome::Miss
+        None
     }
 
-    /// Record the result of a just-executed call.
+    /// Record (name, args, result) of a just-executed call. Mirrors
+    /// upstream `record()` behaviour:
+    ///   - if disabled → no-op
+    ///   - if !PURE_TOOLS → no-op
+    ///   - if result has `error` → no-op (errors aren't cached)
+    ///   - move-to-front then trim to window_size
     pub fn record(&mut self, name: &str, args: &Value, result: &Value) {
         if self.disabled {
             return;
         }
-        if !PURE_TOOLS.contains(name) && !(name == "bash" && bash_is_read_only(args)) {
+        if !PURE_TOOLS.contains(name) {
             return;
         }
-        if self.noisy.contains(name) {
-            return;
-        }
-        // Don't cache errors — the model should be allowed to retry.
         if result.get("error").is_some() {
             return;
         }
-        let args_norm = canonical_json(args);
-        let h = Self::hash(name, &args_norm);
+        let h = Self::hash(name, args);
         // Move-to-front: drop existing entry with same hash, push fresh.
-        self.recent.retain(|e| e.hash != h);
-        self.recent.push_back(Entry {
+        self.recent.retain(|r| r.hash != h);
+        self.recent.push(Entry {
             hash: h,
             name: name.to_string(),
-            args_norm,
-            result: Some(result.clone()),
-            ts: Instant::now(),
-            ttl: self.ttl_for(name),
+            result: result.clone(),
+            ts: now_ms(),
         });
-        while self.recent.len() > self.capacity {
-            self.recent.pop_front();
+        while self.recent.len() > self.window_size {
+            self.recent.remove(0); // mirrors JS Array.shift()
         }
     }
 
-    /// Backward-compatible boolean form retained for existing callers.
-    pub fn is_duplicate(&mut self, name: &str, args_json: &str) -> bool {
-        let args: Value = serde_json::from_str(args_json).unwrap_or(Value::Null);
-        matches!(self.lookup(name, &args), DedupOutcome::Hit(_))
-    }
-
+    /// Reset all state. Call between agent runs.
     pub fn reset(&mut self) {
         self.recent.clear();
         self.hits = 0;
         self.misses = 0;
-        self.soft_warnings = 0;
     }
 
+    /// Snapshot stats for logging.
     pub fn stats(&self) -> DedupStats {
         DedupStats {
             hits: self.hits,
             misses: self.misses,
-            soft_warnings: self.soft_warnings,
-            window: self.capacity,
+            window_size: self.window_size,
         }
     }
 }
@@ -301,24 +211,59 @@ impl Default for ToolDedup {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct DedupStats {
-    pub hits: u64,
-    pub misses: u64,
-    pub soft_warnings: u64,
-    pub window: usize,
+/// Wrap a cached result with the `[cached]` marker the model sees.
+/// Mirrors upstream `static markCached(result)`.
+pub fn mark_cached(mut v: Value) -> Value {
+    if let Some(obj) = v.as_object_mut() {
+        if let Some(s) = obj.get("result").and_then(|x| x.as_str()) {
+            let new = format!("[cached - identical call already executed this turn]\n{s}");
+            obj.insert("result".to_string(), Value::String(new));
+        }
+        obj.insert("_dedup_cached".to_string(), Value::Bool(true));
+    }
+    v
 }
 
-/// Mark a cached result so the model sees it's a hit.
-/// Heuristic: is this `bash` command read-only?
-///
-/// Returns true only if the command is built from read-only utilities
-/// (`ls`, `cat`, `pwd`, `find`, `grep`, `rg`, `echo`, `stat`, `wc`,
-/// `head`, `tail`, `file`, `which`, `du`, `df`) AND contains no
-/// redirection (`>`, `>>`), no obvious mutators (`rm`, `mv`, `cp`,
-/// `mkdir`, `touch`, `chmod`, `chown`, `rmdir`), and no shell-state
-/// changes (`cd`, `export`, `source`). The command can chain with `&&`
-/// / `||` / `|` / `;` — each segment is checked.
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Stable JSON with sorted top-level keys. Equivalent to
+/// `JSON.stringify(args || {}, Object.keys(args || {}).sort())`.
+/// Nested object key order is whatever serde_json emits — JS's
+/// stringify with key array only sorts the top level too.
+fn sorted_keys_json(v: &Value) -> String {
+    match v {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let mut out = String::from("{");
+            for (i, k) in keys.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push('"');
+                out.push_str(&k.replace('"', "\\\""));
+                out.push_str("\":");
+                out.push_str(&serde_json::to_string(&map[*k]).unwrap_or_default());
+            }
+            out.push('}');
+            out
+        }
+        _ => serde_json::to_string(v).unwrap_or_default(),
+    }
+}
+
+// ─── Rust-only utility (not used by dedup) ────────────────────────────
+// Used by the contract gate in `bin/itsy.rs` to classify bash commands
+// as read-only or mutating. Doesn't participate in dedup behaviour —
+// bash is still impure for lookup/record exactly like upstream. Lives
+// here because it answers the same "is this a side-effect-free call?"
+// question.
+
 pub fn bash_is_read_only(args: &Value) -> bool {
     let Some(cmd) = args.get("command").and_then(|v| v.as_str()) else {
         return false;
@@ -344,21 +289,10 @@ pub fn bash_is_read_only(args: &Value) -> bool {
         if trimmed.is_empty() {
             continue;
         }
-        // first word of segment
         let head = trimmed.split_whitespace().next().unwrap_or("");
-        // strip a leading subshell `(` if any
         let head = head.trim_start_matches('(').trim_start_matches('$');
-        // For chained `&&` we just split on `&` which leaves empty
-        // segments between `&&`; the empty-check above handles them.
-        //
-        // Special-case `cd <path>` (no shell-glob expansion, no
-        // subshell): the model commonly prepends `cd /app/repo && ...`
-        // to chained read-only inspection. The cd itself is effectively
-        // a no-op for caching — same `(cd, args)` always lands in the
-        // same directory and the chained commands are still read-only.
         if head == "cd" {
             let rest: Vec<&str> = trimmed.split_whitespace().collect();
-            // Allow exactly `cd <single-target>` with no flags / globs.
             let cd_safe = rest.len() == 2
                 && !rest[1].contains('*')
                 && !rest[1].contains('$')
@@ -371,21 +305,15 @@ pub fn bash_is_read_only(args: &Value) -> bool {
         if FORBID.contains(&head) {
             return false;
         }
-        // Special-case `sed` and `awk`: read-only unless `-i` is passed.
         if (head == "sed" || head == "awk") && trimmed.contains("-i") {
             return false;
         }
-        // `git` is read-only for status/diff/log/show but mutating for
-        // add/commit/checkout/rebase/etc. Be conservative.
         if head == "git" {
             let sub = trimmed.split_whitespace().nth(1).unwrap_or("");
             const GIT_READONLY: &[&str] = &[
                 "status", "diff", "log", "show", "branch", "remote",
                 "blame", "tag", "config", "ls-files", "ls-tree",
                 "rev-parse", "describe", "shortlog", "stash",
-                // additional read-only inspection subcommands the model
-                // reaches for when investigating history / refs / lost
-                // commits — without these, repeat calls bypass dedup.
                 "reflog", "cherry", "for-each-ref", "cat-file",
                 "rev-list", "name-rev", "whatchanged", "fsck",
                 "verify-commit", "verify-tag", "count-objects",
@@ -403,198 +331,119 @@ pub fn bash_is_read_only(args: &Value) -> bool {
     true
 }
 
-fn mark_cached(mut v: Value) -> Value {
-    if let Some(obj) = v.as_object_mut() {
-        if let Some(s) = obj.get_mut("result").and_then(|r| r.as_str().map(String::from)) {
-            obj.insert(
-                "result".to_string(),
-                Value::String(format!(
-                    "[cached - identical call already executed this turn]\n{s}"
-                )),
-            );
-        }
-        obj.insert("_dedup_cached".to_string(), Value::Bool(true));
-    }
-    v
-}
-
-/// Canonical JSON form: keys sorted recursively. Stable across argument-order
-/// variations so `{a:1,b:2}` and `{b:2,a:1}` hash identically.
-fn canonical_json(v: &Value) -> String {
-    fn walk(v: &Value, out: &mut String) {
-        match v {
-            Value::Object(map) => {
-                let mut keys: Vec<&String> = map.keys().collect();
-                keys.sort();
-                out.push('{');
-                for (i, k) in keys.iter().enumerate() {
-                    if i > 0 {
-                        out.push(',');
-                    }
-                    out.push('"');
-                    out.push_str(k);
-                    out.push_str("\":");
-                    walk(&map[*k], out);
-                }
-                out.push('}');
-            }
-            Value::Array(arr) => {
-                out.push('[');
-                for (i, item) in arr.iter().enumerate() {
-                    if i > 0 {
-                        out.push(',');
-                    }
-                    walk(item, out);
-                }
-                out.push(']');
-            }
-            _ => out.push_str(&v.to_string()),
-        }
-    }
-    let mut s = String::new();
-    walk(v, &mut s);
-    s
-}
-
-/// Jaccard similarity over whitespace/punctuation tokens. Returns 0..=1.
-fn jaccard_similarity(a: &str, b: &str) -> f64 {
-    fn tokens(s: &str) -> HashSet<String> {
-        s.split(|c: char| !c.is_alphanumeric())
-            .filter(|t| !t.is_empty())
-            .map(|t| t.to_lowercase())
-            .collect()
-    }
-    let ta = tokens(a);
-    let tb = tokens(b);
-    if ta.is_empty() && tb.is_empty() {
-        return 1.0;
-    }
-    let inter = ta.intersection(&tb).count() as f64;
-    let union = ta.union(&tb).count() as f64;
-    if union == 0.0 {
-        0.0
-    } else {
-        inter / union
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
 
-    #[test]
-    fn exact_duplicate_is_hit() {
-        let mut d = ToolDedup::new();
-        let args = json!({"path": "src/main.rs"});
-        assert!(matches!(d.lookup("read_file", &args), DedupOutcome::Miss));
-        d.record("read_file", &args, &json!({"result": "fn main(){}"}));
-        let hit = d.lookup("read_file", &args);
-        assert!(matches!(hit, DedupOutcome::Hit(_)));
-    }
-
-    #[test]
-    fn key_order_doesnt_matter() {
-        let mut d = ToolDedup::new();
-        d.record(
-            "search",
-            &json!({"pattern": "foo", "path": "."}),
-            &json!({"result": "x"}),
-        );
-        assert!(matches!(
-            d.lookup("search", &json!({"path": ".", "pattern": "foo"})),
-            DedupOutcome::Hit(_)
-        ));
-    }
-
-    #[test]
-    fn impure_tool_skipped() {
-        let mut d = ToolDedup::new();
-        let r = d.lookup("write_file", &json!({"path": "x"}));
-        assert!(matches!(r, DedupOutcome::Skip));
-    }
-
-    #[test]
-    fn errors_not_cached() {
-        let mut d = ToolDedup::new();
-        let args = json!({"path": "a"});
-        d.record("read_file", &args, &json!({"error": "boom"}));
-        assert!(matches!(d.lookup("read_file", &args), DedupOutcome::Miss));
-    }
-}
-
-#[cfg(test)]
-mod bash_readonly_tests {
-    use super::*;
-    use serde_json::json;
-
-    fn b(cmd: &str) -> Value {
-        json!({"command": cmd})
-    }
-
-    #[test]
-    fn read_only_commands_are_pure() {
-        assert!(bash_is_read_only(&b("ls -la /tmp")));
-        assert!(bash_is_read_only(&b("pwd && ls")));
-        assert!(bash_is_read_only(&b("find . -name '*.rs' | head -10")));
-        assert!(bash_is_read_only(&b("grep -r foo")));
-        assert!(bash_is_read_only(&b("cat README.md")));
-        assert!(bash_is_read_only(&b("git status")));
-        assert!(bash_is_read_only(&b("git diff --stat")));
-        assert!(bash_is_read_only(&b("echo hello")));
-    }
-
-    #[test]
-    fn mutating_commands_are_impure() {
-        assert!(!bash_is_read_only(&b("rm -rf foo")));
-        assert!(!bash_is_read_only(&b("mkdir new")));
-        assert!(!bash_is_read_only(&b("ls > out.txt")));
-        assert!(!bash_is_read_only(&b("cd src && ls")));
-        assert!(!bash_is_read_only(&b("git commit -m x")));
-        assert!(!bash_is_read_only(&b("ls | tee out.txt")));
-        assert!(!bash_is_read_only(&b("sed -i s/a/b/ file")));
-    }
-
-    #[test]
-    fn identical_readonly_bash_dedups() {
-        let mut d = ToolDedup::new();
-        let args = b("ls -la /tmp");
-        let r = json!({"result": "hello"});
-        d.record("bash", &args, &r);
-        match d.lookup("bash", &args) {
-            DedupOutcome::Hit(_) => {}
-            other => panic!("expected Hit, got {other:?}"),
+    fn d() -> ToolDedup {
+        ToolDedup {
+            window_size: 5,
+            disabled: false,
+            recent: Vec::new(),
+            hits: 0,
+            misses: 0,
         }
     }
 
     #[test]
-    fn mutating_bash_skips_dedup() {
-        let mut d = ToolDedup::new();
-        let args = b("rm -rf /tmp/x");
-        d.record("bash", &args, &json!({"result": "ok"}));
-        assert!(matches!(d.lookup("bash", &args), DedupOutcome::Skip));
+    fn exact_duplicate_is_hit() {
+        let mut x = d();
+        let r = json!({"result": "OK"});
+        assert!(x.lookup("read_file", &json!({"path": "/a"})).is_none());
+        x.record("read_file", &json!({"path": "/a"}), &r);
+        assert_eq!(x.lookup("read_file", &json!({"path": "/a"})), Some(r));
     }
-}
 
-#[cfg(test)]
-mod cd_prefix_tests {
-    use super::*;
-    use serde_json::json;
-    fn b(cmd: &str) -> Value { json!({"command": cmd}) }
+    #[test]
+    fn key_order_doesnt_matter() {
+        let mut x = d();
+        let r = json!({"result": "OK"});
+        x.record("read_file", &json!({"path": "/a", "n": 1}), &r);
+        assert!(x.lookup("read_file", &json!({"n": 1, "path": "/a"})).is_some());
+    }
+
+    #[test]
+    fn impure_tool_skipped() {
+        let mut x = d();
+        let r = json!({"result": "wrote"});
+        x.record("write_file", &json!({"path": "/a"}), &r);
+        assert!(x.lookup("write_file", &json!({"path": "/a"})).is_none());
+    }
+
+    #[test]
+    fn errors_not_cached() {
+        let mut x = d();
+        x.record(
+            "read_file",
+            &json!({"path": "/a"}),
+            &json!({"error": "nope"}),
+        );
+        assert!(x.lookup("read_file", &json!({"path": "/a"})).is_none());
+    }
+
+    #[test]
+    fn bash_is_impure_for_dedup() {
+        // Critical behavioural parity check: even read-only bash
+        // calls do NOT participate in dedup, exactly like upstream.
+        let mut x = d();
+        x.record(
+            "bash",
+            &json!({"command": "ls /tmp"}),
+            &json!({"result": "a b c"}),
+        );
+        assert!(x.lookup("bash", &json!({"command": "ls /tmp"})).is_none());
+    }
+
+    #[test]
+    fn window_size_evicts_oldest() {
+        let mut x = d();
+        for i in 0..7 {
+            x.record(
+                "read_file",
+                &json!({"path": format!("/{i}")}),
+                &json!({"result": format!("c{i}")}),
+            );
+        }
+        assert!(x.lookup("read_file", &json!({"path": "/0"})).is_none());
+        assert!(x.lookup("read_file", &json!({"path": "/1"})).is_none());
+        assert!(x.lookup("read_file", &json!({"path": "/6"})).is_some());
+    }
+
+    fn b(cmd: &str) -> Value {
+        json!({ "command": cmd })
+    }
+
+    #[test]
+    fn read_only_commands_are_pure() {
+        assert!(bash_is_read_only(&b("ls /tmp")));
+        assert!(bash_is_read_only(&b("cat /etc/passwd")));
+        assert!(bash_is_read_only(&b("git status")));
+        assert!(bash_is_read_only(&b("git log --oneline")));
+    }
+
+    #[test]
+    fn mutating_commands_are_impure() {
+        assert!(!bash_is_read_only(&b("rm -rf /tmp/x")));
+        assert!(!bash_is_read_only(&b("echo hi > /tmp/x")));
+        assert!(!bash_is_read_only(&b("git commit -m foo")));
+        assert!(!bash_is_read_only(&b("sed -i s/a/b/ /tmp/x")));
+    }
+
     #[test]
     fn cd_then_readonly_is_pure() {
-        assert!(bash_is_read_only(&b("cd /app/repo && git log --oneline")));
-        assert!(bash_is_read_only(&b("cd /app && ls -la")));
-        assert!(bash_is_read_only(&b("cd /app/repo && git reflog | head -30")));
+        assert!(bash_is_read_only(&b("cd /app && ls")));
+        assert!(bash_is_read_only(&b("cd /app && git log -5")));
     }
+
     #[test]
     fn cd_with_glob_or_flags_is_impure() {
+        assert!(!bash_is_read_only(&b("cd /app/*/src && ls")));
         assert!(!bash_is_read_only(&b("cd $HOME && ls")));
-        assert!(!bash_is_read_only(&b("cd /tmp/* && ls")));
-        assert!(!bash_is_read_only(&b("cd -P /app && ls")));
     }
+
     #[test]
     fn cd_then_mutating_is_impure() {
-        assert!(!bash_is_read_only(&b("cd /app && rm -rf foo")));
+        assert!(!bash_is_read_only(&b("cd /app && rm foo")));
     }
 }

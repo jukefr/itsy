@@ -45,7 +45,7 @@ use itsy::session::references::{format_references_for_prompt, resolve_references
 use itsy::session::tokens::TokenTracker;
 use itsy::token_monitor::{CallMetadata, TokenMonitor};
 use itsy::tools::{get_all_tools, ToolDeps};
-use itsy::tools_impl::dedup::{DedupOutcome, ToolDedup};
+use itsy::tools_impl::dedup::ToolDedup;
 use itsy::tools_impl::test_runner;
 use itsy::trace_recorder::TraceRecorder;
 use itsy::tui;
@@ -1280,8 +1280,11 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     continue;
                 }
 
-                // Dedup lookup.
-                let dedup_outcome = session.dedup.lock().lookup(&name, &args);
+                // Dedup lookup. Mirrors upstream:
+                //   let cached = dedup.lookup(name, args);
+                //   if (cached) result = cached;
+                //   else { result = await execute(...); dedup.record(...); }
+                let cached = session.dedup.lock().lookup(&name, &args);
                 let started = Instant::now();
                 let fs_handle = session.fullscreen.lock().clone();
                 if let Some(fs) = &fs_handle {
@@ -1290,9 +1293,9 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     println!("{}", tui::tool_start(&name));
                 }
 
-                let result = match dedup_outcome {
-                    DedupOutcome::Hit(cached) => cached,
-                    DedupOutcome::Skip | DedupOutcome::Miss | DedupOutcome::SoftWarn(_) => {
+                let result = match cached {
+                    Some(c) => itsy::tools_impl::dedup::mark_cached(c),
+                    None => {
                         let ctx = ExecCtx {
                             config: &session.config.lock().clone(),
                             flags: &session.flags,
