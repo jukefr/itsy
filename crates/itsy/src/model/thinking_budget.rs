@@ -106,6 +106,8 @@ pub fn apply_thinking_budget(body: &mut Value, base_url: &str, tokens: u32, disa
 
     // OpenAI-style `reasoning_effort`. Only safe on reasoning models — plain
     // gpt-4o / gpt-5.5 reject the field with HTTP 400.
+    // Note: JS sends reasoning_effort='low' even when disabled, but we omit
+    // it entirely when disabled to avoid confusing servers that don't support it.
     if is_reasoning_model && !disable {
         let effort = if tokens <= 500 {
             "low"
@@ -119,7 +121,7 @@ pub fn apply_thinking_budget(body: &mut Value, base_url: &str, tokens: u32, disa
 
     // Qwen / llama.cpp local-only fields. Inserted under
     // `chat_template_kwargs` so the local server can forward them to the
-    // chat template.
+    // chat template. Also set flat `enable_thinking` for older servers.
     if is_local_llama_cpp && is_reasoning_model {
         let kwargs = body_obj
             .entry("chat_template_kwargs".to_string())
@@ -130,6 +132,7 @@ pub fn apply_thinking_budget(body: &mut Value, base_url: &str, tokens: u32, disa
                 kwargs_obj.insert("thinking_budget".to_string(), json!(tokens));
             }
         }
+        body_obj.insert("enable_thinking".to_string(), json!(!disable));
     }
 }
 
