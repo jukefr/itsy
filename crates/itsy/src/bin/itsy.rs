@@ -79,7 +79,7 @@ const MAX_TOOL_RESULT_CHARS: usize = 4000;
     about = "AI coding agent optimized for small LLMs (8B-35B parameters)"
 )]
 struct Cli {
-    /// Model name (overrides ITSY_MODEL)
+    /// Model name
     #[arg(long)]
     model: Option<String>,
     /// Provider (openai-compatible by default)
@@ -115,6 +115,52 @@ struct Cli {
     /// Resume the most recent session, if any
     #[arg(long)]
     resume: bool,
+
+    // ── runtime knobs (override the persisted config) ────────────────
+    /// Auto-approve every tool call (skip the y/n prompt).
+    #[arg(long)]
+    auto_approve: bool,
+    /// Hard cap on tool calls per `run()`. Default 50.
+    #[arg(long, value_name = "N")]
+    max_tool_calls: Option<u32>,
+    /// Hard cap on tool calls in a single turn. Default 250.
+    #[arg(long, value_name = "N")]
+    max_tool_calls_per_turn: Option<u32>,
+    /// Max output tokens passed to the chat-completion request.
+    /// 0 = auto (thinking_budget + 4k). Default 0.
+    #[arg(long, value_name = "N")]
+    max_output_tokens: Option<u32>,
+    /// Reasoning-token budget per turn. 0 = per-task heuristic.
+    #[arg(long, value_name = "N")]
+    thinking_budget: Option<u32>,
+    /// Per-request chat-completion timeout in ms. Default 120000.
+    #[arg(long, value_name = "MS")]
+    request_timeout_ms: Option<u64>,
+    /// Bash command timeout in seconds. Default 30.
+    #[arg(long, value_name = "SECS")]
+    bash_timeout: Option<u32>,
+    /// Tool routing mode (direct, two_stage, auto). Default direct.
+    #[arg(long, value_name = "MODE")]
+    tool_routing: Option<String>,
+    /// Allow read/write tools to touch absolute paths outside the
+    /// project root. Sensitive paths are still blocked.
+    #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
+    allow_outside_paths: Option<bool>,
+    /// Enable web_search / web_fetch tools.
+    #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
+    web_browse: Option<bool>,
+    /// Use a persistent shell so `cd` etc. stick across calls.
+    #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
+    shell_persist: Option<bool>,
+    /// Pick a built-in model profile by name.
+    #[arg(long, value_name = "NAME")]
+    profile: Option<String>,
+    /// Override an arbitrary setting in `key=value` form. Repeatable.
+    /// Keys are dotted paths into the [`crate::settings`] struct
+    /// (e.g. `--set dedup.enabled=false`, `--set features.reviewer=true`).
+    #[arg(long = "set", value_name = "KEY=VALUE")]
+    set_overrides: Vec<String>,
+
     /// Positional prompt (anything not consumed by --prompt/-p)
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     positional: Vec<String>,
@@ -2194,9 +2240,83 @@ async fn main() -> Result<()> {
 
     if config.model.name.is_empty() {
         eprintln!("\n  ✗ No model configured.");
-        eprintln!("  Edit {} or set ITSY_MODEL.", itsy::paths::config_file().display());
+        eprintln!("  Edit {}", itsy::paths::config_file().display());
         eprintln!("  Run `itsy --init` to re-run the setup wizard.\n");
         std::process::exit(1);
+    }
+
+    // ── Build the merged Settings (config + CLI) and install globally.
+    // Anything below this point that wants a runtime knob reads it from
+    // `itsy::settings::get()` — there is no env-var fallback any more.
+    {
+        let mut s = itsy::settings::from_full_config(&config);
+        // Named CLI flags.
+        if cli.auto_approve {
+            s.auto_approve = true;
+        }
+        if let Some(v) = cli.max_tool_calls {
+            s.max_tool_calls = v;
+        }
+        if let Some(v) = cli.max_tool_calls_per_turn {
+            s.max_tool_calls_per_turn = v;
+        }
+        if let Some(v) = cli.max_output_tokens {
+            s.max_output_tokens = v;
+        }
+        if let Some(v) = cli.thinking_budget {
+            s.thinking_budget = v;
+        }
+        if let Some(v) = cli.request_timeout_ms {
+            s.request_timeout_ms = v;
+        }
+        if let Some(v) = cli.bash_timeout {
+            s.bash_timeout = v;
+        }
+        if let Some(v) = cli.tool_routing.clone() {
+            s.tool_routing = v;
+        }
+        if let Some(v) = cli.allow_outside_paths {
+            s.allow_outside_paths = v;
+        }
+        if let Some(v) = cli.web_browse {
+            s.web_browse = v;
+        }
+        if let Some(v) = cli.shell_persist {
+            s.shell_persist = v;
+        }
+        if let Some(v) = cli.profile.clone() {
+            s.profile = Some(v);
+        }
+        if cli.verbose {
+            s.verbose = true;
+        }
+        // Generic `--set key=value` overrides.
+        for entry in &cli.set_overrides {
+            let Some((k, v)) = entry.split_once('=') else {
+                eprintln!("  ✗ --set expects `key=value`, got `{entry}`");
+                std::process::exit(1);
+            };
+            if let Err(e) = s.apply_set_override(k.trim(), v.trim()) {
+                eprintln!("  ✗ --set {entry}: {e}");
+                std::process::exit(1);
+            }
+        }
+        // Mirror CLI overrides back into `config` so downstream code that
+        // still threads `&Config` (rather than calling settings::get())
+        // sees the same values during the deprecation window.
+        config.limits.max_tool_calls = s.max_tool_calls;
+        config.limits.max_tool_calls_per_turn = s.max_tool_calls_per_turn;
+        config.limits.max_output_tokens = s.max_output_tokens;
+        config.limits.request_timeout_ms = s.request_timeout_ms;
+        config.tools.bash_timeout = s.bash_timeout;
+        config.tools.tool_routing = s.tool_routing.clone();
+        config.tools.shell_persist = s.shell_persist;
+        config.tools.web_browse = s.web_browse;
+        config.tui.auto_approve = s.auto_approve;
+        config.security.allow_outside_paths = s.allow_outside_paths;
+        config.features.thinking_budget = s.thinking_budget;
+
+        itsy::settings::init(s);
     }
 
     if cli.print_system_prompt {

@@ -258,6 +258,141 @@ impl Settings {
     }
 }
 
+impl Settings {
+    /// Apply a dotted-path `--set key=value` override. Returns
+    /// `Err(message)` if the path doesn't match a known field or the
+    /// value can't be parsed. Used by the CLI's repeatable `--set`
+    /// flag — see `Cli::set_overrides`.
+    pub fn apply_set_override(&mut self, key: &str, value: &str) -> Result<(), String> {
+        // Helpers for parsing.
+        fn parse_bool(v: &str) -> Result<bool, String> {
+            match v.to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => Ok(true),
+                "0" | "false" | "no" | "off" => Ok(false),
+                _ => Err(format!("expected boolean, got `{v}`")),
+            }
+        }
+        fn parse_u32(v: &str) -> Result<u32, String> {
+            v.parse().map_err(|e: std::num::ParseIntError| e.to_string())
+        }
+        fn parse_u64(v: &str) -> Result<u64, String> {
+            v.parse().map_err(|e: std::num::ParseIntError| e.to_string())
+        }
+        fn parse_usize(v: &str) -> Result<usize, String> {
+            v.parse().map_err(|e: std::num::ParseIntError| e.to_string())
+        }
+        fn parse_f64(v: &str) -> Result<f64, String> {
+            v.parse().map_err(|e: std::num::ParseFloatError| e.to_string())
+        }
+
+        match key {
+            // core
+            "verbose" => self.verbose = parse_bool(value)?,
+            "profile" => self.profile = Some(value.to_string()),
+            "debug_sigtstp" => self.debug_sigtstp = parse_bool(value)?,
+
+            // tool budgets
+            "max_tool_calls" => self.max_tool_calls = parse_u32(value)?,
+            "max_tool_calls_per_turn" => self.max_tool_calls_per_turn = parse_u32(value)?,
+            "request_timeout_ms" => self.request_timeout_ms = parse_u64(value)?,
+            "bash_timeout" => self.bash_timeout = parse_u32(value)?,
+            "shell_persist" => self.shell_persist = parse_bool(value)?,
+            "shell_contain" => self.shell_contain = parse_bool(value)?,
+            "tool_routing" => self.tool_routing = value.to_string(),
+            "rtk" => self.rtk = parse_bool(value)?,
+
+            // model
+            "max_output_tokens" => self.max_output_tokens = parse_u32(value)?,
+            "thinking_budget" => self.thinking_budget = parse_u32(value)?,
+
+            // features
+            "features.plan" | "plan" => self.plan = parse_bool(value)?,
+            "features.snapshot" | "snapshot" => self.snapshot = parse_bool(value)?,
+            "features.snapshot_auto_rollback" => self.snapshot_auto_rollback = parse_bool(value)?,
+            "features.write_guard" => self.write_guard = parse_bool(value)?,
+            "features.bootstrap" | "bootstrap" => self.bootstrap = parse_bool(value)?,
+            "features.bootstrap_max_chars" => self.bootstrap_max_chars = parse_usize(value)?,
+            "features.trust_decay" => self.trust_decay = parse_bool(value)?,
+            "features.temp_adapt" => self.temp_adapt = parse_bool(value)?,
+            "features.clarifier" => self.clarifier = parse_bool(value)?,
+            "features.semantic_merge" => self.semantic_merge = parse_bool(value)?,
+            "features.error_diagnosis" => self.error_diagnosis = parse_bool(value)?,
+            "features.validate_edits" => self.validate_edits = parse_bool(value)?,
+            "features.context_retrieval" => self.context_retrieval = parse_bool(value)?,
+            "features.reviewer" => self.reviewer = parse_bool(value)?,
+            "features.chain" => self.chain = parse_bool(value)?,
+
+            // tui
+            "tui.auto_approve" | "auto_approve" => self.auto_approve = parse_bool(value)?,
+            "tui.classic" => self.tui_classic = parse_bool(value)?,
+
+            // git
+            "git.auto_commit" | "auto_commit" => self.auto_commit = parse_bool(value)?,
+
+            // security / network
+            "security.allow_outside_paths" | "allow_outside_paths" => {
+                self.allow_outside_paths = parse_bool(value)?;
+            }
+            "security.allow_public_endpoints" | "allow_public_endpoints" => {
+                self.allow_public_endpoints = parse_bool(value)?;
+            }
+            "security.web_respect_robots" | "web_respect_robots" => {
+                self.web_respect_robots = parse_bool(value)?;
+            }
+            "security.searx_url" | "searx_url" => self.searx_url = Some(value.to_string()),
+            "tools.web_browse" | "web_browse" => self.web_browse = parse_bool(value)?,
+
+            // diff
+            "diff.context" => self.diff_context = parse_bool(value)?,
+            "diff.context_lines" => self.diff_context_lines = parse_usize(value)?,
+            "diff.max_ratio" => self.diff_max_ratio = parse_f64(value)?,
+            "diff.ttl_minutes" => self.diff_ttl_minutes = parse_u64(value)?,
+
+            // filetree
+            "filetree.max" => self.filetree_max = parse_usize(value)?,
+            "filetree.sort_mtime" => self.filetree_sort_mtime = parse_bool(value)?,
+
+            // snapshots
+            "snapshots.dir" => self.snapshot_dir = Some(PathBuf::from(value)),
+
+            // code_graph
+            "code_graph.db" => self.codegraph_db = Some(PathBuf::from(value)),
+            "code_graph.disable" => self.codegraph_disable = parse_bool(value)?,
+
+            // tests
+            "tests.disable" => self.test_disable = parse_bool(value)?,
+            "tests.runner" => self.test_runner = Some(value.to_string()),
+
+            // traces
+            "traces.disable" => self.traces_disable = parse_bool(value)?,
+
+            // dedup
+            "dedup.enabled" => self.dedup_enabled = parse_bool(value)?,
+            "dedup.window" => self.dedup_window = parse_usize(value)?,
+            "dedup.ttl_secs" => self.dedup_ttl_secs = parse_u64(value)?,
+            "dedup.soft" => self.dedup_soft = parse_bool(value)?,
+            "dedup.similarity" => self.dedup_similarity = parse_f64(value)?,
+            "dedup.noisy_extra" => {
+                self.dedup_noisy_extra = value
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+            }
+
+            // evidence
+            "evidence.disable" => self.evidence_disable = parse_bool(value)?,
+
+            // plugins
+            "plugins.spec" => self.plugins_spec = Some(value.to_string()),
+            "plugins.timeout_secs" => self.plugin_timeout_secs = parse_u64(value)?,
+
+            unknown => return Err(format!("unknown setting `{unknown}`")),
+        }
+        Ok(())
+    }
+}
+
 /// Install the merged settings. Call exactly once at startup, before any
 /// other module reads from [`get`]. A second call is a no-op (the value
 /// in the lock wins) so tests that run multiple times stay deterministic.
@@ -270,4 +405,64 @@ pub fn init(s: Settings) {
 /// are used.
 pub fn get() -> &'static Settings {
     SETTINGS.get_or_init(Settings::defaults)
+}
+
+/// Populate [`Settings`] from a `Config` and pull in the additional
+/// sections that don't live in `Config`'s sub-structs (e.g. `[limits]`,
+/// `[security]`, `[diff]`). Mirrors `Settings::from_config` plus the
+/// freshly-added v2 sections.
+pub fn from_full_config(cfg: &Config) -> Settings {
+    let mut s = Settings::from_config(cfg);
+    // limits
+    s.max_tool_calls = cfg.limits.max_tool_calls;
+    s.max_tool_calls_per_turn = cfg.limits.max_tool_calls_per_turn;
+    s.max_output_tokens = cfg.limits.max_output_tokens;
+    s.request_timeout_ms = cfg.limits.request_timeout_ms;
+    // tools (the new fields)
+    s.shell_contain = cfg.tools.shell_contain;
+    s.rtk = cfg.tools.rtk;
+    // features (the new field)
+    s.bootstrap_max_chars = cfg.features.bootstrap_max_chars;
+    // security
+    s.allow_outside_paths = cfg.security.allow_outside_paths;
+    s.allow_public_endpoints = cfg.security.allow_public_endpoints;
+    s.web_respect_robots = cfg.security.web_respect_robots;
+    s.searx_url = cfg.security.searx_url.clone();
+    // diff
+    s.diff_context = cfg.diff.context;
+    s.diff_context_lines = cfg.diff.context_lines;
+    s.diff_max_ratio = cfg.diff.max_ratio;
+    s.diff_ttl_minutes = cfg.diff.ttl_minutes;
+    // filetree
+    s.filetree_max = cfg.filetree.max;
+    s.filetree_sort_mtime = cfg.filetree.sort_mtime;
+    // snapshots
+    s.snapshot_dir = cfg.snapshots.dir.clone();
+    // code_graph
+    s.codegraph_db = cfg.code_graph.db.clone();
+    s.codegraph_disable = cfg.code_graph.disable;
+    // tests
+    s.test_disable = cfg.tests.disable;
+    s.test_runner = cfg.tests.runner.clone();
+    // traces
+    s.traces_disable = cfg.traces.disable;
+    // dedup
+    s.dedup_enabled = cfg.dedup.enabled;
+    s.dedup_window = cfg.dedup.window;
+    s.dedup_ttl_secs = cfg.dedup.ttl_secs;
+    s.dedup_soft = cfg.dedup.soft;
+    s.dedup_similarity = cfg.dedup.similarity;
+    s.dedup_noisy_extra = cfg.dedup.noisy_extra.clone();
+    // evidence
+    s.evidence_disable = cfg.evidence.disable;
+    // plugins
+    s.plugins_spec = cfg.plugins.spec.clone();
+    s.plugin_timeout_secs = cfg.plugins.timeout_secs;
+    // diag
+    s.verbose = cfg.diag.verbose;
+    s.profile = cfg.diag.profile.clone();
+    s.debug_sigtstp = cfg.diag.debug_sigtstp;
+    // tui
+    s.tui_classic = cfg.tui.classic;
+    s
 }
