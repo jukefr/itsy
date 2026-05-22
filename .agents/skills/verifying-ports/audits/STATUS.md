@@ -74,6 +74,34 @@ When that SHA bumps, re-baseline all audits against the new tree.
   all exact ports. INTENTIONAL: bodies pre-loaded at index build time vs JS lazy read per query.
   Same PER_ENTRY_CHAR_CAP=1500, same scoring (+1 keyword, +2 heading token, +1 name match).
 
+## Tier 2 audit notes
+
+- **governor/early_stop.rs** — Clean. `check_repetition` exact port (same windows [50,80,120],
+  same threshold, same injection text). `record_patch_result` exact port (4 failures OR 6 total
+  attempts triggers rewrite, same message text). `check_greeting` exact port (same 6 patterns,
+  same injection text). INTENTIONAL: char-boundary handling in Rust for Unicode safety.
+- **escalation.rs** — Clean. `can_escalate`, `status`, `escalate` all exact ports. Same system
+  prompt text, same provider dispatch (anthropic vs openai-compat). INTENTIONAL: typed
+  `EscalationProvider` enum vs JS `ESCALATION_PROVIDERS[this.provider]` map.
+- **token_monitor.rs** — Clean. `record_call` exact port including per-turn breakdown.
+  `get_metrics` exact port: same field names, same efficiency calculation. INTENTIONAL: Rust
+  adds `mark_next_call_new_turn()` helper for explicit turn boundaries.
+- **model/adaptive_temp.rs** — Clean. `adapt_temperature` exact port. Same repair cycle
+  (low→high→base), same linear nudge for non-repair, same MAX_T/MIN_T clamp.
+  INTENTIONAL: `SMALLCODE_TEMP_ADAPT` → `ITSY_TEMP_ADAPT` env-var rename.
+- **model/chain.rs** — Clean. `get_executor_model`, `format_planner_injection` exact ports.
+  `call_planner` matches JS (same 15s timeout, same prompt format). INTENTIONAL: Rust adds
+  `pick_chain` dispatch for profile-based chain selection (no JS counterpart → NOVEL).
+- **model/router.rs** — Clean. `route_model_for_message` exact port (same fast/default/strong
+  dispatch, same fallback chain). INTENTIONAL: Rust adds `Complexity` enum instead of string
+  literals. `estimate_complexity` exact port (same thresholds and patterns).
+- **model/thinking_budget.rs** — FIXED. ACCIDENTAL: `body.enable_thinking` flat field was not
+  set for local llama.cpp reasoning models. JS sets both the nested
+  `chat_template_kwargs.enable_thinking` AND `body.enable_thinking`. Fixed.
+  INTENTIONAL: `reasoning_effort` omitted when disabled (JS sends 'low'; Rust omits to avoid
+  confusing servers that don't support it; tests assert this behavior).
+  INTENTIONAL: `REASONING_MODEL_RE` matches JS regex exactly, added for Qwen3 detection.
+
 ## Tier 4 audit notes
 
 - **features_adapter.rs** — Clean. All functions (`repair_tool_call`, `diagnose_error`,
@@ -178,17 +206,17 @@ These run on every turn. Highest impact for bugs.
 | Rust | Upstream JS | State | Commit |
 |---|---|---|---|
 | `crates/itsy/src/governor.rs` | `bin/governor.js` | `AUDITED` | (no changes needed) |
-| `crates/itsy/src/governor/early_stop.rs` | `src/governor/early_stop.js` | `PARTIAL` | sizes 137/143, structurally aligned |
-| `crates/itsy/src/escalation.rs` | `bin/escalation.js` | `PARTIAL` | sizes 349/275 |
+| `crates/itsy/src/governor/early_stop.rs` | `src/governor/early_stop.js` | `AUDITED` | — |
+| `crates/itsy/src/escalation.rs` | `bin/escalation.js` | `AUDITED` | — |
 | `crates/itsy/src/trace_recorder.rs` | `bin/trace_recorder.js` | `AUDITED` | bloat is typed structs + 3 obs-only methods (INTENTIONAL) |
-| `crates/itsy/src/token_monitor.rs` | `bin/token_monitor.js` | `PARTIAL` | sizes 125/84, structurally aligned |
+| `crates/itsy/src/token_monitor.rs` | `bin/token_monitor.js` | `AUDITED` | — |
 | `crates/itsy/src/model/adaptive_router.rs` | `src/model/adaptive_router.js` | `UNVERIFIED` | 4.2x bloat (Wilson bounds, persistence); DEAD code — not called |
-| `crates/itsy/src/model/adaptive_temp.rs` | `src/model/adaptive_temp.js` | `PARTIAL` | sizes 118/85, structurally aligned |
-| `crates/itsy/src/model/chain.rs` | `src/model/chain.js` | `PARTIAL` | sizes 255/162, structurally aligned |
+| `crates/itsy/src/model/adaptive_temp.rs` | `src/model/adaptive_temp.js` | `AUDITED` | — |
+| `crates/itsy/src/model/chain.rs` | `src/model/chain.js` | `AUDITED` | — |
 | `crates/itsy/src/model/profiles.rs` | `src/model/profiles.js` | `AUDITED` | bloat is disk-profile override (opt-in via file presence, no default behaviour change) |
 | `crates/itsy/src/model/reviewer.rs` | `src/model/reviewer.js` | `AUDITED` | bloat is parse_reviewer_output helper + typed config struct, behaviour matches |
-| `crates/itsy/src/model/router.rs` | `src/model/router.js` | `PARTIAL` | sizes 119/63, Rust adds Complexity enum |
-| `crates/itsy/src/model/thinking_budget.rs` | `src/model/thinking_budget.js` | `PARTIAL` | sizes 260/207, Rust adds REASONING_MODEL_RE for Qwen3 detection (INTENTIONAL) |
+| `crates/itsy/src/model/router.rs` | `src/model/router.js` | `AUDITED` | — |
+| `crates/itsy/src/model/thinking_budget.rs` | `src/model/thinking_budget.js` | `AUDITED` | — |
 
 ## Tier 3 — session + tools
 
