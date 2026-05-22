@@ -214,7 +214,7 @@ These run on every turn. Highest impact for bugs.
 | `crates/itsy/src/escalation.rs` | `bin/escalation.js` | `AUDITED` | — |
 | `crates/itsy/src/trace_recorder.rs` | `bin/trace_recorder.js` | `AUDITED` | bloat is typed structs + 3 obs-only methods (INTENTIONAL) |
 | `crates/itsy/src/token_monitor.rs` | `bin/token_monitor.js` | `AUDITED` | — |
-| `crates/itsy/src/model/adaptive_router.rs` | `src/model/adaptive_router.js` | `UNVERIFIED` | 4.2x bloat (Wilson bounds, persistence); DEAD code — not called |
+| `crates/itsy/src/model/adaptive_router.rs` | `src/model/adaptive_router.js` | `AUDITED` | DEAD code (never called — `pub mod` only). 4.2x bloat: epsilon-greedy, Wilson bounds, time decay, per-task-type slots — all unevidenced but zero runtime impact. No fix attempted since dead. |
 | `crates/itsy/src/model/adaptive_temp.rs` | `src/model/adaptive_temp.js` | `AUDITED` | — |
 | `crates/itsy/src/model/chain.rs` | `src/model/chain.js` | `AUDITED` | — |
 | `crates/itsy/src/model/profiles.rs` | `src/model/profiles.js` | `AUDITED` | bloat is disk-profile override (opt-in via file presence, no default behaviour change) |
