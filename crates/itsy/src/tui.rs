@@ -120,18 +120,35 @@ fn highlight_line(line: &str, lang: &str) -> String {
         _ => &["const","let","var","function","return","if","else","for","while","class","import","export","from","async","await","new","this","true","false","null","undefined","interface","type","enum","extends","implements"],
     };
     let mut h = line.to_string();
-    let str_re = regex::Regex::new(r#"(["'`])(?:(?!\1).)*\1"#).unwrap();
-    h = str_re.replace_all(&h, |c: &regex::Captures| paint(C_GREEN, &c[0])).into_owned();
-    let line_re = regex::Regex::new(r"//.*$").unwrap();
-    h = line_re.replace_all(&h, |c: &regex::Captures| paint(C_GRAY, &c[0])).into_owned();
-    let py_re = regex::Regex::new(r"#.*$").unwrap();
-    h = py_re.replace_all(&h, |c: &regex::Captures| paint(C_GRAY, &c[0])).into_owned();
+    // The `regex` crate has no look-around / back-references, so each
+    // quote style gets its own (non-capturing) pattern. Escaped quotes
+    // (\", \', \`) are handled inside the alternation so embedded
+    // escapes don't terminate the string early.
+    static STR_RES: once_cell::sync::Lazy<[regex::Regex; 3]> = once_cell::sync::Lazy::new(|| {
+        [
+            regex::Regex::new(r#""(?:\\.|[^"\\])*""#).unwrap(),
+            regex::Regex::new(r#"'(?:\\.|[^'\\])*'"#).unwrap(),
+            regex::Regex::new(r#"`(?:\\.|[^`\\])*`"#).unwrap(),
+        ]
+    });
+    for str_re in STR_RES.iter() {
+        h = str_re
+            .replace_all(&h, |c: &regex::Captures| paint(C_GREEN, &c[0]))
+            .into_owned();
+    }
+    static LINE_RE: once_cell::sync::Lazy<regex::Regex> =
+        once_cell::sync::Lazy::new(|| regex::Regex::new(r"//.*$").unwrap());
+    h = LINE_RE.replace_all(&h, |c: &regex::Captures| paint(C_GRAY, &c[0])).into_owned();
+    static PY_RE: once_cell::sync::Lazy<regex::Regex> =
+        once_cell::sync::Lazy::new(|| regex::Regex::new(r"#.*$").unwrap());
+    h = PY_RE.replace_all(&h, |c: &regex::Captures| paint(C_GRAY, &c[0])).into_owned();
     for kw in kws {
         let re = regex::Regex::new(&format!(r"\b{kw}\b")).unwrap();
         h = re.replace_all(&h, |c: &regex::Captures| paint(C_MAGENTA, &c[0])).into_owned();
     }
-    let num_re = regex::Regex::new(r"\b(\d+)\b").unwrap();
-    h = num_re.replace_all(&h, |c: &regex::Captures| paint(C_CYAN, &c[0])).into_owned();
+    static NUM_RE: once_cell::sync::Lazy<regex::Regex> =
+        once_cell::sync::Lazy::new(|| regex::Regex::new(r"\b(\d+)\b").unwrap());
+    h = NUM_RE.replace_all(&h, |c: &regex::Captures| paint(C_CYAN, &c[0])).into_owned();
     h
 }
 

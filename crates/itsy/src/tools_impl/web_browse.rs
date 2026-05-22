@@ -395,11 +395,18 @@ fn extract_readable(html: &str) -> String {
     }
     // Fallback: pick the highest-scoring <div>/<section>; else strip the body.
     if let Some(body) = extract_tag(&cleaned, "body") {
-        let block_re = Regex::new(r"(?is)<(div|section)[^>]*>(.*?)</\1>").ok();
+        // The `regex` crate has no back-references, so each tag type gets
+        // its own pattern. (Previously this was `<(div|section)[^>]*>(.*?)</\1>`
+        // and silently compiled to None, leaving the block-scoring path dead.)
+        let block_res = [
+            Regex::new(r"(?is)<div[^>]*>(.*?)</div>").ok(),
+            Regex::new(r"(?is)<section[^>]*>(.*?)</section>").ok(),
+        ];
         let mut best = (0usize, String::new());
-        if let Some(re) = block_re {
+        for maybe_re in block_res.iter() {
+            let Some(re) = maybe_re else { continue };
             for c in re.captures_iter(&body) {
-                let block = &c[2];
+                let block = &c[1];
                 let plain = html_to_text(block);
                 let s = score_text(&plain);
                 if s > best.0 {
