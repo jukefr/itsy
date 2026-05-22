@@ -8,6 +8,15 @@ commit body (see the parent skill).
 This is the same SHA in `.agents/skills/upstream-changes/upstream-rev`.
 When that SHA bumps, re-baseline all audits against the new tree.
 
+## Notes per file
+
+- **executor.rs** — dispatch + per-tool helpers all map to upstream. No
+  silent Rust additions to revert (the contract tools are explicitly
+  novel and documented). One known port-gap: `exec_read_file` does NOT
+  apply JS's "summarize file when > 200 lines and no line range"
+  (`summarizeFileCompiled`). That's a missing feature, not added
+  bloat — fix is a separate task (depends on porting `features_adapter::summarize_file`).
+
 ## States
 
 | State | Meaning |
@@ -24,8 +33,8 @@ These run on every turn. Highest impact for bugs.
 
 | Rust | Upstream JS | State | Commit |
 |---|---|---|---|
-| `crates/itsy/src/tools_impl/dedup.rs` | `src/tools/dedup.js` | `AUDITED` | (pending) |
-| `crates/itsy/src/executor.rs` | `bin/executor.js` | `NOT_AUDITED` | — |
+| `crates/itsy/src/tools_impl/dedup.rs` | `src/tools/dedup.js` | `AUDITED` | `e29eb3e` |
+| `crates/itsy/src/executor.rs` | `bin/executor.js` | `PARTIAL` | — (port-incomplete; see notes) |
 | `crates/itsy/src/tools.rs` | `bin/tools.js` | `NOT_AUDITED` | — |
 | `crates/itsy/src/model_client.rs` | `bin/model_client.js` | `NOT_AUDITED` | — |
 | `crates/itsy/src/bin/itsy.rs` | `bin/smallcode.js` | `NOT_AUDITED` | — |
