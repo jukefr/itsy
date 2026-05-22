@@ -222,6 +222,10 @@ pub struct ValidationOutcome {
 
 /// Mirror of `runValidation` — per-language compile/lint checks.
 pub fn run_validation(file_path: &str) -> Option<ValidationOutcome> {
+    // Mirror JS: reject hostile filePaths with embedded null bytes early.
+    if file_path.contains('\0') {
+        return Some(ValidationOutcome { passed: false, errors: vec!["invalid filePath".into()] });
+    }
     let cwd = std::env::current_dir().ok()?;
     let ext = Path::new(file_path).extension().and_then(|s| s.to_str()).unwrap_or("");
     let p = cwd.join(file_path);

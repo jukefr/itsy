@@ -199,7 +199,7 @@ These run on every turn. Highest impact for bugs.
 | `crates/itsy/src/executor.rs` | `bin/executor.js` | `AUDITED` | — |
 | `crates/itsy/src/tools.rs` | `bin/tools.js` | `AUDITED` | (no changes needed) |
 | `crates/itsy/src/model_client.rs` | `bin/model_client.js` | `AUDITED` | (pending) |
-| `crates/itsy/src/bin/itsy.rs` | `bin/smallcode.js` | `PARTIAL` | (pending) |
+| `crates/itsy/src/bin/itsy.rs` | `bin/smallcode.js` | `AUDITED` | `6c81eee` |
 
 ## Tier 2 — model + governance
 
