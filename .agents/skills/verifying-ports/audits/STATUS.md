@@ -16,6 +16,11 @@ When that SHA bumps, re-baseline all audits against the new tree.
   apply JS's "summarize file when > 200 lines and no line range"
   (`summarizeFileCompiled`). That's a missing feature, not added
   bloat — fix is a separate task (depends on porting `features_adapter::summarize_file`).
+- **tools.rs** — base tools list matches upstream 16/18. Missing
+  `bone_compile` + `bone_check` (BoneScript runtime not ported to Rust;
+  exposing the tools without backing impl would be a regression).
+  5 contract tools added (novel, documented). `get_all_tools` routing
+  logic matches upstream behaviour. No silent additions to revert.
 
 ## States
 
@@ -35,7 +40,7 @@ These run on every turn. Highest impact for bugs.
 |---|---|---|---|
 | `crates/itsy/src/tools_impl/dedup.rs` | `src/tools/dedup.js` | `AUDITED` | `e29eb3e` |
 | `crates/itsy/src/executor.rs` | `bin/executor.js` | `PARTIAL` | — (port-incomplete; see notes) |
-| `crates/itsy/src/tools.rs` | `bin/tools.js` | `NOT_AUDITED` | — |
+| `crates/itsy/src/tools.rs` | `bin/tools.js` | `AUDITED` | (no changes needed) |
 | `crates/itsy/src/model_client.rs` | `bin/model_client.js` | `NOT_AUDITED` | — |
 | `crates/itsy/src/bin/itsy.rs` | `bin/smallcode.js` | `NOT_AUDITED` | — |
 
