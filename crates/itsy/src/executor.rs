@@ -135,6 +135,16 @@ async fn exec_read_file(args: &Value, cwd: &Path) -> Value {
             }
             _ => {}
         }
+
+        // Summarize large files (>200 lines) via the features adapter.
+        // Matches JS Feature 2: context savings on large files with no range.
+        if total > 200 && crate::features_adapter::is_features_available() {
+            if let Some(summary) = crate::features_adapter::summarize_file_compiled(path, &content, 600).await {
+                if summary.len() > 50 {
+                    return json!({"result": format!("{path} ({total} lines — summarized):\n{}", sanitize_tool_output(&summary))});
+                }
+            }
+        }
     }
     json!({"result": format!("{path} ({total} lines):\n{numbered}")})
 }
