@@ -1,25 +1,5 @@
-# Agent stuff
-.claude/
-
-# Rust build artifacts
-/target/
-*.rlib
-*.rmeta
-
-# Runtime state — written by itsy at runtime, not source
-.itsy/
-.memory/
-*.db
-*.db-shm
-*.db-wal
-
-# Environment
-.env
-.env.local
-
-# OS / editor
-.DS_Store
-.vscode/
-.idea/
-*.swp
-*.swo
+target/
+jobs/
+bench/__pycache__/
+**/__pycache__/
+.cache/

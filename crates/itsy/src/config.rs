@@ -2,9 +2,13 @@
 //!
 //!   1. Built-in defaults
 //!   2. `~/.config/itsy/config.toml` (TOML, versioned, migration-aware)
-//!   3. `~/.config/itsy/.env` env-var overrides
-//!   4. Live process environment (`ITSY_*`)
-//!   5. CLI flags
+//!   3. CLI flags
+//!
+//! `ITSY_*` env vars are no longer consulted as of v2 of the schema —
+//! every previously-env-only knob now lives in [`Config`] (or one of
+//! its sub-structs) and is overridable via a CLI flag. `ITSY_HOME` is
+//! the lone exception because it resolves before the config file is
+//! loaded; see [`crate::paths`].
 //!
 //! The TOML file has a `version = "N"` field at the top. On load, any
 //! version older than [`CURRENT_CONFIG_VERSION`] is run through the
@@ -52,17 +56,21 @@ pub struct ContextConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolsConfig {
     pub bash_timeout: u32,
-    /// Tool routing mode: "direct" or "two_stage". Env var
-    /// `ITSY_TOOL_ROUTING` still overrides this at runtime.
+    /// Tool routing mode: "direct" or "two_stage" or "auto".
     #[serde(default = "default_tool_routing")]
     pub tool_routing: String,
-    /// Enable web_search / web_fetch tools. Sets `ITSY_WEB_BROWSE`.
+    /// Enable web_search / web_fetch tools.
     #[serde(default)]
     pub web_browse: bool,
-    /// Use a persistent shell so `cd src` etc. stick across calls. Sets
-    /// `ITSY_SHELL_PERSIST`.
+    /// Use a persistent shell so `cd src` etc. stick across calls.
     #[serde(default = "default_true")]
     pub shell_persist: bool,
+    /// Contain bash cwd to project root.
+    #[serde(default)]
+    pub shell_contain: bool,
+    /// Enable reasoning-format toolkit (parses non-JSON tool calls).
+    #[serde(default = "default_true")]
+    pub rtk: bool,
 }
 
 fn default_tool_routing() -> String {
@@ -73,74 +81,73 @@ fn default_true() -> bool {
     true
 }
 
-/// Small-model safeguards. Each toggle here propagates to the matching
-/// `ITSY_*` env var the runtime reads — so the env always wins, but the
-/// TOML provides a stable default per project.
+/// Small-model safeguards. Every toggle here is a real field on disk;
+/// they used to also be readable from `ITSY_*` env vars but the env-var
+/// layer was removed in schema v2.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeaturesConfig {
     /// Auto-detect multi-step tasks and ask the model to commit to a plan
-    /// before executing. Sets `ITSY_PLAN`.
+    /// before executing.
     #[serde(default = "default_true")]
     pub plan: bool,
-    /// Wrap each turn in a checkpoint so failures can roll back. Sets
-    /// `ITSY_SNAPSHOT`.
+    /// Wrap each turn in a checkpoint so failures can roll back.
     #[serde(default = "default_true")]
     pub snapshot: bool,
-    /// Auto-rollback on hard failure (build break, exception). Sets
-    /// `ITSY_SNAPSHOT_AUTO_ROLLBACK`.
+    /// Auto-rollback on hard failure (build break, exception).
     #[serde(default = "default_true")]
     pub snapshot_auto_rollback: bool,
-    /// Refuse `write_file` on a file the model hasn't read this turn. Sets
-    /// `ITSY_WRITE_GUARD`.
+    /// Refuse `write_file` on a file the model hasn't read this turn.
     #[serde(default = "default_true")]
     pub write_guard: bool,
     /// Inject a project bootstrap (cwd, file listing, project type) on the
-    /// first message of a new session. Sets `ITSY_BOOTSTRAP`.
+    /// first message of a new session.
     #[serde(default = "default_true")]
     pub bootstrap: bool,
-    /// Penalise tools that fail and re-promote tools that succeed. Sets
-    /// `ITSY_TRUST_DECAY`.
+    /// Cap on the size of the bootstrap injection in characters.
+    #[serde(default = "default_bootstrap_max")]
+    pub bootstrap_max_chars: usize,
+    /// Penalise tools that fail and re-promote tools that succeed.
     #[serde(default = "default_true")]
     pub trust_decay: bool,
-    /// Adapt sampling temperature based on recent repair history. Sets
-    /// `ITSY_TEMP_ADAPT`.
+    /// Adapt sampling temperature based on recent repair history.
     #[serde(default = "default_true")]
     pub temp_adapt: bool,
     /// Hard cap for reasoning-model thinking tokens per turn. `0` means
-    /// "use the per-task heuristic". Sets `ITSY_THINKING_BUDGET`.
+    /// "use the per-task heuristic".
     #[serde(default)]
     pub thinking_budget: u32,
     /// Detect vague short inputs and inject a system message asking the
-    /// model to clarify before acting. Sets `ITSY_CLARIFIER`.
+    /// model to clarify before acting.
     #[serde(default = "default_true")]
     pub clarifier: bool,
     /// Recover from `patch` failures (`old_str` not found) by asking the
     /// model to merge the intended change into the current file content.
-    /// Sets `ITSY_SEMANTIC_MERGE`.
     #[serde(default = "default_true")]
     pub semantic_merge: bool,
     /// Diagnose `bash` failures via an LLM-derived hint prepended to the
-    /// tool result. Sets `ITSY_ERROR_DIAGNOSIS`.
+    /// tool result.
     #[serde(default = "default_true")]
     pub error_diagnosis: bool,
     /// LLM self-critique after every successful write/patch. Costs one
-    /// extra LLM call per edit — off by default for small models. Sets
-    /// `ITSY_VALIDATE_EDITS`.
+    /// extra LLM call per edit — off by default for small models.
     #[serde(default)]
     pub validate_edits: bool,
     /// Inject relevant code-graph hits into the system prompt for long
-    /// user messages. Sets `ITSY_CONTEXT_RETRIEVAL`.
+    /// user messages.
     #[serde(default = "default_true")]
     pub context_retrieval: bool,
     /// Post-hoc reviewer that asks the model "does this look right?" at
-    /// the end of each turn. Costs an extra LLM call per turn. Sets
-    /// `ITSY_REVIEWER`.
+    /// the end of each turn. Costs an extra LLM call per turn.
     #[serde(default)]
     pub reviewer: bool,
     /// Run the user prompt through a planner→executor chain before the
-    /// main agent loop. Costs an extra LLM call. Sets `ITSY_CHAIN`.
+    /// main agent loop. Costs an extra LLM call.
     #[serde(default)]
     pub chain: bool,
+}
+
+fn default_bootstrap_max() -> usize {
+    4000
 }
 
 impl Default for FeaturesConfig {
@@ -151,6 +158,7 @@ impl Default for FeaturesConfig {
             snapshot_auto_rollback: true,
             write_guard: true,
             bootstrap: true,
+            bootstrap_max_chars: 4000,
             trust_decay: true,
             temp_adapt: true,
             thinking_budget: 0,
@@ -196,6 +204,231 @@ pub struct MultiModels {
     pub strong: String,
 }
 
+/// Per-run hard limits.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LimitsConfig {
+    #[serde(default = "default_max_tool_calls")]
+    pub max_tool_calls: u32,
+    #[serde(default = "default_max_tool_calls_per_turn")]
+    pub max_tool_calls_per_turn: u32,
+    /// 0 = auto (`thinking_budget + 4096`).
+    #[serde(default)]
+    pub max_output_tokens: u32,
+    #[serde(default = "default_request_timeout_ms")]
+    pub request_timeout_ms: u64,
+}
+
+impl Default for LimitsConfig {
+    fn default() -> Self {
+        Self {
+            max_tool_calls: 50,
+            max_tool_calls_per_turn: 250,
+            max_output_tokens: 0,
+            request_timeout_ms: 120_000,
+        }
+    }
+}
+
+fn default_max_tool_calls() -> u32 { 50 }
+fn default_max_tool_calls_per_turn() -> u32 { 250 }
+fn default_request_timeout_ms() -> u64 { 120_000 }
+
+/// Filesystem / network safety.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecurityConfig {
+    /// Allow read/write tools to touch absolute paths outside the project
+    /// root. Sensitive-path patterns (credentials, ssh keys) are still
+    /// blocked regardless.
+    #[serde(default = "default_true")]
+    pub allow_outside_paths: bool,
+    /// Allow `web_fetch` to hit public internet endpoints (default:
+    /// loopback / link-local only).
+    #[serde(default)]
+    pub allow_public_endpoints: bool,
+    /// Respect robots.txt for `web_fetch`.
+    #[serde(default)]
+    pub web_respect_robots: bool,
+    /// SearxNG instance to use for `web_search`.
+    #[serde(default)]
+    pub searx_url: Option<String>,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            allow_outside_paths: true,
+            allow_public_endpoints: false,
+            web_respect_robots: false,
+            searx_url: None,
+        }
+    }
+}
+
+/// Read-tracker diff display.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiffConfig {
+    /// Show contextual diff vs. last-read state.
+    #[serde(default)]
+    pub context: bool,
+    #[serde(default = "default_diff_lines")]
+    pub context_lines: usize,
+    #[serde(default = "default_diff_ratio")]
+    pub max_ratio: f64,
+    #[serde(default = "default_diff_ttl")]
+    pub ttl_minutes: u64,
+}
+
+impl Default for DiffConfig {
+    fn default() -> Self {
+        Self {
+            context: false,
+            context_lines: 3,
+            max_ratio: 0.5,
+            ttl_minutes: 30,
+        }
+    }
+}
+
+fn default_diff_lines() -> usize { 3 }
+fn default_diff_ratio() -> f64 { 0.5 }
+fn default_diff_ttl() -> u64 { 30 }
+
+/// `find_files` / file-tree tool tuning.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileTreeConfig {
+    #[serde(default = "default_filetree_max")]
+    pub max: usize,
+    /// `true` to sort by mtime, `false` for default (alphabetical).
+    #[serde(default)]
+    pub sort_mtime: bool,
+}
+
+impl Default for FileTreeConfig {
+    fn default() -> Self {
+        Self {
+            max: 200,
+            sort_mtime: false,
+        }
+    }
+}
+
+fn default_filetree_max() -> usize { 200 }
+
+/// Snapshot store overrides.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SnapshotPathsConfig {
+    /// Directory that holds snapshot files. `None` → default under
+    /// `~/.config/itsy/snapshots`.
+    #[serde(default)]
+    pub dir: Option<PathBuf>,
+}
+
+/// Native code-graph index tuning.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CodeGraphConfig {
+    /// Path to the SQLite DB. `None` → default under `~/.config/itsy/`.
+    #[serde(default)]
+    pub db: Option<PathBuf>,
+    /// Disable the code-graph index entirely.
+    #[serde(default)]
+    pub disable: bool,
+}
+
+/// Test-runner tool.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TestsConfig {
+    #[serde(default)]
+    pub disable: bool,
+    /// Override the auto-detected test runner command.
+    #[serde(default)]
+    pub runner: Option<String>,
+}
+
+/// Trace recorder.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TracesConfig {
+    #[serde(default)]
+    pub disable: bool,
+}
+
+/// Tool-call deduplicator.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DedupConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_dedup_window")]
+    pub window: usize,
+    #[serde(default = "default_dedup_ttl")]
+    pub ttl_secs: u64,
+    /// Warn instead of caching on duplicate.
+    #[serde(default)]
+    pub soft: bool,
+    #[serde(default = "default_dedup_sim")]
+    pub similarity: f64,
+    /// Extra tool names to bypass dedup (in addition to the built-in list).
+    #[serde(default)]
+    pub noisy_extra: Vec<String>,
+}
+
+impl Default for DedupConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            window: 5,
+            ttl_secs: 30,
+            soft: false,
+            similarity: 0.92,
+            noisy_extra: Vec::new(),
+        }
+    }
+}
+
+fn default_dedup_window() -> usize { 5 }
+fn default_dedup_ttl() -> u64 { 30 }
+fn default_dedup_sim() -> f64 { 0.92 }
+
+/// Evidence-memory store.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EvidenceConfig {
+    #[serde(default)]
+    pub disable: bool,
+}
+
+/// External plugin loader.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginsConfig {
+    /// Comma-separated plugin spec (was `ITSY_PLUGINS`).
+    #[serde(default)]
+    pub spec: Option<String>,
+    #[serde(default = "default_plugin_timeout")]
+    pub timeout_secs: u64,
+}
+
+impl Default for PluginsConfig {
+    fn default() -> Self {
+        Self {
+            spec: None,
+            timeout_secs: 30,
+        }
+    }
+}
+
+fn default_plugin_timeout() -> u64 { 30 }
+
+/// Diagnostic / dev knobs that aren't worth a wizard prompt.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DiagConfig {
+    /// Verbose tool output.
+    #[serde(default)]
+    pub verbose: bool,
+    /// Picks a built-in model profile by name.
+    #[serde(default)]
+    pub profile: Option<String>,
+    /// Print SIGTSTP debug info.
+    #[serde(default)]
+    pub debug_sigtstp: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub model: ModelConfig,
@@ -208,11 +441,35 @@ pub struct Config {
     pub features: FeaturesConfig,
     #[serde(default)]
     pub models: Option<MultiModels>,
+    #[serde(default)]
+    pub limits: LimitsConfig,
+    #[serde(default)]
+    pub security: SecurityConfig,
+    #[serde(default)]
+    pub diff: DiffConfig,
+    #[serde(default)]
+    pub filetree: FileTreeConfig,
+    #[serde(default)]
+    pub snapshots: SnapshotPathsConfig,
+    #[serde(default)]
+    pub code_graph: CodeGraphConfig,
+    #[serde(default)]
+    pub tests: TestsConfig,
+    #[serde(default)]
+    pub traces: TracesConfig,
+    #[serde(default)]
+    pub dedup: DedupConfig,
+    #[serde(default)]
+    pub evidence: EvidenceConfig,
+    #[serde(default)]
+    pub plugins: PluginsConfig,
+    #[serde(default)]
+    pub diag: DiagConfig,
 }
 
 /// Schema version currently understood. Bump when a breaking change is
 /// introduced and a corresponding entry is added to [`MIGRATIONS`].
-pub const CURRENT_CONFIG_VERSION: &str = "1";
+pub const CURRENT_CONFIG_VERSION: &str = "2";
 
 /// On-disk shape of `config.toml`. The top-level `version` field is
 /// inspected before parsing; older versions are migrated to current before
@@ -237,6 +494,30 @@ pub struct ConfigFile {
     pub features: Option<FeaturesConfig>,
     #[serde(default)]
     pub models: Option<MultiModels>,
+    #[serde(default)]
+    pub limits: Option<LimitsConfig>,
+    #[serde(default)]
+    pub security: Option<SecurityConfig>,
+    #[serde(default)]
+    pub diff: Option<DiffConfig>,
+    #[serde(default)]
+    pub filetree: Option<FileTreeConfig>,
+    #[serde(default)]
+    pub snapshots: Option<SnapshotPathsConfig>,
+    #[serde(default)]
+    pub code_graph: Option<CodeGraphConfig>,
+    #[serde(default)]
+    pub tests: Option<TestsConfig>,
+    #[serde(default)]
+    pub traces: Option<TracesConfig>,
+    #[serde(default)]
+    pub dedup: Option<DedupConfig>,
+    #[serde(default)]
+    pub evidence: Option<EvidenceConfig>,
+    #[serde(default)]
+    pub plugins: Option<PluginsConfig>,
+    #[serde(default)]
+    pub diag: Option<DiagConfig>,
 }
 
 fn default_version() -> String {
@@ -253,12 +534,45 @@ pub type Migration = fn(&mut toml::Value) -> Result<()>;
 /// Migration chain. Each entry runs in order until the file version
 /// matches [`CURRENT_CONFIG_VERSION`]. Entries are keyed by the version
 /// they migrate *from*.
-///
-/// Add entries here when bumping the schema. v1 is the initial shipped
-/// schema so this list is empty for now.
 pub const MIGRATIONS: &[(&str, Migration)] = &[
-    // ("1", v1_to_v2),  // example: when shipping v2, add the migrator here
+    ("1", v1_to_v2),
 ];
+
+/// v1 → v2 migration: env-var support was dropped. The migration is
+/// purely additive — every new section gets created with defaults if it
+/// wasn't already present. Nothing existing is dropped.
+fn v1_to_v2(value: &mut toml::Value) -> Result<()> {
+    let Some(table) = value.as_table_mut() else {
+        anyhow::bail!("config root is not a table");
+    };
+    for key in [
+        "limits", "security", "diff", "filetree", "snapshots", "code_graph",
+        "tests", "traces", "dedup", "evidence", "plugins", "diag",
+    ] {
+        table
+            .entry(key.to_string())
+            .or_insert(toml::Value::Table(Default::default()));
+    }
+    // [features] picked up a new field this version — give old files the
+    // default so deserialisation doesn't fail on missing keys without
+    // a #[serde(default)].
+    if let Some(features) = table.get_mut("features").and_then(|v| v.as_table_mut()) {
+        features
+            .entry("bootstrap_max_chars".to_string())
+            .or_insert(toml::Value::Integer(4000));
+    }
+    // [tools] picked up shell_contain + rtk.
+    if let Some(tools) = table.get_mut("tools").and_then(|v| v.as_table_mut()) {
+        tools
+            .entry("shell_contain".to_string())
+            .or_insert(toml::Value::Boolean(false));
+        tools
+            .entry("rtk".to_string())
+            .or_insert(toml::Value::Boolean(true));
+    }
+    table.insert("version".into(), toml::Value::String("2".into()));
+    Ok(())
+}
 
 impl ConfigFile {
     /// Parse a TOML file. Runs any pending schema migrations before
@@ -345,6 +659,42 @@ impl ConfigFile {
         if self.models.is_some() {
             config.models = self.models.clone();
         }
+        if let Some(v) = self.limits.clone() {
+            config.limits = v;
+        }
+        if let Some(v) = self.security.clone() {
+            config.security = v;
+        }
+        if let Some(v) = self.diff.clone() {
+            config.diff = v;
+        }
+        if let Some(v) = self.filetree.clone() {
+            config.filetree = v;
+        }
+        if let Some(v) = self.snapshots.clone() {
+            config.snapshots = v;
+        }
+        if let Some(v) = self.code_graph.clone() {
+            config.code_graph = v;
+        }
+        if let Some(v) = self.tests.clone() {
+            config.tests = v;
+        }
+        if let Some(v) = self.traces.clone() {
+            config.traces = v;
+        }
+        if let Some(v) = self.dedup.clone() {
+            config.dedup = v;
+        }
+        if let Some(v) = self.evidence.clone() {
+            config.evidence = v;
+        }
+        if let Some(v) = self.plugins.clone() {
+            config.plugins = v;
+        }
+        if let Some(v) = self.diag.clone() {
+            config.diag = v;
+        }
     }
 }
 
@@ -360,191 +710,106 @@ impl From<&Config> for ConfigFile {
             git: Some(c.git.clone()),
             features: Some(c.features.clone()),
             models: c.models.clone(),
+            limits: Some(c.limits.clone()),
+            security: Some(c.security.clone()),
+            diff: Some(c.diff.clone()),
+            filetree: Some(c.filetree.clone()),
+            snapshots: Some(c.snapshots.clone()),
+            code_graph: Some(c.code_graph.clone()),
+            tests: Some(c.tests.clone()),
+            traces: Some(c.traces.clone()),
+            dedup: Some(c.dedup.clone()),
+            evidence: Some(c.evidence.clone()),
+            plugins: Some(c.plugins.clone()),
+            diag: Some(c.diag.clone()),
         }
     }
 }
 
-/// Propagate config toggles into the corresponding `ITSY_*` env vars so the
-/// many code paths that read env vars (snapshot, write_guard, plan_tracker,
-/// shell_session, web_browse, …) see the configured values without each
-/// having to add a separate `Config` plumbing path.
-///
-/// **Precedence:** an env var that is *already set* in the process is never
-/// overwritten — so `ITSY_WEB_BROWSE=true ./itsy ...` always wins over the
-/// TOML, matching the documented load order.
-pub fn propagate_features_to_env(config: &Config) {
-    let mut set = |name: &str, val: &str| {
-        if env::var(name).is_err() {
-            // SAFETY: called during single-threaded startup before any
-            // worker threads touch the environment.
-            unsafe { env::set_var(name, val) };
-        }
-    };
-    let f = &config.features;
-    set("ITSY_PLAN", bool_env(f.plan));
-    set("ITSY_SNAPSHOT", bool_env(f.snapshot));
-    set("ITSY_SNAPSHOT_AUTO_ROLLBACK", bool_env(f.snapshot_auto_rollback));
-    set("ITSY_WRITE_GUARD", bool_env(f.write_guard));
-    set("ITSY_BOOTSTRAP", bool_env(f.bootstrap));
-    set("ITSY_TRUST_DECAY", bool_env(f.trust_decay));
-    set("ITSY_TEMP_ADAPT", bool_env(f.temp_adapt));
-    if f.thinking_budget > 0 {
-        set("ITSY_THINKING_BUDGET", &f.thinking_budget.to_string());
-    }
-    set("ITSY_SHELL_PERSIST", bool_env(config.tools.shell_persist));
-    set("ITSY_WEB_BROWSE", bool_env(config.tools.web_browse));
-    set("ITSY_TOOL_ROUTING", &config.tools.tool_routing);
-    set("ITSY_CLARIFIER", bool_env(f.clarifier));
-    set("ITSY_SEMANTIC_MERGE", bool_env(f.semantic_merge));
-    set("ITSY_ERROR_DIAGNOSIS", bool_env(f.error_diagnosis));
-    set("ITSY_VALIDATE_EDITS", bool_env(f.validate_edits));
-    set("ITSY_CONTEXT_RETRIEVAL", bool_env(f.context_retrieval));
-    set("ITSY_REVIEWER", bool_env(f.reviewer));
-    set("ITSY_CHAIN", bool_env(f.chain));
+/// Backwards-compatible no-op. The env-var bridge was removed in
+/// schema v2 — every consumer now reads from [`crate::settings`]. This
+/// shim stays so external callers that still invoke
+/// `load_dotenv()` keep compiling during the deprecation window.
+pub fn load_dotenv() {
+    // Intentionally empty. Persistent settings live in `config.toml`.
 }
 
-fn bool_env(b: bool) -> &'static str {
-    if b { "true" } else { "false" }
-}
-
-fn env_or<T: std::str::FromStr>(name: &str, default: T) -> T {
-    env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
-}
-
+/// Read a non-empty env var. Retained for *external* env vars such as
+/// `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OLLAMA_HOST` — those are
+/// upstream conventions and are still honoured. **Do not use this for
+/// any `ITSY_*` variable**; use [`crate::settings::get`] instead.
 fn env_str(name: &str) -> Option<String> {
     env::var(name).ok().filter(|s| !s.is_empty())
 }
 
-/// Load `.env` overrides from the user's config directory. Project-local
-/// `.env` files are *not* read — runtime state and config live under
-/// `~/.config/itsy/`. The full TOML config (see [`crate::paths::config_file`])
-/// is the canonical place for user settings; `.env` is a fallback for one-off
-/// env overrides.
-pub fn load_dotenv() {
-    let paths = [crate::paths::config_dir().join(".env")];
-    for p in &paths {
-        if !p.exists() {
-            continue;
-        }
-        let Ok(content) = fs::read_to_string(p) else { continue };
-        for line in content.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
-                continue;
-            }
-            let Some(eq) = trimmed.find('=') else { continue };
-            let key = trimmed[..eq].trim();
-            let mut value = trimmed[eq + 1..].trim().to_string();
-            let bytes = value.as_bytes();
-            if value.len() >= 2
-                && ((bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"')
-                    || (bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\''))
-            {
-                value = value[1..value.len() - 1].to_string();
-            }
-            if env::var(key).is_err() {
-                // SAFETY: process is still single-threaded during startup.
-                unsafe { env::set_var(key, value) };
-            }
-        }
-        break;
-    }
-}
-
 pub fn load_config(flags: &Flags) -> Config {
-    let base_url_default = if let Some(host) = env_str("OLLAMA_HOST") {
-        format!("{host}/v1")
-    } else {
-        "http://localhost:1234/v1".to_string()
-    };
-
+    // Start from built-in defaults. Every section has its own `Default`
+    // impl. `Config` itself doesn't derive `Default` because the
+    // top-level [model] section is mandatory and has no sensible blank
+    // value — we materialise it here.
     let mut config = Config {
         model: ModelConfig {
-            provider: env_str("ITSY_PROVIDER").unwrap_or_else(|| "openai".into()),
-            name: env_str("ITSY_MODEL").unwrap_or_default(),
-            base_url: env_str("ITSY_BASE_URL").unwrap_or(base_url_default),
-            timeout: env_or("ITSY_MODEL_TIMEOUT", 300u64),
+            provider: "openai".into(),
+            name: String::new(),
+            base_url: "http://localhost:1234/v1".into(),
+            timeout: 300,
             api_key: None,
         },
         context: ContextConfig {
-            max_budget_pct: env_or("ITSY_CONTEXT_BUDGET", 70),
-            detected_window: env_or("ITSY_CONTEXT_WINDOW", 128_000),
+            max_budget_pct: 70,
+            detected_window: 128_000,
             working_memory_tokens: 500,
             summary_threshold: 200,
         },
         tools: ToolsConfig {
-            bash_timeout: env_or("ITSY_BASH_TIMEOUT", 30),
-            tool_routing: env_str("ITSY_TOOL_ROUTING").unwrap_or_else(|| "direct".into()),
-            web_browse: env_str("ITSY_WEB_BROWSE").as_deref() == Some("true"),
-            shell_persist: env_str("ITSY_SHELL_PERSIST").as_deref() != Some("false"),
+            bash_timeout: 30,
+            tool_routing: "direct".into(),
+            web_browse: false,
+            shell_persist: true,
+            shell_contain: false,
+            rtk: true,
         },
         tui: TuiConfig {
             show_token_usage: true,
-            auto_approve: env_str("ITSY_AUTO_APPROVE").as_deref() == Some("true"),
-            theme: env_str("ITSY_THEME").unwrap_or_else(|| "dark".into()),
+            auto_approve: false,
+            theme: "dark".into(),
             classic: false,
         },
         escalation: EscalationConfig {
             enabled: true,
-            max_per_session: env_or("ITSY_ESCALATION_MAX", 5),
-            confirm: env_str("ITSY_ESCALATION_CONFIRM").as_deref() != Some("false"),
+            max_per_session: 5,
+            confirm: true,
             provider: None,
             api_key: None,
-            model: env_str("ITSY_ESCALATION_MODEL"),
+            model: None,
         },
-        git: GitConfig {
-            auto_commit: env_str("ITSY_AUTO_COMMIT").as_deref() == Some("true"),
-        },
-        features: FeaturesConfig {
-            plan: env_str("ITSY_PLAN").as_deref() != Some("false"),
-            snapshot: env_str("ITSY_SNAPSHOT").as_deref() != Some("false"),
-            snapshot_auto_rollback: env_str("ITSY_SNAPSHOT_AUTO_ROLLBACK").as_deref() != Some("false"),
-            write_guard: env_str("ITSY_WRITE_GUARD").as_deref() != Some("false"),
-            bootstrap: env_str("ITSY_BOOTSTRAP").as_deref() != Some("false"),
-            trust_decay: env_str("ITSY_TRUST_DECAY").as_deref() != Some("false"),
-            temp_adapt: env_str("ITSY_TEMP_ADAPT").as_deref() != Some("false"),
-            thinking_budget: env_or("ITSY_THINKING_BUDGET", 0u32),
-            clarifier: env_str("ITSY_CLARIFIER").as_deref() != Some("false"),
-            semantic_merge: env_str("ITSY_SEMANTIC_MERGE").as_deref() != Some("false"),
-            error_diagnosis: env_str("ITSY_ERROR_DIAGNOSIS").as_deref() != Some("false"),
-            validate_edits: env_str("ITSY_VALIDATE_EDITS").as_deref() == Some("true"),
-            context_retrieval: env_str("ITSY_CONTEXT_RETRIEVAL").as_deref() != Some("false"),
-            reviewer: env_str("ITSY_REVIEWER").as_deref() == Some("true"),
-            chain: env_str("ITSY_CHAIN").as_deref() == Some("true"),
-        },
+        git: GitConfig { auto_commit: false },
+        features: FeaturesConfig::default(),
         models: None,
+        limits: LimitsConfig::default(),
+        security: SecurityConfig::default(),
+        diff: DiffConfig::default(),
+        filetree: FileTreeConfig::default(),
+        snapshots: SnapshotPathsConfig::default(),
+        code_graph: CodeGraphConfig::default(),
+        tests: TestsConfig::default(),
+        traces: TracesConfig::default(),
+        dedup: DedupConfig::default(),
+        evidence: EvidenceConfig::default(),
+        plugins: PluginsConfig::default(),
+        diag: DiagConfig::default(),
     };
 
-    if env_str("ITSY_MODEL_FAST").is_some() || env_str("ITSY_MODEL_STRONG").is_some() {
-        config.models = Some(MultiModels {
-            fast: env_str("ITSY_MODEL_FAST").unwrap_or_else(|| config.model.name.clone()),
-            default: env_str("ITSY_MODEL_DEFAULT").unwrap_or_else(|| config.model.name.clone()),
-            strong: env_str("ITSY_MODEL_STRONG").unwrap_or_else(|| config.model.name.clone()),
-        });
-    }
-
-    // Merge TOML file on top of env-derived defaults (env still wins on
-    // individual fields below; we apply TOML before env-overrides at the
-    // top of this function — but env_str() was already evaluated, so we
-    // walk back through it after merge for keys that have ITSY_* overrides).
+    // Merge the persisted TOML file on top of defaults. If the file is
+    // missing or fails to parse, defaults stand.
     let toml_path = crate::paths::config_file();
     if toml_path.exists() {
         if let Ok(file) = ConfigFile::load_from_path(&toml_path) {
             file.apply_to(&mut config);
-            // Env vars still take precedence over the TOML file. Re-apply
-            // any that are actually set.
-            if let Some(v) = env_str("ITSY_PROVIDER") {
-                config.model.provider = v;
-            }
-            if let Some(v) = env_str("ITSY_MODEL") {
-                config.model.name = v;
-            }
-            if let Some(v) = env_str("ITSY_BASE_URL") {
-                config.model.base_url = v;
-            }
         }
     }
 
+    // Apply CLI overrides last.
     if let Some(m) = flags.model.clone() {
         config.model.name = m;
     }
@@ -560,12 +825,9 @@ pub fn load_config(flags: &Flags) -> Config {
     if flags.classic {
         config.tui.classic = true;
     }
-
-    // Push TOML-configured feature toggles into ITSY_* env vars so the
-    // many env-var consumers (snapshot, write_guard, plan_tracker, …)
-    // pick them up automatically. Env vars that are already set are
-    // left alone, preserving the documented load order.
-    propagate_features_to_env(&config);
+    if flags.verbose {
+        config.diag.verbose = true;
+    }
 
     config
 }

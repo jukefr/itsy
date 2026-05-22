@@ -494,6 +494,7 @@ pub fn run() -> Result<ConfigFile> {
         snapshot_auto_rollback: safeguards_all,
         write_guard: safeguards_all,
         bootstrap: safeguards_all,
+        bootstrap_max_chars: 4000,
         trust_decay: safeguards_all,
         temp_adapt: safeguards_all,
         thinking_budget,
@@ -508,6 +509,10 @@ pub fn run() -> Result<ConfigFile> {
 
     let web_browse = ask_bool("Enable web_search / web_fetch tools?", true);
     let shell_persist = ask_bool("Use a persistent shell (cd src; ls works as expected)?", true);
+    let allow_outside_paths = ask_bool(
+        "Allow read/write tools to touch absolute paths outside the project root (e.g. /data, /tmp)?",
+        true,
+    );
 
     let file = ConfigFile {
         version: CURRENT_CONFIG_VERSION.into(),
@@ -529,6 +534,8 @@ pub fn run() -> Result<ConfigFile> {
             tool_routing,
             web_browse,
             shell_persist,
+            shell_contain: false,
+            rtk: true,
         }),
         tui: Some(TuiConfig {
             show_token_usage: true,
@@ -547,6 +554,21 @@ pub fn run() -> Result<ConfigFile> {
         git: Some(GitConfig { auto_commit }),
         features: Some(features),
         models: None,
+        limits: Some(crate::config::LimitsConfig::default()),
+        security: Some(crate::config::SecurityConfig {
+            allow_outside_paths,
+            ..Default::default()
+        }),
+        diff: Some(crate::config::DiffConfig::default()),
+        filetree: Some(crate::config::FileTreeConfig::default()),
+        snapshots: Some(crate::config::SnapshotPathsConfig::default()),
+        code_graph: Some(crate::config::CodeGraphConfig::default()),
+        tests: Some(crate::config::TestsConfig::default()),
+        traces: Some(crate::config::TracesConfig::default()),
+        dedup: Some(crate::config::DedupConfig::default()),
+        evidence: Some(crate::config::EvidenceConfig::default()),
+        plugins: Some(crate::config::PluginsConfig::default()),
+        diag: Some(crate::config::DiagConfig::default()),
     };
 
     paths::ensure_config_dirs()?;
@@ -564,8 +586,8 @@ pub fn write_default() -> Result<ConfigFile> {
         version: CURRENT_CONFIG_VERSION.into(),
         model: Some(ModelConfig {
             provider: "openai".into(),
-            name: std::env::var("ITSY_MODEL").unwrap_or_default(),
-            base_url: std::env::var("ITSY_BASE_URL").unwrap_or_else(|_| "http://localhost:1234/v1".into()),
+            name: String::new(),
+            base_url: "http://localhost:1234/v1".into(),
             timeout: 300,
             api_key: None,
         }),
@@ -580,6 +602,8 @@ pub fn write_default() -> Result<ConfigFile> {
             tool_routing: "direct".into(),
             web_browse: false,
             shell_persist: true,
+            shell_contain: false,
+            rtk: true,
         }),
         tui: Some(TuiConfig {
             show_token_usage: true,
@@ -598,6 +622,18 @@ pub fn write_default() -> Result<ConfigFile> {
         git: Some(GitConfig { auto_commit: false }),
         features: Some(crate::config::FeaturesConfig::default()),
         models: None,
+        limits: Some(crate::config::LimitsConfig::default()),
+        security: Some(crate::config::SecurityConfig::default()),
+        diff: Some(crate::config::DiffConfig::default()),
+        filetree: Some(crate::config::FileTreeConfig::default()),
+        snapshots: Some(crate::config::SnapshotPathsConfig::default()),
+        code_graph: Some(crate::config::CodeGraphConfig::default()),
+        tests: Some(crate::config::TestsConfig::default()),
+        traces: Some(crate::config::TracesConfig::default()),
+        dedup: Some(crate::config::DedupConfig::default()),
+        evidence: Some(crate::config::EvidenceConfig::default()),
+        plugins: Some(crate::config::PluginsConfig::default()),
+        diag: Some(crate::config::DiagConfig::default()),
     };
     paths::ensure_config_dirs()?;
     file.save_to_path(&paths::config_file())?;

@@ -49,6 +49,7 @@ pub mod plugins;
 pub mod runtime;
 pub mod security;
 pub mod session;
+pub mod settings;
 pub mod token_monitor;
 pub mod tools;
 pub mod tools_impl;
