@@ -1243,15 +1243,47 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     );
                 }
 
-                // Spiral defense is upstream's: dedup catches pure-tool
-                // repeats, improvement_attempts catches failed mutating
-                // calls (bash/patch), the per-turn tool-call cap bounds
-                // the worst case. itsy had a Rust-only BREAK_ON_REPEAT
-                // counter here that aborted after 5 identical calls and
-                // then RESET to 0 — turning into a 5-emit / 1-abort
-                // cycle that never escapes. Removed: no bench evidence
-                // it helped, the reset bug made the spiral worse than
-                // upstream's bounded "spam until tool-call cap" path.
+                // Bash repeat-spiral defense: if the model issues the same
+                // bash command more than MAX_BASH_REPEATS times in a turn,
+                // short-circuit execution and return a hard warning instead.
+                // Intentionally does NOT reset — the old BREAK_ON_REPEAT
+                // reset to 0 after N, creating a 5-on/1-abort cycle. Here
+                // the counter only goes up, so the warning fires on every
+                // call after the threshold.
+                if name == "bash" {
+                    if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
+                        use sha2::{Digest, Sha256};
+                        let mut h = Sha256::new();
+                        h.update(cmd.as_bytes());
+                        let hash = format!("{:x}", h.finalize());
+                        let repeat_key = format!("__bash_repeat_{}", &hash[..16]);
+                        const MAX_BASH_REPEATS: u32 = 3;
+                        let n = per_turn_repeats
+                            .entry(repeat_key)
+                            .and_modify(|n| *n += 1)
+                            .or_insert(1);
+                        if *n > MAX_BASH_REPEATS {
+                            session.history.lock().push(json!({
+                                "role": "tool",
+                                "tool_call_id": id,
+                                "content": serde_json::to_string(&json!({
+                                    "result": format!(
+                                        "[LOOP DETECTED] You have run this exact command {} \
+                                         time(s) already. The output will not change. \
+                                         Stop repeating it — try a completely different approach \
+                                         or call a different tool.",
+                                        *n
+                                    )
+                                })).unwrap_or_default()
+                            }));
+                            continue;
+                        }
+                    }
+                }
+
+                // Pure-tool dedup catches read-only spirals; improvement_attempts
+                // catches failed mutating calls; the per-turn tool-call cap is
+                // the final backstop.
 
                 // Idempotent-write dedup: memory_remember/memory_forget with
                 // identical args in the same turn is a no-op. Break the spiral

@@ -9,11 +9,9 @@ use std::sync::OnceLock;
 use parking_lot::Mutex;
 
 pub struct ReadTracker {
-    read_paths: Mutex<HashSet<PathBuf>>,
-    written_paths: Mutex<HashSet<PathBuf>>,
-    warned_paths: Mutex<HashSet<PathBuf>>,
+    /// Files that have been read and not modified since — the only ones safe to write_file.
+    clean_paths: Mutex<HashSet<PathBuf>>,
     pub disabled: bool,
-    pub strict: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -27,11 +25,8 @@ pub struct WriteCheck {
 impl ReadTracker {
     fn new() -> Self {
         Self {
-            read_paths: Mutex::new(HashSet::new()),
-            written_paths: Mutex::new(HashSet::new()),
-            warned_paths: Mutex::new(HashSet::new()),
+            clean_paths: Mutex::new(HashSet::new()),
             disabled: env::var("ITSY_WRITE_GUARD").ok().as_deref() == Some("false"),
-            strict: env::var("ITSY_WRITE_GUARD_STRICT").ok().as_deref() == Some("true"),
         }
     }
 
@@ -40,26 +35,31 @@ impl ReadTracker {
         Some(normalize(&abs))
     }
 
+    /// Call after a successful read_file — marks the file clean for write_file.
     pub fn record_read(&self, file_path: &Path, cwd: &Path) {
-        if self.disabled {
-            return;
-        }
+        if self.disabled { return; }
         if let Some(c) = self.canon(file_path, cwd) {
-            self.read_paths.lock().insert(c.clone());
-            self.warned_paths.lock().remove(&c);
+            self.clean_paths.lock().insert(c);
         }
     }
 
+    /// Call after write_file — file content changed, model must re-read before next write.
     pub fn record_write(&self, file_path: &Path, cwd: &Path) {
-        if self.disabled {
-            return;
-        }
+        if self.disabled { return; }
         if let Some(c) = self.canon(file_path, cwd) {
-            self.written_paths.lock().insert(c.clone());
-            self.read_paths.lock().insert(c);
+            self.clean_paths.lock().remove(&c);
         }
     }
 
+    /// Call after a successful patch — file content changed, model must re-read before write_file.
+    pub fn record_patch(&self, file_path: &Path, cwd: &Path) {
+        if self.disabled { return; }
+        if let Some(c) = self.canon(file_path, cwd) {
+            self.clean_paths.lock().remove(&c);
+        }
+    }
+
+    /// Returns ok=true only if the file doesn't exist yet, or was read after its last modification.
     pub fn check_write(&self, file_path: &Path, cwd: &Path) -> WriteCheck {
         if self.disabled {
             return WriteCheck { ok: true, reason: None, warning: false, blocked: false };
@@ -67,42 +67,28 @@ impl ReadTracker {
         let Some(c) = self.canon(file_path, cwd) else {
             return WriteCheck { ok: true, reason: None, warning: false, blocked: false };
         };
+        // Creating a new file is always fine.
         if !fs::metadata(&c).is_ok() {
             return WriteCheck { ok: true, reason: None, warning: false, blocked: false };
         }
-        if self.read_paths.lock().contains(&c) || self.written_paths.lock().contains(&c) {
+        if self.clean_paths.lock().contains(&c) {
             return WriteCheck { ok: true, reason: None, warning: false, blocked: false };
         }
         let rel = pathdiff(&c, cwd).unwrap_or_else(|| c.display().to_string());
-        if self.strict {
-            return WriteCheck {
-                ok: false,
-                blocked: true,
-                warning: false,
-                reason: Some(format!(
-                    "Refused: write_file to existing file '{rel}' without prior read_file. Read the file first to see what's there."
-                )),
-            };
-        }
-        if self.warned_paths.lock().contains(&c) {
-            self.record_write(file_path, cwd);
-            return WriteCheck { ok: true, reason: None, warning: false, blocked: false };
-        }
-        self.warned_paths.lock().insert(c);
         WriteCheck {
             ok: false,
-            warning: true,
-            blocked: false,
+            blocked: true,
+            warning: false,
             reason: Some(format!(
-                "Refused: write_file would overwrite existing '{rel}' you haven't read. Call read_file first to see its current content, OR if you intend to fully replace it, retry — second attempt is allowed."
+                "write_file rejected: '{rel}' has been modified since you last read it, \
+                 or you haven't read it yet. Call read_file first to see the current \
+                 content before overwriting."
             )),
         }
     }
 
     pub fn reset(&self) {
-        self.read_paths.lock().clear();
-        self.written_paths.lock().clear();
-        self.warned_paths.lock().clear();
+        self.clean_paths.lock().clear();
     }
 }
 

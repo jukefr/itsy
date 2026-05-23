@@ -235,7 +235,6 @@ async fn exec_patch(args: &Value, cwd: &Path, ctx: &ExecCtx<'_>) -> Value {
     if !safe.full_path.exists() {
         return json!({"error": format!("File not found: {path}")});
     }
-    get_read_tracker().record_read(&safe.full_path, cwd);
     let old_str = args.get("old_str").and_then(|v| v.as_str()).unwrap_or("");
     let new_str = args.get("new_str").and_then(|v| v.as_str()).unwrap_or("");
     let content = match fs::read_to_string(&safe.full_path) {
@@ -256,6 +255,7 @@ async fn exec_patch(args: &Value, cwd: &Path, ctx: &ExecCtx<'_>) -> Value {
                     return json!({"error": e.to_string()});
                 }
                 get_file_state_tracker().record_write(&safe.full_path, &merged);
+                get_read_tracker().record_patch(&safe.full_path, cwd);
                 let old_lines = content.split('\n').count();
                 let new_lines = merged.split('\n').count();
                 return json!({
@@ -276,6 +276,7 @@ async fn exec_patch(args: &Value, cwd: &Path, ctx: &ExecCtx<'_>) -> Value {
         return json!({"error": e.to_string()});
     }
     get_file_state_tracker().record_write(&safe.full_path, &new_content);
+    get_read_tracker().record_patch(&safe.full_path, cwd);
     let prefix = new_content.split(new_str).next().unwrap_or("");
     let line_num = prefix.split('\n').count();
     let old_lines = old_str.split('\n').count();
