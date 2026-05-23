@@ -866,17 +866,22 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
     // before it consults the system message. The wrap moves the
     // priority into the user role where the model actually weighs it.
     //
-    // We wrap unconditionally (don't bother with task-type classification
-    // here — the contract-mode prompt + downstream gate already skip
-    // the explanation case). If the prompt is genuinely chat-y the
-    // model will just emit a quick 2-3 assertion contract and we move on.
+    // Skip for conversational messages (`respond` category): "hello",
+    // "thanks", etc. should never be wrapped — the model ends up printing
+    // a fake propose_contract() call in its text even with no tools
+    // available, because the preamble is in the user role and outweighs
+    // the system-prompt gate. The classifier is cheap (deterministic
+    // regex) so running it early costs nothing.
     if itsy::settings::get().contract && itsy::session::contract::current().is_none() {
-        augmented = format!(
-            "Define what 'done' means for the following task by calling \
-             propose_contract. Do not start the task yet — just enumerate \
-             the checks that would prove it's done.\n\n\
-             TASK:\n{augmented}"
-        );
+        let early_cls = itsy::runtime::tool_router::classify_tool_category(&user_msg);
+        if early_cls.category != "respond" {
+            augmented = format!(
+                "Define what 'done' means for the following task by calling \
+                 propose_contract. Do not start the task yet — just enumerate \
+                 the checks that would prove it's done.\n\n\
+                 TASK:\n{augmented}"
+            );
+        }
     }
 
     session
@@ -2287,6 +2292,278 @@ async fn run_non_interactive(session: &AgentSession, prompt: Option<String>) {
         std::process::exit(1);
     }
     handle_turn(&prompt, session).await;
+
+    // Adversarial evaluator — runs after the generator finishes if the
+    // contract feature is on and the generator closed the contract as
+    // completed. The evaluator gets a fresh context window (no generator
+    // history) and tries to break the solution by running checks itself.
+    if itsy::settings::get().contract {
+        if let Some(completed) = itsy::session::contract::take_completed() {
+            run_evaluator_phase(&prompt, session, &completed).await;
+        }
+    }
+}
+
+// ── Adversarial evaluator ────────────────────────────────────────────────
+
+fn evaluator_tools() -> Vec<Value> {
+    fn tool(name: &str, desc: &str, params: Value) -> Value {
+        json!({"type":"function","function":{"name":name,"description":desc,"parameters":params}})
+    }
+    vec![
+        tool("bash", "Run a shell command and return stdout+stderr. Use for verification only.",
+            json!({"type":"object","properties":{"command":{"type":"string"}},"required":["command"]})),
+        tool("read_file", "Read a file. Returns content.",
+            json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]})),
+        tool("evaluator_verdict",
+            "Report your evaluation verdict. Call this ONCE when you have checked all assertions.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "passed": {"type":"boolean","description":"true if every assertion verified; false if any failed"},
+                    "findings": {"type":"string","description":"Describe each failure on its own line. Empty if passed=true."}
+                },
+                "required": ["passed","findings"]
+            })),
+    ]
+}
+
+/// Run a bash command for the evaluator (read-only intent, 15s timeout).
+fn evaluator_run_bash(command: &str, cwd: &str) -> String {
+    use std::process::Command;
+    let result = Command::new("bash")
+        .arg("-c")
+        .arg(command)
+        .current_dir(cwd)
+        .output();
+    match result {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let code = out.status.code().unwrap_or(-1);
+            let mut s = format!("exit_code={code}");
+            if !stdout.is_empty() {
+                s.push_str(&format!("\nstdout:\n{}", stdout.trim_end()));
+            }
+            if !stderr.is_empty() {
+                s.push_str(&format!("\nstderr:\n{}", stderr.trim_end()));
+            }
+            // Cap output so evaluator history doesn't explode.
+            if s.len() > 2000 {
+                s.truncate(2000);
+                s.push_str("\n[output truncated]");
+            }
+            s
+        }
+        Err(e) => format!("error: {e}"),
+    }
+}
+
+fn evaluator_read_file(path: &str, cwd: &str) -> String {
+    let p = if std::path::Path::new(path).is_absolute() {
+        std::path::PathBuf::from(path)
+    } else {
+        std::path::Path::new(cwd).join(path)
+    };
+    match std::fs::read_to_string(&p) {
+        Ok(s) => {
+            if s.len() > 3000 {
+                format!("{}\n[file truncated at 3000 chars]", &s[..3000])
+            } else {
+                s
+            }
+        }
+        Err(e) => format!("error reading {}: {e}", p.display()),
+    }
+}
+
+/// Adversarial evaluation phase. Runs after the generator closes the
+/// contract. Gets a clean history, tool-restricted to read+bash only,
+/// and a system prompt that instructs it to treat self-reported passes
+/// as unconfirmed.
+async fn run_evaluator_phase(
+    task: &str,
+    session: &AgentSession,
+    contract: &itsy::session::contract::Contract,
+) {
+    const MAX_TURNS: u32 = 10;
+
+    let cwd = session.cwd.to_string_lossy().to_string();
+    let config = session.config.lock().clone();
+
+    let assertions_block: String = contract
+        .assertions
+        .iter()
+        .map(|a| format!("  A.{}: {}", a.id, a.text))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let system_prompt = format!(
+        "You are an adversarial evaluator. A code generator finished the following task and \
+         self-reported that all assertions passed — but self-reports are unreliable.\n\n\
+         TASK:\n{task}\n\n\
+         CLAIMED ASSERTIONS (generator marked all passed):\n{assertions_block}\n\n\
+         Working directory: {cwd}\n\n\
+         Your job: verify each assertion is ACTUALLY true by running the checks yourself. \
+         Treat nothing as given. Use `bash` to run commands and observe real output. \
+         Use `read_file` to inspect files if needed.\n\n\
+         When you have checked every assertion (or found a clear failure), call \
+         `evaluator_verdict` with:\n\
+         - passed=true if all assertions confirmed\n\
+         - passed=false + findings describing each failure if any assertion fails\n\n\
+         Be terse. One bash call per assertion. If the first check reveals a fundamental \
+         failure, call evaluator_verdict immediately."
+    );
+
+    let tools = evaluator_tools();
+    let mut history: Vec<Value> = vec![json!({
+        "role": "user",
+        "content": "Begin evaluation. Verify each assertion independently."
+    })];
+
+    println!("\n  \x1b[36m◆ evaluator phase starting ({} assertions)\x1b[0m", contract.assertions.len());
+
+    for turn in 0..MAX_TURNS {
+        let ctx = itsy::model_client::ChatContext {
+            config: &config,
+            conversation: &history,
+            tools: tools.clone(),
+            current_task_type: Some("evaluation"),
+            system_prompt: system_prompt.clone(),
+        };
+
+        let Some(response) = itsy::model_client::chat_completion(&ctx).await else {
+            println!("  \x1b[31m✗ evaluator API call failed\x1b[0m");
+            return;
+        };
+
+        let msg = response
+            .pointer("/choices/0/message")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+
+        let tool_calls = msg
+            .get("tool_calls")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        // Push assistant message with reasoning_content stripped — evaluator
+        // history should stay compact.
+        let mut clean_msg = msg.clone();
+        if let Some(obj) = clean_msg.as_object_mut() {
+            obj.remove("reasoning_content");
+        }
+        history.push(clean_msg);
+
+        if tool_calls.is_empty() {
+            // Text-only response — nudge toward a verdict if not at limit yet.
+            if turn < MAX_TURNS - 1 {
+                history.push(json!({
+                    "role": "user",
+                    "content": "[SYSTEM] Call evaluator_verdict to record your conclusion."
+                }));
+                continue;
+            }
+            println!("  \x1b[33m⚠ evaluator reached turn limit without verdict\x1b[0m");
+            return;
+        }
+
+        let mut tool_results = Vec::new();
+        let mut verdict: Option<(bool, Vec<String>)> = None;
+
+        for tc in &tool_calls {
+            let name = tc
+                .pointer("/function/name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let args_str = tc
+                .pointer("/function/arguments")
+                .and_then(|v| v.as_str())
+                .unwrap_or("{}");
+            let args: Value = serde_json::from_str(args_str).unwrap_or(json!({}));
+            let tc_id = tc
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            let result = match name.as_str() {
+                "bash" => {
+                    let cmd = args
+                        .get("command")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    println!("  \x1b[36m  eval$ {}\x1b[0m", cmd);
+                    evaluator_run_bash(cmd, &cwd)
+                }
+                "read_file" => {
+                    let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                    evaluator_read_file(path, &cwd)
+                }
+                "evaluator_verdict" => {
+                    let passed = args
+                        .get("passed")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let findings_raw = args
+                        .get("findings")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let findings: Vec<String> = findings_raw
+                        .lines()
+                        .map(|l| l.trim_start_matches('-').trim().to_string())
+                        .filter(|l| !l.is_empty())
+                        .collect();
+                    verdict = Some((passed, findings.clone()));
+                    format!("verdict recorded: passed={passed}")
+                }
+                other => format!("tool `{other}` not available in evaluator"),
+            };
+
+            tool_results.push(json!({
+                "role": "tool",
+                "tool_call_id": tc_id,
+                "content": result,
+            }));
+        }
+
+        history.extend(tool_results);
+
+        if let Some((passed, findings)) = verdict {
+            if passed {
+                println!("  \x1b[32m✓ evaluator passed — all assertions confirmed\x1b[0m");
+            } else {
+                println!(
+                    "  \x1b[31m✗ evaluator failed — {} finding(s)\x1b[0m",
+                    findings.len()
+                );
+                for f in &findings {
+                    println!("    · {f}");
+                }
+                // Inject findings back into the generator session as a
+                // follow-up user message. The bench run ends here — we
+                // don't give the generator another fix cycle in this
+                // phase. The findings appear in the chat log for analysis.
+                let findings_text = findings.join("\n  · ");
+                session.history.lock().push(json!({
+                    "role": "user",
+                    "content": format!(
+                        "[EVALUATOR] Independent verification found issues:\n  · {findings_text}\n\n\
+                         These assertions were self-reported as passed but failed when checked \
+                         by the evaluator."
+                    )
+                }));
+            }
+            itsy::session::contract::set_evaluator_result(
+                itsy::session::contract::EvaluatorResult { passed, findings },
+            );
+            return;
+        }
+    }
+
+    println!("  \x1b[33m⚠ evaluator exhausted turns without reaching verdict\x1b[0m");
 }
 
 // std::io::Read import for read_to_string above.

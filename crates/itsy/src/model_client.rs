@@ -94,10 +94,19 @@ pub async fn chat_completion(ctx: &ChatContext<'_>) -> Option<Value> {
     let mut body = json!({
         "model": ctx.config.model.name,
         "messages": messages,
-        "tools": ctx.tools,
         "temperature": temperature,
         "max_tokens": max_tokens,
     });
+    // INTENTIONAL: only include `tools` when the list is non-empty.
+    // Qwen3 via llama-server interprets `"tools": []` as "tool use
+    // enabled with no tools", which still triggers the tool-call
+    // path in the chat template and causes the model to emit
+    // `<tool_call>` XML even for conversational turns. Omitting
+    // the key entirely disables tool use for those turns (e.g.
+    // the `respond` routing category that handles greetings).
+    if !ctx.tools.is_empty() {
+        body["tools"] = json!(ctx.tools);
+    }
     // INTENTIONAL: apply provider-gated reasoning fields (Anthropic
     // `thinking`, OpenAI `reasoning_effort`, llama.cpp
     // `chat_template_kwargs`). Required for Qwen3-style thinking
@@ -145,7 +154,7 @@ pub async fn chat_completion(ctx: &ChatContext<'_>) -> Option<Value> {
         }
 
         let parsed: Option<Value> = res.json().await.ok();
-        let Some(value) = parsed else { return None };
+        let Some(mut value) = parsed else { return None };
 
         // INTENTIONAL: persist raw request + response for inspection.
         // No behaviour change; just observability.
@@ -169,6 +178,15 @@ pub async fn chat_completion(ctx: &ChatContext<'_>) -> Option<Value> {
                     "  \x1b[90m[tokens] completion={completion} thinking~{thinking_est} ({thinking_chars}chars)\x1b[0m"
                 );
             }
+        }
+
+        // INTENTIONAL: Qwen3 models served via llama-server sometimes emit
+        // tool calls as raw `<tool_call>` XML in the content field instead of
+        // structured `tool_calls`. When that happens llama-server's OpenAI
+        // adapter doesn't convert them. We normalise here as a fallback so
+        // the rest of the harness never sees the raw XML.
+        if let Some(msg) = value.pointer_mut("/choices/0/message") {
+            extract_xml_tool_calls(msg);
         }
 
         return Some(value);
@@ -321,6 +339,120 @@ pub fn run_validation(file_path: &str) -> Option<ValidationOutcome> {
         });
     }
     None
+}
+
+/// Normalise Qwen3-style `<tool_call>` XML that leaks into the content field
+/// when llama-server's OpenAI adapter doesn't convert it. Handles two formats:
+///
+/// - JSON:  `<tool_call>\n{"name":"fn","arguments":{...}}\n</tool_call>`
+/// - Attr:  `<tool_call><function=fn>\n<parameter=k>v</parameter>\n</function></tool_call>`
+///
+/// On success, `tool_calls` is populated on `msg` and the XML is removed from
+/// `content`. No-ops when `tool_calls` is already non-empty.
+fn extract_xml_tool_calls(msg: &mut Value) {
+    let content = match msg.get("content").and_then(|v| v.as_str()) {
+        Some(c) if c.contains("<tool_call>") => c.to_string(),
+        _ => return,
+    };
+    // Already converted by the server — leave it alone.
+    if msg.get("tool_calls")
+        .and_then(|v| v.as_array())
+        .map(|a| !a.is_empty())
+        .unwrap_or(false)
+    {
+        return;
+    }
+
+    let mut tool_calls: Vec<Value> = Vec::new();
+    let mut tc_id: u32 = 0;
+    let mut remaining = content.as_str();
+
+    while let Some(start) = remaining.find("<tool_call>") {
+        remaining = &remaining[start + "<tool_call>".len()..];
+        let end = remaining.find("</tool_call>").unwrap_or(remaining.len());
+        let inner = remaining[..end].trim();
+        remaining = if end < remaining.len() {
+            &remaining[end + "</tool_call>".len()..]
+        } else {
+            ""
+        };
+
+        tc_id += 1;
+        let id = format!("call_{tc_id}");
+
+        // JSON format: {"name":"fn","arguments":{...}}
+        if let Ok(obj) = serde_json::from_str::<Value>(inner) {
+            if let Some(name) = obj.get("name").and_then(|v| v.as_str()) {
+                let args = obj.get("arguments").cloned().unwrap_or(json!({}));
+                let args_str = serde_json::to_string(&args).unwrap_or_else(|_| "{}".into());
+                tool_calls.push(json!({
+                    "id": id,
+                    "type": "function",
+                    "function": {"name": name, "arguments": args_str}
+                }));
+                continue;
+            }
+        }
+
+        // Attribute format: <function=NAME>\n<parameter=K>V</parameter>…\n</function>
+        if let Some(fn_off) = inner.find("<function=") {
+            let after = &inner[fn_off + "<function=".len()..];
+            let name_end = after.find('>').unwrap_or(after.len());
+            let fn_name = after[..name_end].trim().trim_end_matches('/');
+            let fn_body = if name_end < after.len() { &after[name_end + 1..] } else { "" };
+
+            let mut params = serde_json::Map::new();
+            let mut p = fn_body;
+            while let Some(pp) = p.find("<parameter=") {
+                p = &p[pp + "<parameter=".len()..];
+                let ke = p.find('>').unwrap_or(p.len());
+                let key = p[..ke].trim();
+                p = if ke < p.len() { &p[ke + 1..] } else { "" };
+                let ve = p.find("</parameter>").unwrap_or(p.len());
+                let val = p[..ve].trim();
+                p = if ve < p.len() { &p[ve + "</parameter>".len()..] } else { "" };
+                params.insert(key.to_string(), Value::String(val.to_string()));
+            }
+
+            if !fn_name.is_empty() {
+                let args_str = serde_json::to_string(&Value::Object(params))
+                    .unwrap_or_else(|_| "{}".into());
+                tool_calls.push(json!({
+                    "id": id,
+                    "type": "function",
+                    "function": {"name": fn_name, "arguments": args_str}
+                }));
+            }
+        }
+    }
+
+    if tool_calls.is_empty() {
+        return;
+    }
+
+    // Strip every <tool_call>…</tool_call> block from content.
+    let clean = {
+        let mut s = content.clone();
+        loop {
+            let Some(a) = s.find("<tool_call>") else { break };
+            if let Some(rel) = s[a..].find("</tool_call>") {
+                s.drain(a..a + rel + "</tool_call>".len());
+            } else {
+                s.drain(a..);
+                break;
+            }
+        }
+        s.trim().to_string()
+    };
+
+    if let Some(obj) = msg.as_object_mut() {
+        obj.insert("tool_calls".into(), Value::Array(tool_calls));
+        if clean.is_empty() {
+            obj.remove("content");
+        } else {
+            obj.insert("content".into(), Value::String(clean));
+        }
+    }
 }
 
 /// Build the canonical system prompt used by [`chat_completion`].

@@ -311,6 +311,51 @@ pub fn read_active_id(cwd: &Path) -> Option<String> {
     fs::read_to_string(&marker).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
+// ── evaluator result ──────────────────────────────────────────────────────
+
+/// Verdict produced by the adversarial evaluator phase.
+#[derive(Debug, Clone)]
+pub struct EvaluatorResult {
+    pub passed: bool,
+    /// Non-empty only when `passed == false`.
+    pub findings: Vec<String>,
+}
+
+static EVALUATOR_RESULT: OnceLock<Mutex<Option<EvaluatorResult>>> = OnceLock::new();
+
+fn evaluator_cache() -> &'static Mutex<Option<EvaluatorResult>> {
+    EVALUATOR_RESULT.get_or_init(|| Mutex::new(None))
+}
+
+pub fn set_evaluator_result(r: EvaluatorResult) {
+    *evaluator_cache().lock().expect("evaluator cache poisoned") = Some(r);
+}
+
+pub fn take_evaluator_result() -> Option<EvaluatorResult> {
+    evaluator_cache().lock().expect("evaluator cache poisoned").take()
+}
+
+// ── completed-contract snapshot ───────────────────────────────────────────
+
+/// The last contract closed as `completed` this process — kept so the
+/// evaluator phase can read the assertions without re-hitting disk.
+static COMPLETED_CONTRACT: OnceLock<Mutex<Option<Contract>>> = OnceLock::new();
+
+fn completed_cache() -> &'static Mutex<Option<Contract>> {
+    COMPLETED_CONTRACT.get_or_init(|| Mutex::new(None))
+}
+
+/// Save a copy of the contract before it is cleared from the active cache.
+/// Called by `close()` when status is `Completed`.
+pub fn set_completed(c: Contract) {
+    *completed_cache().lock().expect("completed cache poisoned") = Some(c);
+}
+
+/// Take the completed contract (consumes it — returns `None` on a second call).
+pub fn take_completed() -> Option<Contract> {
+    completed_cache().lock().expect("completed cache poisoned").take()
+}
+
 // ── in-process cache ──────────────────────────────────────────────────────
 
 /// Latest snapshot kept in memory so the agent loop doesn't re-read
@@ -600,6 +645,9 @@ pub fn close(cwd: &Path, status: ContractStatus) -> Result<Contract> {
     let file = ContractFile::for_project(cwd, &c.id);
     file.save(&c)?;
     file.append_log("closed", serde_json::json!({ "status": status.as_str() }))?;
+    if status == ContractStatus::Completed {
+        set_completed(c.clone());
+    }
     clear_active_id(cwd)?;
     set_current(None);
     Ok(c)
@@ -686,7 +734,7 @@ mod tests {
         .unwrap();
         // Can't close as completed while pending.
         let err = close(&cwd, ContractStatus::Completed).unwrap_err();
-        assert!(err.to_string().contains("still pending"));
+        assert!(err.to_string().contains("not yet passed"));
         // Mark and try again.
         mark_assertion(
             &cwd,
