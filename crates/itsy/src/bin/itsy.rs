@@ -696,10 +696,9 @@ fn build_contract_active_prompt(
             command     (recommended for passed) the shell command you ran\n\
             exit_code   the exit code\n\
             observation the actual output you saw — NOT \"OK\" or \"passed\"\n\
-        - When every assertion is non-pending, call `close_contract completed` to finish.\n\
-        - `close_contract completed` is refused while any assertion is still pending — \
-          there's no way to claim 'done' without resolving each one.\n\
-        - If you genuinely cannot verify an assertion, mark it `failed` or `skipped` with an honest reason.\n",
+        - When every assertion is `passed`, call `close_contract completed` to finish.\n\
+        - `close_contract completed` is refused until every assertion is `passed`.\n\
+        - Assertions can only be `passed` or `failed` — there is no skip or abort.\n",
         cwd = cwd,
         model_line = model_line,
         body = body,
@@ -1812,7 +1811,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                 let counts = c.counts();
                 let needs_more_work = counts.pending > 0 || counts.failed > 0;
                 if needs_more_work {
-                    const MAX_CONTRACT_LOOP: u32 = 4;
+                    const MAX_CONTRACT_LOOP: u32 = 12;
                     let n = *per_turn_repeats
                         .entry("__contract_loop".into())
                         .and_modify(|n| *n += 1)
@@ -1844,28 +1843,58 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                         let mut msg = String::from(
                             "[SYSTEM] The turn cannot end yet — the contract is not closed.\n\n"
                         );
-                        if !pending_ids.is_empty() {
-                            msg.push_str(&format!(
-                                "Pending assertions: {}. For each one, run a verification command \
-                                 (test, script, etc.) and call `mark_assertion` with the id, state \
-                                 (passed/failed/skipped), the command you ran, exit_code, and the \
-                                 actual observation (not \"OK\").\n\n",
-                                pending_ids.join(", ")
-                            ));
-                        }
                         if !failed_ids.is_empty() {
+                            // Failed assertions take absolute priority — show them with the
+                            // last recorded evidence so the model has its own failure context
+                            // back in front of it, then suppress the "verify pending" branch
+                            // entirely to avoid conflicting instructions.
+                            let failed_blocks: Vec<String> = c
+                                .assertions
+                                .iter()
+                                .filter(|a| {
+                                    a.state == itsy::session::contract::AssertionState::Failed
+                                })
+                                .map(|a| {
+                                    let mut block = format!("  `{}` — {}", a.id, a.text);
+                                    if let Some(ev) = &a.evidence {
+                                        block.push_str(&format!("\n    last evidence: {ev}"));
+                                    }
+                                    if let Some(chk) = &a.last_check {
+                                        block.push_str(&format!(
+                                            "\n    last command:  {}\n    exit_code:     {}\n    observation:   {}",
+                                            chk.command, chk.exit_code, chk.observation
+                                        ));
+                                    }
+                                    block
+                                })
+                                .collect();
                             msg.push_str(&format!(
-                                "Failed assertions: {}. Fix the underlying issue (re-edit files, \
-                                 re-run tests) and re-mark passed. If genuinely impossible, mark \
-                                 skipped with a justification.\n\n",
-                                failed_ids.join(", ")
+                                "FAILED assertion(s) — diagnose each failure below and fix it \
+                                 before the contract can close:\n\n{}\n\n\
+                                 For each: re-examine what you produced, understand exactly why \
+                                 the check failed (look at the observation above), make the \
+                                 necessary edits or re-runs, then call `mark_assertion` again \
+                                 with state=passed. Do NOT call `close_contract` until every \
+                                 assertion is `passed`.\n\n",
+                                failed_blocks.join("\n\n")
+                            ));
+                        } else if !pending_ids.is_empty() {
+                            // No failures — just unverified assertions. One at a time to avoid
+                            // thinking-budget overflow on small quantised models.
+                            msg.push_str(&format!(
+                                "You have {} pending assertion(s). Verify ONE now — start with \
+                                 `{}`. Run a check command, call `mark_assertion` with the id, \
+                                 state (passed/failed), the command you ran, exit_code, and \
+                                 actual observation. If it PASSES: stop, the next turn handles \
+                                 the rest. If it FAILS: keep working right now — fix the issue \
+                                 and re-mark before stopping.\n\n",
+                                pending_ids.len(),
+                                pending_ids[0]
                             ));
                         }
                         msg.push_str(
-                            "Once every assertion is non-pending and non-failed, call \
-                             `close_contract` `completed`. If you've given up, call \
-                             `close_contract` `aborted` with the current state — but try to fix \
-                             real failures first."
+                            "Once every assertion is `passed`, call `close_contract` `completed`. \
+                             Keep working until they all pass."
                         );
                         hist.push(json!({"role": "user", "content": msg}));
                         continue;

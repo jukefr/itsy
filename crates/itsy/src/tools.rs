@@ -113,14 +113,14 @@ pub static TOOLS: Lazy<Vec<Value>> = Lazy::new(|| vec![
             "required": ["title", "brief", "assertions"]
         })),
     func_tool("mark_assertion",
-        "Mark a contract assertion `passed` / `failed` / `skipped` with evidence. \
+        "Mark a contract assertion `passed` or `failed` with evidence. \
         `passed` requires evidence + at least one verification command (the actual output you saw). \
         Lazy observations like \"OK\" or \"tests passed\" are rejected — write what you actually saw.",
         json!({
             "type": "object",
             "properties": {
                 "id": {"type": "string", "description": "Assertion ID, e.g. \"A.001\""},
-                "state": {"type": "string", "enum": ["passed", "failed", "skipped"]},
+                "state": {"type": "string", "enum": ["passed", "failed"]},
                 "evidence": {"type": "string", "description": "Plain-text explanation of how you verified (≥10 chars)"},
                 "command": {"type": "string", "description": "Command you ran (optional but encouraged for `passed`)"},
                 "exit_code": {"type": "integer", "description": "Exit code of the command"},
@@ -142,12 +142,11 @@ pub static TOOLS: Lazy<Vec<Value>> = Lazy::new(|| vec![
         "Read the current contract state — which assertions are passed / failed / pending.",
         json!({"type": "object", "properties": {}})),
     func_tool("close_contract",
-        "Finalize the active contract. `completed` is refused unless every assertion is in a non-pending state. \
-        `aborted` discards the contract.",
+        "Finalize the active contract as `completed`. Refused unless every assertion is `passed`.",
         json!({
             "type": "object",
             "properties": {
-                "status": {"type": "string", "enum": ["completed", "aborted"]}
+                "status": {"type": "string", "enum": ["completed"]}
             },
             "required": ["status"]
         })),

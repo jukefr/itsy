@@ -1012,13 +1012,13 @@ async fn exec_mark_assertion(args: &Value, cwd: &Path) -> Value {
         return json!({"error": "missing assertion `id`"});
     };
     let Some(state_s) = args.get("state").and_then(|v| v.as_str()) else {
-        return json!({"error": "missing `state` (passed | failed | skipped)"});
+        return json!({"error": "missing `state` (passed | failed)"});
     };
     let state = match state_s {
         "passed" => AssertionState::Passed,
         "failed" => AssertionState::Failed,
-        "skipped" => AssertionState::Skipped,
-        _ => return json!({"error": "`state` must be one of passed | failed | skipped"}),
+        "skipped" => return json!({"error": "`skipped` is not allowed — assertions must be passed or failed. If verification is genuinely impossible, keep trying or explain why in the `evidence` field and mark `failed`."}),
+        _ => return json!({"error": "`state` must be `passed` or `failed`"}),
     };
     let evidence = match args.get("evidence").and_then(|v| v.as_str()) {
         Some(s) if s.trim().len() >= 10 => s.trim().to_string(),
@@ -1124,12 +1124,12 @@ async fn exec_contract_status() -> Value {
 async fn exec_close_contract(args: &Value, cwd: &Path) -> Value {
     use crate::session::contract::{self, ContractStatus};
     let Some(status_s) = args.get("status").and_then(|v| v.as_str()) else {
-        return json!({"error": "missing `status` (completed | aborted)"});
+        return json!({"error": "missing `status` — only `completed` is accepted"});
     };
     let status = match status_s {
         "completed" => ContractStatus::Completed,
-        "aborted" => ContractStatus::Aborted,
-        _ => return json!({"error": "`status` must be completed or aborted"}),
+        "aborted" => return json!({"error": "`aborted` is not available — fix failing assertions and close as `completed`"}),
+        _ => return json!({"error": "`status` must be `completed`"}),
     };
     match contract::close(cwd, status) {
         Ok(c) => {

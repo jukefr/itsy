@@ -582,32 +582,17 @@ pub fn close(cwd: &Path, status: ContractStatus) -> Result<Contract> {
         return Err(anyhow!("no active contract to close"));
     };
     if status == ContractStatus::Completed {
-        let pending: Vec<&str> = c
+        let not_passed: Vec<&str> = c
             .assertions
             .iter()
-            .filter(|a| a.state == AssertionState::Pending)
+            .filter(|a| a.state != AssertionState::Passed)
             .map(|a| a.id.as_str())
             .collect();
-        if !pending.is_empty() {
+        if !not_passed.is_empty() {
             return Err(anyhow!(
-                "cannot close as `completed` — these assertions are still pending: {}. \
-                 Call `mark_assertion` on each (passed/failed/skipped with evidence) first.",
-                pending.join(", ")
-            ));
-        }
-        let failed: Vec<&str> = c
-            .assertions
-            .iter()
-            .filter(|a| a.state == AssertionState::Failed)
-            .map(|a| a.id.as_str())
-            .collect();
-        if !failed.is_empty() {
-            return Err(anyhow!(
-                "cannot close as `completed` — these assertions are still failed: {}. \
-                 Either fix the underlying issue and re-mark them `passed`, mark them \
-                 `skipped` with a justification, or close as `aborted` if the work \
-                 cannot be done.",
-                failed.join(", ")
+                "cannot close as `completed` — these assertions are not yet passed: {}. \
+                 Fix the underlying issues and re-mark them `passed`.",
+                not_passed.join(", ")
             ));
         }
     }
