@@ -223,17 +223,27 @@ pub fn get_tools_for_category(category: &str) -> Vec<&'static str> {
     match category {
         "code_intel" => vec!["graph_search", "explain_symbol", "read_file", "find_files", "search"],
         "read" => vec!["read_file", "list_projects", "graph_search", "find_files", "find_and_read"],
-        "write" => vec!["read_file", "write_file", "patch", "bash", "read_and_patch", "create_and_run"],
+        "write" => vec![
+            "read_file", "write_file", "patch", "bash", "read_and_patch", "create_and_run",
+            "propose_contract", "mark_assertion", "mark_feature", "contract_status", "close_contract",
+        ],
         "search" => vec!["search", "find_files", "graph_search", "read_file", "explain_symbol", "search_and_read"],
-        "run" => vec!["bash", "run", "read_file"],
+        "run" => vec![
+            "bash", "run", "read_file",
+            "propose_contract", "mark_assertion", "mark_feature", "contract_status", "close_contract",
+        ],
         "plan" => vec![
             "read_file", "write_file", "patch", "bash", "search", "find_files",
             "graph_search", "memory_load", "memory_remember",
             "read_and_patch", "create_and_run", "find_and_read", "search_and_read",
+            "propose_contract", "mark_assertion", "mark_feature", "contract_status", "close_contract",
         ],
         "web" => vec!["web_search", "web_fetch", "read_file"],
         "respond" => vec![],
-        _ => vec!["read_file", "write_file", "patch", "bash", "search"],
+        _ => vec![
+            "read_file", "write_file", "patch", "bash", "search",
+            "propose_contract", "mark_assertion", "mark_feature", "contract_status", "close_contract",
+        ],
     }
 }
 

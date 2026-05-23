@@ -185,6 +185,15 @@ struct AgentSession {
     /// turns — that's the whole point: the model can't escape the guard by
     /// spreading repeated calls across turns.
     tool_repeat_counts: Arc<Mutex<std::collections::HashMap<String, u32>>>,
+    /// Paths mutated this session (write_file, patch, etc.). When a
+    /// read_file call is about to be loop-blocked, we check here first:
+    /// if the file was mutated since last read, reset the counter instead
+    /// of blocking. Cleared per-path on consumption.
+    mutated_paths: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// Loop-counter keys (sha256 prefix) for bash calls seen this session.
+    /// After any successful mutating tool, all bash keys are cleared from
+    /// tool_repeat_counts so the model can re-verify after each edit.
+    bash_loop_keys: Arc<Mutex<std::collections::HashSet<String>>>,
     /// Counts consecutive turns where no mutating tool (patch, write_file,
     /// create_file, move_file, delete_file) was called. Resets on any mutating
     /// call. When it reaches READONLY_TURN_THRESHOLD we inject a nudge.
@@ -1277,8 +1286,9 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                 // identical calls. Uses session-scoped counter that persists
                 // across turns — the model cannot escape by spreading
                 // repeated calls across turns.
-                // read_file/graph_search get a higher threshold (5) since
-                // re-reading is more forgiving; everything else gets 3.
+                // Threshold is 3 for all tools. read_file gets an exemption:
+                // if the file was mutated since last read the counter is reset
+                // above, so the limit only fires on true stale re-reads.
                 {
                     use sha2::{Digest, Sha256};
                     let args_str = serde_json::to_string(&args).unwrap_or_default();
@@ -1287,29 +1297,69 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     h.update(key.as_bytes());
                     let hash = format!("{:x}", h.finalize());
                     let repeat_key = format!("__tool_repeat_{}", &hash[..16]);
-                    let max_repeats: u32 = match name.as_str() {
-                        "read_file" | "graph_search" => 5,
-                        _ => 3,
-                    };
+                    let max_repeats: u32 = 3;
+
+                    // If this is a read_file call to a path that was mutated
+                    // since the last read, the file content has genuinely changed —
+                    // reset the loop counter so the agent can re-read it.
+                    if name == "read_file" {
+                        if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                            if session.mutated_paths.lock().remove(path) {
+                                session.tool_repeat_counts.lock().remove(&repeat_key);
+                            }
+                        }
+                    }
+
+                    // Track bash loop keys so they can be cleared after mutations.
+                    // Verification commands (e.g. `coqc`, `pytest`) are legitimately
+                    // repeated after each edit cycle — only count consecutive runs
+                    // with no mutation in between.
+                    if name == "bash" {
+                        session.bash_loop_keys.lock().insert(repeat_key.clone());
+                    }
+
                     let n = session.tool_repeat_counts.lock()
                         .entry(repeat_key)
                         .and_modify(|n| *n += 1)
                         .or_insert(1)
                         .clone();
                     if n > max_repeats {
+                        let tool_result_msg = format!(
+                            "[LOOP DETECTED] You have called `{}` with these exact \
+                             arguments {} time(s). The result will not change. \
+                             Stop repeating — try a completely different approach \
+                             or call a different tool.",
+                            name, n
+                        );
                         session.history.lock().push(json!({
                             "role": "tool",
                             "tool_call_id": id,
                             "content": serde_json::to_string(&json!({
-                                "result": format!(
-                                    "[LOOP DETECTED] You have called `{}` with these exact \
-                                     arguments {} time(s). The result will not change. \
-                                     Stop repeating — try a completely different approach \
-                                     or call a different tool.",
-                                    name, n
-                                )
+                                "result": tool_result_msg
                             })).unwrap_or_default()
                         }));
+                        // After 3 loop-blocked calls to the same tool, inject a
+                        // [SYSTEM] user message. Tool results have low steering
+                        // weight at small quants; a user-role message breaks the
+                        // generation pattern and names the exact tools to use.
+                        if n == max_repeats + 3 {
+                            let contract_hint = if itsy::settings::get().contract {
+                                " You are under a contract — call `contract_status` \
+                                  to see pending assertions, then `mark_assertion` \
+                                  for each one, then `close_contract`."
+                            } else {
+                                ""
+                            };
+                            session.history.lock().push(json!({
+                                "role": "user",
+                                "content": format!(
+                                    "[SYSTEM] You are stuck in a loop calling `{name}`. \
+                                     That tool is now DISABLED for this session — further \
+                                     calls will be silently dropped.{contract_hint} \
+                                     Pick a different tool and make progress."
+                                )
+                            }));
+                        }
                         consecutive_blocks += 1;
                         if consecutive_blocks >= MAX_CONSECUTIVE_BLOCKS {
                             break;
@@ -1412,6 +1462,21 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     *session.total_mutating_calls.lock() += 1;
                     if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
                         edited_files.push(p.to_string());
+                        // Signal that a subsequent read_file on this path is
+                        // legitimate — reset its loop counter so the agent can
+                        // re-read after patching.
+                        session.mutated_paths.lock().insert(p.to_string());
+                    }
+                    // Reset all bash loop counters after any successful mutation.
+                    // The model legitimately runs the same verify command after each
+                    // edit cycle (patch → coqc → patch → coqc …); only consecutive
+                    // bash calls with no mutation in between indicate a stuck loop.
+                    {
+                        let keys: Vec<String> = session.bash_loop_keys.lock().drain().collect();
+                        let mut counts = session.tool_repeat_counts.lock();
+                        for k in keys {
+                            counts.remove(&k);
+                        }
                     }
                 }
 
@@ -2867,6 +2932,8 @@ fn build_session(config: Config, flags: Flags, cwd: PathBuf, mcp_bridge: Arc<Mcp
         current_tool_category: Arc::new(Mutex::new(None)),
         fullscreen: Arc::new(Mutex::new(None)),
         tool_repeat_counts: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        mutated_paths: Arc::new(Mutex::new(std::collections::HashSet::new())),
+        bash_loop_keys: Arc::new(Mutex::new(std::collections::HashSet::new())),
         readonly_turn_count: Arc::new(Mutex::new(0)),
         total_mutating_calls: Arc::new(Mutex::new(0)),
     }

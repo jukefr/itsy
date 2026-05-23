@@ -235,6 +235,13 @@ async fn exec_patch(args: &Value, cwd: &Path, ctx: &ExecCtx<'_>) -> Value {
     if !safe.full_path.exists() {
         return json!({"error": format!("File not found: {path}")});
     }
+    let guard = get_read_tracker().check_write(&safe.full_path, cwd);
+    if !guard.ok {
+        return json!({"error": guard.reason.unwrap_or_else(|| format!(
+            "patch rejected: '{path}' was modified since you last read it. \
+             Call read_file first to see the current content before patching."
+        ))});
+    }
     let old_str = args.get("old_str").and_then(|v| v.as_str()).unwrap_or("");
     let new_str = args.get("new_str").and_then(|v| v.as_str()).unwrap_or("");
     let content = match fs::read_to_string(&safe.full_path) {
