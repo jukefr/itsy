@@ -45,7 +45,6 @@ use itsy::session::references::{format_references_for_prompt, resolve_references
 use itsy::session::tokens::TokenTracker;
 use itsy::token_monitor::{CallMetadata, TokenMonitor};
 use itsy::tools::{get_all_tools, ToolDeps};
-use itsy::tools_impl::dedup::ToolDedup;
 use itsy::tools_impl::test_runner;
 use itsy::trace_recorder::TraceRecorder;
 use itsy::tui;
@@ -172,7 +171,6 @@ struct AgentSession {
     scorer: Arc<Mutex<ToolScorer>>,
     verification: Arc<Mutex<VerificationHistory>>,
     early_stop: Arc<Mutex<EarlyStopDetector>>,
-    dedup: Arc<Mutex<ToolDedup>>,
     trace: Arc<Mutex<TraceRecorder>>,
     skills: Arc<Mutex<SkillManager>>,
     plugins: Arc<Mutex<PluginLoader>>,
@@ -1365,11 +1363,6 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     }
                 }
 
-                // Dedup lookup. Mirrors upstream:
-                //   let cached = dedup.lookup(name, args);
-                //   if (cached) result = cached;
-                //   else { result = await execute(...); dedup.record(...); }
-                let cached = session.dedup.lock().lookup(&name, &args);
                 let started = Instant::now();
                 let fs_handle = session.fullscreen.lock().clone();
                 if let Some(fs) = &fs_handle {
@@ -1378,21 +1371,16 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     println!("{}", tui::tool_start(&name));
                 }
 
-                let result = match cached {
-                    Some(c) => itsy::tools_impl::dedup::mark_cached(c),
-                    None => {
-                        let ctx = ExecCtx {
-                            config: &session.config.lock().clone(),
-                            flags: &session.flags,
-                            memory: session.memory.clone(),
-                            mcp_bridge: Some(session.mcp_bridge.clone()),
-                            mcp_client: None,
-                            fullscreen: fs_handle.clone(),
-                        };
-                        let r = execute_tool(&name, args.clone(), &ctx).await;
-                        session.dedup.lock().record(&name, &args, &r);
-                        r
-                    }
+                let result = {
+                    let ctx = ExecCtx {
+                        config: &session.config.lock().clone(),
+                        flags: &session.flags,
+                        memory: session.memory.clone(),
+                        mcp_bridge: Some(session.mcp_bridge.clone()),
+                        mcp_client: None,
+                        fullscreen: fs_handle.clone(),
+                    };
+                    execute_tool(&name, args.clone(), &ctx).await
                 };
 
                 let elapsed_ms = started.elapsed().as_millis() as u64;
@@ -2846,7 +2834,6 @@ fn build_session(config: Config, flags: Flags, cwd: PathBuf, mcp_bridge: Arc<Mcp
     let scorer = Arc::new(Mutex::new(ToolScorer::new()));
     let verification = Arc::new(Mutex::new(VerificationHistory::default()));
     let early_stop = Arc::new(Mutex::new(EarlyStopDetector::new()));
-    let dedup = Arc::new(Mutex::new(ToolDedup::new()));
     let trace = Arc::new(Mutex::new(TraceRecorder::new(cwd.clone())));
 
     let mut skills = SkillManager::with_project_dir(&cwd);
@@ -2872,7 +2859,6 @@ fn build_session(config: Config, flags: Flags, cwd: PathBuf, mcp_bridge: Arc<Mcp
         scorer,
         verification,
         early_stop,
-        dedup,
         trace,
         skills,
         plugins,
