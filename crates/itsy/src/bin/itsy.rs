@@ -1129,6 +1129,10 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
         // 7a) Model emitted tool calls → execute them.
         if !tool_calls.is_empty() {
             let mut batch_had_mutating = false;
+            // Contract-lifecycle calls (mark_assertion, close_contract, etc.)
+            // count as meaningful forward progress — don't accumulate toward
+            // the readonly-turn nudge threshold.
+            let mut batch_had_contract_progress = false;
             // Widen the tool set on subsequent calls unless the model picked a
             // category via select_category (in which case it'll set it below).
             let first_tool_name = tool_calls
@@ -1235,6 +1239,9 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                         | "contract_status"
                         | "close_contract"
                 );
+                if is_contract_tool {
+                    batch_had_contract_progress = true;
+                }
                 // Gate fires for any task type EXCEPT pure-explanation —
                 // those don't produce mutating side effects anyway.
                 // (Earlier we matched only a whitelist of action tasks
@@ -1898,7 +1905,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             // No-progress nudge within a single handle_turn: fires when the
             // model has made N consecutive tool-call batches with no mutating
             // calls. Tight threshold (2) before the first edit; looser (6) after.
-            if !batch_had_mutating {
+            if !batch_had_mutating && !batch_had_contract_progress {
                 let count = {
                     let mut c = session.readonly_turn_count.lock();
                     *c += 1;
@@ -1925,7 +1932,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                         )
                     }));
                 }
-            } else {
+            } else if batch_had_contract_progress {
                 *session.readonly_turn_count.lock() = 0;
             }
 
