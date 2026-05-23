@@ -121,11 +121,12 @@ class ItsyAgent(BaseInstalledAgent):
             # thinking unless max_output_tokens > thinking_budget.
             "--thinking-budget=8000",
             # Safeguards on by default — cheap and catch patch/bash/
-            # write_guard pitfalls. Disable the expensive extras
-            # (reviewer / chain / clarifier).
+            # write_guard pitfalls. Disable extras that have no upstream
+            # equivalent (reviewer, chain, clarifier, contract).
             "--set=features.reviewer=false",
             "--set=features.chain=false",
             "--set=features.clarifier=false",
+            "--set=features.contract=false",
         ]
         cmd = (
             f"mkdir -p /tmp/itsy-home /logs/agent && "

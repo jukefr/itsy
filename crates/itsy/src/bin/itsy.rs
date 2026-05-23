@@ -2058,7 +2058,8 @@ fn print_tool_result(name: &str, result: &Value, elapsed_ms: u64, verbose: bool)
         if verbose {
             println!("{out}");
         } else {
-            println!("  {}", tui::tool_success(&truncate_short(out, 80), elapsed_ms));
+            let summary = out.lines().next().unwrap_or(out).trim_end_matches(':');
+            println!("  {}", tui::tool_success(&truncate_short(summary, 80), elapsed_ms));
         }
     } else {
         println!("  {}", tui::tool_success("", elapsed_ms));
