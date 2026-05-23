@@ -310,9 +310,11 @@ pub fn run_validation(file_path: &str) -> Option<ValidationOutcome> {
 ///     injects a compact project summary (runtime, build/test commands, entry
 ///     point) so the model doesn't burn tool calls on discovery. Marked
 ///     UNVERIFIED until ported or confirmed not needed.
-///   - `taskType !== 'explanation'` guard and BoneScript backend hint omitted
-///     — these are JS-only feature gates not yet ported.
-/// ACCIDENTAL (fixed in this commit):
+///   - BoneScript `backend` task hint omitted — `bone_check`/`bone_compile`
+///     tools are not implemented in itsy; including the hint would cause the
+///     model to call non-existent tools.
+///   - `taskType !== 'explanation'` guard kept (matches upstream).
+/// ACCIDENTAL (fixed in 3322058):
 ///   - Previous port had verbose IMPORTANT headers and bullet lists instead of
 ///     upstream's compact single-paragraph Rules line. Verbose prompts degrade
 ///     small-model behaviour — the model reads more text and acts less.
@@ -360,13 +362,6 @@ pub fn build_system_prompt(
              Use list_projects for workspace overview.",
         );
     }
-    if task_type == "backend" {
-        prompt.push_str(
-            "\n\nFor Node.js backends: write a .bone file → bone_check → bone_compile. \
-             Don't hand-write routes.",
-        );
-    }
-
     prompt.push_str(memory_context);
     prompt.push_str(skill_context);
     prompt.push_str(plugin_context);
