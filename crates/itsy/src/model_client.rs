@@ -65,11 +65,14 @@ pub async fn chat_completion(ctx: &ChatContext<'_>) -> Option<Value> {
     let tokens = crate::model::thinking_budget::thinking_budget(task, 0);
 
     // max_tokens. Upstream uses a fixed 4096, but that's not enough
-    // headroom for thinking models (Qwen3 needs 8k thinking + content
-    // = ~9k). We use `tokens + 1024` to scale with the configured
-    // thinking budget; mirrors upstream's intent (give the model
-    // enough room) while staying compatible with non-thinking models
-    // (when tokens=0, we get 4096 — the JS default).
+    // headroom for thinking models. With a thinking_budget of N, the
+    // model can spend up to N tokens on reasoning; we need additional
+    // room for the actual response (tool call args or text). +4096 gives
+    // enough room for a write_file with a 200-line file (~3000 tokens).
+    // +1024 was too tight — bench runs with --thinking-budget=8000 would
+    // hit finish_reason:length mid-thinking, producing zero tool calls.
+    // Non-thinking models: tokens=0 → max(0+4096, 4096) = 4096 (same as
+    // upstream's fixed value).
     //
     // INTENTIONAL deviation from upstream: necessary for thinking
     // models like Qwen3; without it, the model overflows its budget
@@ -78,7 +81,7 @@ pub async fn chat_completion(ctx: &ChatContext<'_>) -> Option<Value> {
     let max_tokens = if explicit_cap > 0 {
         explicit_cap
     } else {
-        tokens.saturating_add(1024).max(4096)
+        tokens.saturating_add(4096).max(4096)
     };
 
     let client = reqwest::Client::builder()
