@@ -55,6 +55,25 @@ The five things you'll change between runs:
 | Concurrent trials | `--n-concurrent N` (keep at 1 if `llama-server --parallel 1`) |
 | Output dir | `--jobs-dir` + `--job-name` |
 
+## Memory safety — MANDATORY after every task
+
+**After each task completes, before starting the next one:**
+
+```bash
+free -h                                          # available should be >8 GiB
+docker ps --format '{{.Names}}\t{{.Status}}'    # kill anything stale (up >30 min that isn't the current trial)
+```
+
+Kill any container that has been running for more than 30 minutes and is NOT the current active trial:
+
+```bash
+docker ps --format '{{.Names}}\t{{.RunningFor}}' | awk '$2+0 > 30 {print $1}' | xargs -r docker rm -f
+```
+
+If available RAM drops below 4 GiB, **stop the job immediately**, identify and kill the memory hog, confirm the system recovers before continuing. Do NOT keep launching trials into a swapping system — it hard-freezes the host.
+
+**Root cause of the 2026-05-23 incident:** Three harbor jobs run in background (fix-git-itsy-5x, break-filter-itsy-5x, cobol-itsy-5x-v2) left their Docker containers running after completing because the harbor process was killed by context compression. Each container held ~10 GiB. Combined with the running job and llama-server, the system OOM'd and required a hard reboot.
+
 ## Prerequisites
 
 Verify these before launching. The skill should NOT proceed silently if

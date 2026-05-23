@@ -123,6 +123,8 @@ class ItsyAgent(BaseInstalledAgent):
             # Safeguards on by default — cheap and catch patch/bash/
             # write_guard pitfalls. Disable extras that have no upstream
             # equivalent (reviewer, chain, clarifier, contract).
+            # contract experiment (prove-plus-comm 3/5→3/4) showed no
+            # improvement; keep disabled to reduce overhead.
             "--set=features.reviewer=false",
             "--set=features.chain=false",
             "--set=features.clarifier=false",
