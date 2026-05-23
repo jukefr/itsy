@@ -119,7 +119,7 @@ class ItsyAgent(BaseInstalledAgent):
             "--request-timeout-ms=600000",
             # Reasoning headroom — IQ2_XXS will exhaust output budget on
             # thinking unless max_output_tokens > thinking_budget.
-            "--thinking-budget=8000",
+            "--thinking-budget=1024",
             # Safeguards on by default — cheap and catch patch/bash/
             # write_guard pitfalls. Disable extras that have no upstream
             # equivalent (reviewer, chain, clarifier, contract).

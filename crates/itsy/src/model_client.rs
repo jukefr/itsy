@@ -151,6 +151,26 @@ pub async fn chat_completion(ctx: &ChatContext<'_>) -> Option<Value> {
         // No behaviour change; just observability.
         crate::model::chat_log::record(&body, &value, attempt);
 
+        // Log thinking token usage so we can verify the budget cap is honored.
+        // llama-server puts thinking in reasoning_content (not completion_tokens_details).
+        {
+            let completion = value
+                .pointer("/usage/completion_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let thinking_chars = value
+                .pointer("/choices/0/message/reasoning_content")
+                .and_then(|v| v.as_str())
+                .map(|s| s.len())
+                .unwrap_or(0);
+            if thinking_chars > 0 {
+                let thinking_est = thinking_chars / 4; // rough chars-to-tokens estimate
+                eprintln!(
+                    "  \x1b[90m[tokens] completion={completion} thinking~{thinking_est} ({thinking_chars}chars)\x1b[0m"
+                );
+            }
+        }
+
         return Some(value);
     }
 }

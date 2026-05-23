@@ -182,6 +182,19 @@ struct AgentSession {
     current_tool_category: Arc<Mutex<Option<String>>>,
     /// Active fullscreen renderer (Some when running ratatui REPL).
     fullscreen: Arc<Mutex<Option<Arc<itsy::fullscreen::Fullscreen>>>>,
+    /// Cross-turn identical-call loop detection counters.
+    /// Keyed by sha256(tool_name + args_json)[..16]. Never reset between
+    /// turns — that's the whole point: the model can't escape the guard by
+    /// spreading repeated calls across turns.
+    tool_repeat_counts: Arc<Mutex<std::collections::HashMap<String, u32>>>,
+    /// Counts consecutive turns where no mutating tool (patch, write_file,
+    /// create_file, move_file, delete_file) was called. Resets on any mutating
+    /// call. When it reaches READONLY_TURN_THRESHOLD we inject a nudge.
+    readonly_turn_count: Arc<Mutex<u32>>,
+    /// Total mutating tool calls ever made this session. Used to pick the
+    /// right nudge threshold: tight (2) before first edit to prevent
+    /// overthinking, looser (6) after the model has started working.
+    total_mutating_calls: Arc<Mutex<u32>>,
 }
 
 // ── Helpers: estimation & history compaction ─────────────────────────────────
@@ -688,6 +701,10 @@ fn build_contract_active_prompt(
         {body}\n\
         \n\
         How to work:\n\
+        - ONE tool call per response. Reason only about the immediate next step — not the full solution.\n\
+        - After each tool call, stop. Wait for the result. Then decide the next single action.\n\
+        - Focus on the FIRST pending assertion. Ignore the others for now.\n\
+        - Look at the most recent tool result. What is the single most direct action to move toward passing it?\n\
         - Do the work for each pending assertion (write_file / patch / bash — all available now).\n\
         - When you've verified an assertion, call `mark_assertion` with:\n\
             id          the assertion id (A.001, A.002, …)\n\
@@ -712,6 +729,7 @@ fn build_contract_active_prompt(
 async fn handle_turn(prompt_in: &str, session: &AgentSession) {
     // Reset early-stop bookkeeping for a fresh turn.
     session.early_stop.lock().new_turn();
+
 
     // Trace recording: start a fresh trace for this turn.
     {
@@ -954,6 +972,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
     let mut tool_calls_this_turn: u32 = 0;
     let max_tool_calls_this_turn = max_tool_calls_per_turn();
     let mut edited_files: Vec<String> = Vec::new();
+    let mut had_mutating_call = false;
     let mut improvement_attempts: std::collections::HashMap<String, u32> = Default::default();
     // Per-turn "you've already called this" counter, keyed by a hash of
     // (tool_name, args). Catches identical mutating calls (like `rm -rf X`
@@ -967,6 +986,12 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
     // Tracks idempotent write tool calls seen this turn (tool_name + arg hash).
     // memory_remember with the same args twice = nop; return early to break spirals.
     let mut per_turn_write_seen: std::collections::HashSet<String> = Default::default();
+    // Counts consecutive loop-blocked tool calls in the current turn batch.
+    // When this hits MAX_CONSECUTIVE_BLOCKS we break out of the inner loop
+    // early so the model doesn't receive a wall of N identical rejections,
+    // which would trigger a very long thinking chain on the next turn.
+    let mut consecutive_blocks: u32 = 0;
+    const MAX_CONSECUTIVE_BLOCKS: u32 = 2;
     let mut current_category: Option<String> = stage2_category;
 
     // Reset any pending Ctrl+C presses from earlier turns; the user starts
@@ -1091,6 +1116,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
 
         // 7a) Model emitted tool calls → execute them.
         if !tool_calls.is_empty() {
+            let mut batch_had_mutating = false;
             // Widen the tool set on subsequent calls unless the model picked a
             // category via select_category (in which case it'll set it below).
             let first_tool_name = tool_calls
@@ -1243,39 +1269,70 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     );
                 }
 
-                // Bash repeat-spiral defense: if the model issues the same
-                // bash command more than MAX_BASH_REPEATS times in a turn,
-                // short-circuit execution and return a hard warning instead.
-                // Intentionally does NOT reset — the old BREAK_ON_REPEAT
-                // reset to 0 after N, creating a 5-on/1-abort cycle. Here
-                // the counter only goes up, so the warning fires on every
-                // call after the threshold.
-                if name == "bash" {
-                    if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
-                        use sha2::{Digest, Sha256};
-                        let mut h = Sha256::new();
-                        h.update(cmd.as_bytes());
-                        let hash = format!("{:x}", h.finalize());
-                        let repeat_key = format!("__bash_repeat_{}", &hash[..16]);
-                        const MAX_BASH_REPEATS: u32 = 3;
-                        let n = per_turn_repeats
-                            .entry(repeat_key)
-                            .and_modify(|n| *n += 1)
-                            .or_insert(1);
-                        if *n > MAX_BASH_REPEATS {
+                // General identical-call loop detection: covers ALL tools.
+                // Hash (tool_name + canonical args JSON) and block after N
+                // identical calls. Uses session-scoped counter that persists
+                // across turns — the model cannot escape by spreading
+                // repeated calls across turns.
+                // read_file/graph_search get a higher threshold (5) since
+                // re-reading is more forgiving; everything else gets 3.
+                {
+                    use sha2::{Digest, Sha256};
+                    let args_str = serde_json::to_string(&args).unwrap_or_default();
+                    let key = format!("{}{}", name, args_str);
+                    let mut h = Sha256::new();
+                    h.update(key.as_bytes());
+                    let hash = format!("{:x}", h.finalize());
+                    let repeat_key = format!("__tool_repeat_{}", &hash[..16]);
+                    let max_repeats: u32 = match name.as_str() {
+                        "read_file" | "graph_search" => 5,
+                        _ => 3,
+                    };
+                    let n = session.tool_repeat_counts.lock()
+                        .entry(repeat_key)
+                        .and_modify(|n| *n += 1)
+                        .or_insert(1)
+                        .clone();
+                    if n > max_repeats {
+                        session.history.lock().push(json!({
+                            "role": "tool",
+                            "tool_call_id": id,
+                            "content": serde_json::to_string(&json!({
+                                "result": format!(
+                                    "[LOOP DETECTED] You have called `{}` with these exact \
+                                     arguments {} time(s). The result will not change. \
+                                     Stop repeating — try a completely different approach \
+                                     or call a different tool.",
+                                    name, n
+                                )
+                            })).unwrap_or_default()
+                        }));
+                        consecutive_blocks += 1;
+                        if consecutive_blocks >= MAX_CONSECUTIVE_BLOCKS {
+                            break;
+                        }
+                        continue;
+                    }
+                }
+
+                // Patch blocked-file check: if this file was stuck-blocked
+                // during a patch spiral, hard-reject any further patch calls
+                // on it before execution.
+                if name == "patch" || name == "read_and_patch" {
+                    if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                        if let Some(signal) = session.early_stop.lock().check_patch_blocked(path) {
+                            println!("  \x1b[33m⚡ {}\x1b[0m", signal.message);
                             session.history.lock().push(json!({
                                 "role": "tool",
                                 "tool_call_id": id,
                                 "content": serde_json::to_string(&json!({
-                                    "result": format!(
-                                        "[LOOP DETECTED] You have run this exact command {} \
-                                         time(s) already. The output will not change. \
-                                         Stop repeating it — try a completely different approach \
-                                         or call a different tool.",
-                                        *n
-                                    )
+                                    "result": signal.injection
                                 })).unwrap_or_default()
                             }));
+                            consecutive_blocks += 1;
+                            if consecutive_blocks >= MAX_CONSECUTIVE_BLOCKS {
+                                break;
+                            }
                             continue;
                         }
                     }
@@ -1351,10 +1408,15 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     elapsed_ms,
                 );
 
-                // Track edited files.
-                if (name == "write_file" || name == "patch")
-                    && result.get("error").is_none()
-                {
+                // Track edited files and reset readonly-turn counter on any mutating call.
+                const MUTATING_TOOLS: &[&str] = &[
+                    "write_file", "patch", "read_and_patch", "create_file",
+                    "move_file", "delete_file", "append_file",
+                ];
+                if MUTATING_TOOLS.contains(&name.as_str()) && result.get("error").is_none() {
+                    had_mutating_call = true;
+                    batch_had_mutating = true;
+                    *session.total_mutating_calls.lock() += 1;
                     if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
                         edited_files.push(p.to_string());
                     }
@@ -1374,6 +1436,17 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                             .and_then(|v| v.as_str())
                             .unwrap_or("unknown");
                         s.record_failure(&name, task_type, err);
+                    }
+                }
+
+                // A successful (non-blocked) tool execution resets the
+                // consecutive-block counter — the model has done something real.
+                consecutive_blocks = 0;
+
+                // Successful read_file unblocks the file for patching.
+                if name == "read_file" && result.get("error").is_none() {
+                    if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                        session.early_stop.lock().record_read(path);
                     }
                 }
 
@@ -1764,6 +1837,40 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     improvement_attempts.insert("__bash".into(), 0);
                 }
             }
+            // No-progress nudge within a single handle_turn: fires when the
+            // model has made N consecutive tool-call batches with no mutating
+            // calls. Tight threshold (2) before the first edit; looser (6) after.
+            if !batch_had_mutating {
+                let count = {
+                    let mut c = session.readonly_turn_count.lock();
+                    *c += 1;
+                    *c
+                };
+                let total_mutations = *session.total_mutating_calls.lock();
+                let threshold = if total_mutations == 0 { 3u32 } else { 6u32 };
+                if count >= threshold {
+                    *session.readonly_turn_count.lock() = 0;
+                    println!(
+                        "  \x1b[33m⚠ no-progress nudge: {} read-only batches — pushing model to act\x1b[0m",
+                        count
+                    );
+                    session.history.lock().push(json!({
+                        "role": "user",
+                        "content": format!(
+                            "[SYSTEM] You have spent {} consecutive rounds reading files \
+                             without making any changes. You already have enough information. \
+                             STOP reading — make a concrete edit RIGHT NOW. Call patch or \
+                             write_file to modify a file. Do not call read_file, bash, \
+                             graph_search, or any other read-only tool until you have made \
+                             at least one actual change.",
+                            count
+                        )
+                    }));
+                }
+            } else {
+                *session.readonly_turn_count.lock() = 0;
+            }
+
             // Loop back to chat_completion — model may want to call more tools.
             continue;
         }
@@ -2059,6 +2166,17 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
     if itsy::settings::get().contract {
         if let Some(c) = itsy::session::contract::current() {
             println!("{}", tui::render_contract(&c));
+        }
+    }
+
+    // Update readonly-turn counter. Resets when any mutating call succeeded;
+    // increments otherwise so the next turn's nudge threshold check is current.
+    {
+        let mut count = session.readonly_turn_count.lock();
+        if had_mutating_call {
+            *count = 0;
+        } else {
+            *count += 1;
         }
     }
 
@@ -2485,6 +2603,9 @@ fn build_session(config: Config, flags: Flags, cwd: PathBuf, mcp_bridge: Arc<Mcp
         cwd,
         current_tool_category: Arc::new(Mutex::new(None)),
         fullscreen: Arc::new(Mutex::new(None)),
+        tool_repeat_counts: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        readonly_turn_count: Arc::new(Mutex::new(0)),
+        total_mutating_calls: Arc::new(Mutex::new(0)),
     }
 }
 

@@ -1,7 +1,7 @@
 //! Detects repetition loops, patch
 //! spirals, and greeting regression in streamed model output.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone)]
 pub struct StopSignal {
@@ -19,6 +19,10 @@ pub struct EarlyStopDetector {
     pub enable_greeting_detection: bool,
     patch_failures: HashMap<String, u32>,
     patch_attempts: HashMap<String, u32>,
+    /// Files blocked from patching after a stuck spiral.
+    /// Cleared when the model successfully reads the file — forces
+    /// re-read before re-patch rather than a permanent session ban.
+    patch_blocked_files: HashSet<String>,
 }
 
 impl EarlyStopDetector {
@@ -31,7 +35,26 @@ impl EarlyStopDetector {
             enable_greeting_detection: true,
             patch_failures: HashMap::new(),
             patch_attempts: HashMap::new(),
+            patch_blocked_files: HashSet::new(),
         }
+    }
+
+    /// Returns a hard error if this file has been permanently blocked after
+    /// a patch spiral. Call this BEFORE executing a patch tool call.
+    pub fn check_patch_blocked(&self, file_path: &str) -> Option<StopSignal> {
+        if !self.patch_blocked_files.contains(file_path) {
+            return None;
+        }
+        Some(StopSignal {
+            reason: "patch_blocked",
+            message: format!("Patch on {file_path} blocked — file was stuck-patched earlier."),
+            action: "hard_block",
+            injection: format!(
+                "[LOOP DETECTED] patch on '{file_path}' is blocked. You already failed repeatedly \
+                 on this file and were told to stop. Do NOT call patch on this file again. \
+                 Use a completely different tool or target a different file."
+            ),
+        })
     }
 
     pub fn check_repetition(&self, buffer: &str) -> Option<StopSignal> {
@@ -90,6 +113,7 @@ impl EarlyStopDetector {
         if fail_count >= self.max_patch_failures || total_attempts >= 6 {
             self.patch_failures.remove(file_path);
             self.patch_attempts.remove(file_path);
+            self.patch_blocked_files.insert(file_path.to_string());
             return Some(StopSignal {
                 reason: "patch_spiral",
                 message: format!("Patch stuck on {file_path} ({fail_count} failures, {total_attempts} attempts). Switching to rewrite."),
@@ -130,9 +154,16 @@ impl EarlyStopDetector {
         })
     }
 
+    /// Call after a successful read_file — unblocks the file for patching.
+    pub fn record_read(&mut self, file_path: &str) {
+        self.patch_blocked_files.remove(file_path);
+    }
+
     pub fn new_turn(&mut self) {
         self.patch_failures.clear();
         self.patch_attempts.clear();
+        // patch_blocked_files intentionally NOT cleared across turns — the
+        // block lifts only after a successful read_file on the same file.
     }
 }
 

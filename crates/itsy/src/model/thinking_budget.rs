@@ -122,6 +122,8 @@ pub fn apply_thinking_budget(body: &mut Value, base_url: &str, tokens: u32, disa
     // Qwen / llama.cpp local-only fields. Inserted under
     // `chat_template_kwargs` so the local server can forward them to the
     // chat template. Also set flat `enable_thinking` for older servers.
+    // `thinking_budget_tokens` is the flat per-request cap that llama-server
+    // reads directly (without needing --reasoning-budget set at CLI level).
     if is_local_llama_cpp && is_reasoning_model {
         let kwargs = body_obj
             .entry("chat_template_kwargs".to_string())
@@ -133,6 +135,9 @@ pub fn apply_thinking_budget(body: &mut Value, base_url: &str, tokens: u32, disa
             }
         }
         body_obj.insert("enable_thinking".to_string(), json!(!disable));
+        if !disable {
+            body_obj.insert("thinking_budget_tokens".to_string(), json!(tokens));
+        }
     }
 }
 
