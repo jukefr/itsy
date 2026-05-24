@@ -132,6 +132,30 @@ cloud escalation is enabled.
 The `version` field is honoured on load and older files get migrated
 forward automatically. Don't remove it.
 
+## Benchmark
+
+Scored against [terminal-bench-2](https://github.com/harbor-framework/terminal-bench-2) — 11 tasks,
+Qwen3.6-35B IQ2_XXS, n-concurrent=1. Compared against
+[smallcode](https://github.com/smallcode-ai/smallcode) (JS agent, same model, same endpoint).
+
+| Task | smallcode 5× | itsy (current) |
+|---|---|---|
+| fix-git | 80% | **100%** |
+| multi-source-data-merger | 100% | **100%** |
+| git-leak-recovery | 100% | **100%** |
+| pypi-server | 100% | **100%** |
+| cobol-modernization | 80% | **100%** |
+| kv-store-grpc | 40% | **100%** |
+| prove-plus-comm | 60% | 67% |
+| regex-log | 0% | **67%** |
+| break-filter-js-from-html | 0% | 0% |
+| filter-js-from-html | 0% | 0% |
+| overfull-hbox | 0% | 0% |
+| **Overall** | **50.9%** | **65.5%** |
+
+The three tasks both agents score 0% on (break-filter, filter-js, overfull-hbox) are
+model-capability failures at IQ2 quant — neither agent solves them regardless of framework.
+
 ## License
 
 MIT — see `LICENSE`.
