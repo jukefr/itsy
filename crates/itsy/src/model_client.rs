@@ -589,17 +589,10 @@ pub fn build_system_prompt(
     let cwd = std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
 
     let mut prompt = format!(
-        "You are itsy, a coding agent. Working directory: {cwd}\n\
-         OS: {os}{os_hint}\n\n\
-         Rules: Use patch for edits (not full rewrites). Prefer compound tools. Be concise. \
-         ACT immediately — do not ask for confirmation unless the task is genuinely ambiguous. \
-         If asked to read a file, read it. If asked to create something, create it. \
-         If asked about the project, read README.md or relevant files.\n\n\
-         CRITICAL — large file rule: write_file calls are limited to 60 lines / ~8KB. \
-         llama.cpp's JSON parser crashes on larger tool calls. For any file over 60 lines: \
-         (1) write_file with just the skeleton (imports + empty stubs), then \
-         (2) use multiple patch calls to fill in each function/section. \
-         Never put more than 60 lines in a single write_file content field."
+        include_str!("assets/prompts/system.txt"),
+        cwd = cwd,
+        os = os,
+        os_hint = os_hint,
     );
 
     let task_type = current_task_type.unwrap_or("");

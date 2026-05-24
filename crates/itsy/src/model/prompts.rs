@@ -128,36 +128,18 @@ pub fn build_contract_proposal_prompt(cwd_path: &Path, cwd: &str) -> String {
     };
     let verification = contract_verification_guidance(cwd_path);
     format!(
-        "You are itsy, working in CONTRACT mode. Working directory: {cwd}.{model_line}\n\
-        \n\
-        YOUR FIRST ACTION MUST BE `propose_contract`. No exceptions, no exploration first.\n\
-        \n\
-        A contract is the definition of done for the user's task. It is 2–6 short, testable assertions \
-        — each one a single thing you can later prove with a shell command:\n\
-        \n\
-          GOOD:  \"the file /app/regex.txt exists\"\n\
-          GOOD:  \"running `python3 /tmp/check.py` exits 0\"\n\
-          GOOD:  \"`pytest /tests/test_outputs.py -q` reports 3 passed\"\n\
-          BAD:   \"the code is correct\"          (not testable)\n\
-          BAD:   \"the implementation is complete\" (not testable)\n\
-          BAD:   \"all tests pass\"              (vague — which tests?)\n\
-        {verification}\
-        Until propose_contract returns, NO other tools are available. \
-        `write_file`, `patch`, mutating `bash`, etc. will refuse. \
-        Read-only tools (read_file, search) are available but you should not need them — \
-        you're not exploring, you're stating what 'done' means.\n\
-        \n\
-        Skip the planning preamble. Skip the analysis. Emit `propose_contract` now with:\n\
-        - title:       short human title for the task\n\
-        - brief:       1–2 sentences describing the work\n\
-        - assertions:  array of {{id, text}} — pick 2–6\n\
-        \n\
-        After it returns the toolkit opens up and you can do the work.\n",
+        include_str!("../assets/prompts/contract_proposal.txt"),
+        cwd = cwd,
+        model_line = model_line,
+        verification = verification,
     )
 }
 
 /// Contract-mode prompt for turn 2+ (contract is active). The
 /// assertions and their current states ARE the prompt.
+/// Assemble the full per-call system prompt. Builds the contract-shaped prompt
+/// when the contract feature is active, otherwise layers memory, skills,
+/// plugins, knowledge, code-graph hits, test-runner hints, and tool guidance
 pub fn build_contract_active_prompt(
     c: &crate::session::contract::Contract,
     cwd_path: &Path,
@@ -172,28 +154,11 @@ pub fn build_contract_active_prompt(
     let body = crate::session::contract::render_for_prompt(c);
     let verification = contract_verification_guidance(cwd_path);
     format!(
-        "You are itsy, working under an active contract. Working directory: {cwd}.{model_line}\n\
-        \n\
-        {body}\n\
-        {verification}\
-        \n\
-        How to work:\n\
-        - ONE tool call per response. Reason only about the immediate next step — not the full solution.\n\
-        - After each tool call, stop. Wait for the result. Then decide the next single action.\n\
-        - Focus on the FIRST pending assertion. Ignore the others for now.\n\
-        - Look at the most recent tool result. What is the single most direct action to move toward passing it?\n\
-        - Do the work for each pending assertion (write_file / patch / bash — all available now).\n\
-        - Prefer the repo's own tests / verifier scripts over ad-hoc samples whenever they exist.\n\
-        - When you've verified an assertion, call `mark_assertion` with:\n\
-            id          the assertion id (A.001, A.002, …)\n\
-            state       \"passed\" / \"failed\" / \"skipped\"\n\
-            evidence    one-sentence summary of how you verified\n\
-            command     (recommended for passed) the shell command you ran\n\
-            exit_code   the exit code\n\
-            observation the actual output you saw — NOT \"OK\" or \"passed\"\n\
-        - When every assertion is `passed`, call `close_contract completed` to finish.\n\
-        - `close_contract completed` is refused until every assertion is `passed`.\n\
-        - Assertions can only be `passed` or `failed` — there is no skip or abort.\n",
+        include_str!("../assets/prompts/contract_active.txt"),
+        cwd = cwd,
+        model_line = model_line,
+        body = body,
+        verification = verification,
     )
 }
 

@@ -460,6 +460,88 @@ impl TurnState {
         })
     }
 
+    /// Check for identical-tool call loops. Returns `GuardAction::Inject` when
+    /// the same tool with the same arguments has been called more than 3 times.
+    pub fn check_loop_detection(
+        &mut self,
+        name: &str,
+        args: &Value,
+        id: &str,
+        history: &mut Vec<Value>,
+        tool_repeat_counts: &mut std::collections::HashMap<String, u32>,
+        mutated_paths: &mut std::collections::HashSet<String>,
+        bash_loop_keys: &mut std::collections::HashSet<String>,
+    ) -> Option<GuardAction> {
+        use sha2::{Digest, Sha256};
+        let args_str = serde_json::to_string(args).unwrap_or_default();
+        let key = format!("{}{}", name, args_str);
+        let mut h = Sha256::new();
+        h.update(key.as_bytes());
+        let hash = format!("{:x}", h.finalize());
+        let repeat_key = format!("__tool_repeat_{}", &hash[..16]);
+        let max_repeats: u32 = 3;
+
+        // If this is a read_file call to a path that was mutated since last read,
+        // the file content has genuinely changed — reset the loop counter.
+        if name == "read_file" {
+            if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                if mutated_paths.remove(path) {
+                    tool_repeat_counts.remove(&repeat_key);
+                }
+            }
+        }
+
+        // Track bash loop keys so they can be cleared after mutations.
+        if name == "bash" {
+            bash_loop_keys.insert(repeat_key.clone());
+        }
+
+        let n = tool_repeat_counts
+            .entry(repeat_key)
+            .and_modify(|n| *n += 1)
+            .or_insert(1);
+        if *n <= max_repeats {
+            return None;
+        }
+
+        let msg = format!(
+            "[LOOP DETECTED] You have called `{}` with these exact \
+             arguments {} time(s). The result will not change. \
+             Stop repeating — try a completely different approach \
+             or call a different tool.",
+            name, *n
+        );
+        history.push(json!({
+            "role": "tool",
+            "tool_call_id": id,
+            "content": serde_json::to_string(&json!({"result": msg})).unwrap_or_default(),
+        }));
+
+        if *n == max_repeats + 3 {
+            let contract_hint = if crate::settings::get().contract {
+                " You are under a contract — call `contract_status` \
+                  to see pending assertions, then `mark_assertion` \
+                  for each one, then `close_contract`."
+            } else {
+                ""
+            };
+            history.push(json!({
+                "role": "user",
+                "content": format!(
+                    "[SYSTEM] You are stuck in a loop calling `{}`. \
+                     That tool is now DISABLED for this session — further \
+                     calls will be silently dropped.{contract_hint} \
+                     Pick a different tool and make progress.",
+                    name
+                ),
+            }));
+        }
+
+        Some(GuardAction::Inject {
+            message: format!("loop: {name} called {n} times with same arguments"),
+        })
+    }
+
     /// Check whether the outer turn loop should stop.
     pub fn should_stop(&self) -> bool {
         self.tool_calls_this_turn >= self.max_tool_calls

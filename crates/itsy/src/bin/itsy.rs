@@ -611,92 +611,18 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     continue;
                 }
 
-                // General identical-call loop detection: covers ALL tools.
-                // Hash (tool_name + canonical args JSON) and block after N
-                // identical calls. Uses session-scoped counter that persists
-                // across turns — the model cannot escape by spreading
-                // repeated calls across turns.
-                // Threshold is 3 for all tools. read_file gets an exemption:
-                // if the file was mutated since last read the counter is reset
-                // above, so the limit only fires on true stale re-reads.
-                {
-                    use sha2::{Digest, Sha256};
-                    let args_str = serde_json::to_string(&args).unwrap_or_default();
-                    let key = format!("{}{}", name, args_str);
-                    let mut h = Sha256::new();
-                    h.update(key.as_bytes());
-                    let hash = format!("{:x}", h.finalize());
-                    let repeat_key = format!("__tool_repeat_{}", &hash[..16]);
-                    let max_repeats: u32 = 3;
-
-                    // If this is a read_file call to a path that was mutated
-                    // since the last read, the file content has genuinely changed —
-                    // reset the loop counter so the agent can re-read it.
-                    if name == "read_file" {
-                        if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-                            if session.mutable.lock().mutated_paths.remove(path) {
-                                session.mutable.lock().tool_repeat_counts.remove(&repeat_key);
-                            }
-                        }
+                // Loop detection: block identical tool calls after 3 repeats.
+                if let Some(action) = state.check_loop_detection(
+                    &name, &args, &id, &mut session.mutable.lock().history,
+                    &mut session.mutable.lock().tool_repeat_counts,
+                    &mut session.mutable.lock().mutated_paths,
+                    &mut session.mutable.lock().bash_loop_keys,
+                ) {
+                    state.consecutive_blocks += 1;
+                    if state.consecutive_blocks >= MAX_CONSECUTIVE_BLOCKS {
+                        break;
                     }
-
-                    // Track bash loop keys so they can be cleared after mutations.
-                    // Verification commands (e.g. `coqc`, `pytest`) are legitimately
-                    // repeated after each edit cycle — only count consecutive runs
-                    // with no mutation in between.
-                    if name == "bash" {
-                        session.mutable.lock().bash_loop_keys.insert(repeat_key.clone());
-                    }
-
-                    let mut guard = session.mutable.lock();
-                    let n = guard.tool_repeat_counts
-                        .entry(repeat_key)
-                        .and_modify(|n| *n += 1)
-                        .or_insert(1)
-                        ;
-                    if *n > max_repeats {
-                        let tool_result_msg = format!(
-                            "[LOOP DETECTED] You have called `{}` with these exact \
-                             arguments {} time(s). The result will not change. \
-                             Stop repeating — try a completely different approach \
-                             or call a different tool.",
-                            name, *n
-                        );
-                        session.mutable.lock().history.push(json!({
-                            "role": "tool",
-                            "tool_call_id": id,
-                            "content": serde_json::to_string(&json!({
-                                "result": tool_result_msg
-                            })).unwrap_or_default()
-                        }));
-                        // After 3 loop-blocked calls to the same tool, inject a
-                        // [SYSTEM] user message. Tool results have low steering
-                        // weight at small quants; a user-role message breaks the
-                        // generation pattern and names the exact tools to use.
-                        if *n == max_repeats + 3 {
-                            let contract_hint = if itsy::settings::get().contract {
-                                " You are under a contract — call `contract_status` \
-                                  to see pending assertions, then `mark_assertion` \
-                                  for each one, then `close_contract`."
-                            } else {
-                                ""
-                            };
-                            session.mutable.lock().history.push(json!({
-                                "role": "user",
-                                "content": format!(
-                                    "[SYSTEM] You are stuck in a loop calling `{name}`. \
-                                     That tool is now DISABLED for this session — further \
-                                     calls will be silently dropped.{contract_hint} \
-                                     Pick a different tool and make progress."
-                                )
-                            }));
-                        }
-                        state.consecutive_blocks += 1;
-                        if state.consecutive_blocks >= MAX_CONSECUTIVE_BLOCKS {
-                            break;
-                        }
-                        continue;
-                    }
+                    continue;
                 }
 
                 // Patch blocked-file check: if this file was stuck-blocked
