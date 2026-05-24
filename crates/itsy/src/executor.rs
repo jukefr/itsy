@@ -158,7 +158,7 @@ async fn exec_write_file(args: &Value, cwd: &Path, ctx: &ExecCtx<'_>) -> Value {
         Err(e) => return json!({"error": format!("write_file rejected: {e}")}),
     };
     let tracker = get_read_tracker();
-    let guard = tracker.check_write(&safe.full_path, cwd);
+    let guard = tracker.check_write(&safe.full_path, cwd, "write_file");
     if !guard.ok {
         return json!({"error": guard.reason});
     }
@@ -235,12 +235,9 @@ async fn exec_patch(args: &Value, cwd: &Path, ctx: &ExecCtx<'_>) -> Value {
     if !safe.full_path.exists() {
         return json!({"error": format!("File not found: {path}")});
     }
-    let guard = get_read_tracker().check_write(&safe.full_path, cwd);
+    let guard = get_read_tracker().check_write(&safe.full_path, cwd, "patch");
     if !guard.ok {
-        return json!({"error": guard.reason.unwrap_or_else(|| format!(
-            "patch rejected: '{path}' was modified since you last read it. \
-             Call read_file first to see the current content before patching."
-        ))});
+        return json!({"error": guard.reason});
     }
     let old_str = args.get("old_str").and_then(|v| v.as_str()).unwrap_or("");
     let new_str = args.get("new_str").and_then(|v| v.as_str()).unwrap_or("");
@@ -338,6 +335,8 @@ async fn exec_bash(args: &Value, cwd: &Path, ctx: &ExecCtx<'_>) -> Value {
         }
     }
 
+    let marker = create_bash_marker();
+
     let persistent = crate::settings::get().shell_persist;
     if persistent {
         let shell = get_shell(ShellOptions { cwd: cwd.to_path_buf(), ..Default::default() });
@@ -345,8 +344,10 @@ async fn exec_bash(args: &Value, cwd: &Path, ctx: &ExecCtx<'_>) -> Value {
         let max_output = if ctx.config.context.detected_window < 64_000 { 1500 } else { 3000 };
         let trimmed = trim_output(&result.stdout, max_output);
         if result.timed_out {
+            if let Some(ref m) = marker { let _ = fs::remove_file(m); }
             return json!({"result": if trimmed.is_empty() { "(no output before timeout)".to_string() } else { trimmed.clone() }, "error": "Timed out (killed after 30s)", "command": command});
         }
+        if let Some(ref m) = marker { record_bash_mutations(m, cwd); let _ = fs::remove_file(m); }
         if let Some(err) = result.error {
             return json!({"result": trimmed, "error": err, "command": command});
         }
@@ -372,6 +373,7 @@ async fn exec_bash(args: &Value, cwd: &Path, ctx: &ExecCtx<'_>) -> Value {
         .output();
     match output {
         Ok(out) => {
+            if let Some(ref m) = marker { record_bash_mutations(m, cwd); let _ = fs::remove_file(m); }
             let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
             let trimmed = trim_output(&sanitize_tool_output(&combined), 3000);
             if !out.status.success() {
@@ -388,7 +390,10 @@ async fn exec_bash(args: &Value, cwd: &Path, ctx: &ExecCtx<'_>) -> Value {
                 json!({"result": if trimmed.is_empty() { "(no output)".to_string() } else { trimmed }, "command": command})
             }
         }
-        Err(e) => json!({"result": redact_string(&e.to_string()), "error": e.to_string(), "command": command}),
+        Err(e) => {
+            if let Some(ref m) = marker { let _ = fs::remove_file(m); }
+            json!({"result": redact_string(&e.to_string()), "error": e.to_string(), "command": command})
+        }
     }
 }
 
@@ -886,6 +891,47 @@ async fn exec_web_fetch(args: &Value) -> Value {
     match web_fetch(url, 5).await {
         Ok(content) => json!({"result": content}),
         Err(e) => json!({"error": e.to_string()}),
+    }
+}
+
+// ─── Bash write detection ───────────────────────────────────────────────────
+
+/// Touch a temp marker file, run `f`, then use `find -newer marker` to discover
+/// every file the bash command actually modified — regardless of how it did so.
+/// Returns the marker path; caller must clean it up.
+fn create_bash_marker() -> Option<PathBuf> {
+    let p = std::env::temp_dir().join(format!(".itsy-watch-{}", std::process::id()));
+    fs::write(&p, "").ok()?;
+    Some(p)
+}
+
+/// After a bash command completes, find all files newer than `marker` under `cwd`
+/// and mark them dirty in the read tracker so subsequent patch/write_file calls
+/// know a re-read is required.
+fn record_bash_mutations(marker: &Path, cwd: &Path) {
+    let out = Command::new("find")
+        .args([
+            cwd.as_os_str(),
+            std::ffi::OsStr::new("-newer"),
+            marker.as_os_str(),
+            std::ffi::OsStr::new("-not"),
+            std::ffi::OsStr::new("-path"),
+            std::ffi::OsStr::new("*/.git/*"),
+            std::ffi::OsStr::new("-not"),
+            std::ffi::OsStr::new("-path"),
+            std::ffi::OsStr::new("*/node_modules/*"),
+            std::ffi::OsStr::new("-type"),
+            std::ffi::OsStr::new("f"),
+        ])
+        .output();
+    if let Ok(out) = out {
+        let tracker = get_read_tracker();
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            let line = line.trim();
+            if !line.is_empty() {
+                tracker.record_write(Path::new(line), cwd);
+            }
+        }
     }
 }
 

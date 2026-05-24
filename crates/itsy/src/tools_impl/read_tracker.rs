@@ -11,6 +11,8 @@ use parking_lot::Mutex;
 pub struct ReadTracker {
     /// Files that have been read and not modified since — the only ones safe to write_file.
     clean_paths: Mutex<HashSet<PathBuf>>,
+    /// Files that have been written/patched since their last read.
+    dirty_paths: Mutex<HashSet<PathBuf>>,
     pub disabled: bool,
 }
 
@@ -26,6 +28,7 @@ impl ReadTracker {
     fn new() -> Self {
         Self {
             clean_paths: Mutex::new(HashSet::new()),
+            dirty_paths: Mutex::new(HashSet::new()),
             disabled: env::var("ITSY_WRITE_GUARD").ok().as_deref() == Some("false"),
         }
     }
@@ -39,15 +42,17 @@ impl ReadTracker {
     pub fn record_read(&self, file_path: &Path, cwd: &Path) {
         if self.disabled { return; }
         if let Some(c) = self.canon(file_path, cwd) {
-            self.clean_paths.lock().insert(c);
+            self.clean_paths.lock().insert(c.clone());
+            self.dirty_paths.lock().remove(&c);
         }
     }
 
-    /// Call after write_file — file content changed, model must re-read before next write.
+    /// Call after write_file or a bash mutation — file content changed, model must re-read before next write.
     pub fn record_write(&self, file_path: &Path, cwd: &Path) {
         if self.disabled { return; }
         if let Some(c) = self.canon(file_path, cwd) {
             self.clean_paths.lock().remove(&c);
+            self.dirty_paths.lock().insert(c);
         }
     }
 
@@ -56,11 +61,13 @@ impl ReadTracker {
         if self.disabled { return; }
         if let Some(c) = self.canon(file_path, cwd) {
             self.clean_paths.lock().remove(&c);
+            self.dirty_paths.lock().insert(c);
         }
     }
 
     /// Returns ok=true only if the file doesn't exist yet, or was read after its last modification.
-    pub fn check_write(&self, file_path: &Path, cwd: &Path) -> WriteCheck {
+    /// `tool` is the name of the calling tool ("write_file" or "patch") used in the error message.
+    pub fn check_write(&self, file_path: &Path, cwd: &Path, tool: &str) -> WriteCheck {
         if self.disabled {
             return WriteCheck { ok: true, reason: None, warning: false, blocked: false };
         }
@@ -75,20 +82,24 @@ impl ReadTracker {
             return WriteCheck { ok: true, reason: None, warning: false, blocked: false };
         }
         let rel = pathdiff(&c, cwd).unwrap_or_else(|| c.display().to_string());
-        WriteCheck {
-            ok: false,
-            blocked: true,
-            warning: false,
-            reason: Some(format!(
-                "write_file rejected: '{rel}' has been modified since you last read it, \
-                 or you haven't read it yet. Call read_file first to see the current \
-                 content before overwriting."
-            )),
-        }
+        let recently_modified = self.dirty_paths.lock().contains(&c);
+        let reason = if recently_modified {
+            format!(
+                "{tool} rejected: you just modified '{rel}' — call read_file to see the \
+                 current content before writing again."
+            )
+        } else {
+            format!(
+                "{tool} rejected: '{rel}' hasn't been read yet. Call read_file first to \
+                 see its content before overwriting."
+            )
+        };
+        WriteCheck { ok: false, blocked: true, warning: false, reason: Some(reason) }
     }
 
     pub fn reset(&self) {
         self.clean_paths.lock().clear();
+        self.dirty_paths.lock().clear();
     }
 }
 
