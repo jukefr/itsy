@@ -178,7 +178,7 @@ async fn exec_read_original(args: &Value, cwd: &Path) -> Value {
     }
 }
 
-async fn exec_write_file(args: &Value, cwd: &Path, ctx: &ExecCtx<'_>) -> Value {
+async fn exec_write_file(args: &Value, cwd: &Path, _ctx: &ExecCtx<'_>) -> Value {
     let Some(path) = args.get("path").and_then(|v| v.as_str()) else {
         return json!({"error": "write_file rejected: path missing"});
     };
