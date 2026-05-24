@@ -1,26 +1,25 @@
 # itsy
 
-A coding agent for small local LLMs (8B–35B parameters). Built for the
-moment after you've finally got Qwen3 / DeepSeek / GPT-OSS running on
-your GPU and you want it to actually edit files for you without 32k
-of ceremony per turn.
+A coding agent for small local LLMs (8B–35B parameters). For when you've got a
+model running locally and want it to actually edit files without it spinning
+itself into a loop.
 
 ![](docs/itsy-tui.png)
 
 <sub>Composed from actual run logs (a real `cobol-modernization` solve on Qwen3.6-35B IQ2_XXS); the source ANSI lives at [`docs/itsy-tui.ansi`](docs/itsy-tui.ansi) and is re-rendered via [`docs/regen-screenshot.sh`](docs/regen-screenshot.sh).</sub>
 
-itsy is tuned for quantised models on consumer hardware, so the
-design choices mostly trade tokens for compliance. The tool-call
-parser is forgiving — it eats JSON, XML-ish, and code-fence wrappers
-and figures out which tool the model meant. Context budget is
-capped; edits are search-and-replace patches, not full file
-rewrites; multi-step work decomposes into a small TODO list so the
-model has somewhere to look when it loses the plot. There's a
-SQLite + FTS5 code graph and per-project memory so the agent doesn't
-pay to reintroduce itself every turn.
+The core trade-off is tokens and speed for reliability. itsy is slower and
+chattier than a thin wrapper. The payoff is that it actually finishes things.
+Local models at 4-bit quant drift, repeat themselves, forget what file they
+were editing — itsy burns the extra tokens on guardrails so that stays
+contained. The tool-call parser accepts JSON, XML-ish, and code-fence wrappers.
+Edits are search-and-replace patches, not full rewrites. Multi-step work
+decomposes into a small TODO list so the model has somewhere to look when it
+loses the thread. There's a SQLite + FTS5 code graph and per-project memory so
+it doesn't reintroduce itself every turn.
 
-Talks to anything OpenAI-compatible: LM Studio, Ollama, vLLM,
-llama-server.
+Works well with Qwen3.5/3.6 and Gemma4 at IQ2–Q4. Talks to anything
+OpenAI-compatible: LM Studio, Ollama, vLLM, llama-server.
 
 ## Install
 

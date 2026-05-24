@@ -2589,41 +2589,52 @@ async fn run_evaluator_phase(
             }));
         }
 
+        // Countdown nudge: with 2 turns left, append a warning to the last
+        // tool result so the model sees it before its next response.
+        let turns_left = MAX_TURNS - 1 - turn;
+        if turns_left <= 2 && verdict.is_none() {
+            let last = tool_results.last_mut().expect("at least one tool result");
+            let existing = last["content"].as_str().unwrap_or("").to_string();
+            last["content"] = json!(format!(
+                "{existing}\n\n[SYSTEM] {turns_left} turn(s) remaining. \
+                 Call evaluator_verdict NOW — do not run any more bash commands."
+            ));
+        }
+
         history.extend(tool_results);
 
         if let Some((passed, findings)) = verdict {
-            if passed {
-                println!("  \x1b[32m✓ evaluator passed — all assertions confirmed\x1b[0m");
-            } else {
-                println!(
-                    "  \x1b[31m✗ evaluator failed — {} finding(s)\x1b[0m",
-                    findings.len()
-                );
-                for f in &findings {
-                    println!("    · {f}");
-                }
-                // Inject findings back into the generator session as a
-                // follow-up user message. The bench run ends here — we
-                // don't give the generator another fix cycle in this
-                // phase. The findings appear in the chat log for analysis.
-                let findings_text = findings.join("\n  · ");
-                session.history.lock().push(json!({
-                    "role": "user",
-                    "content": format!(
-                        "[EVALUATOR] Independent verification found issues:\n  · {findings_text}\n\n\
-                         These assertions were self-reported as passed but failed when checked \
-                         by the evaluator."
-                    )
-                }));
-            }
-            itsy::session::contract::set_evaluator_result(
-                itsy::session::contract::EvaluatorResult { passed, findings },
-            );
+            evaluator_emit_result(passed, &findings, session);
             return;
         }
     }
 
+    // Turn budget exhausted without a verdict — treat as inconclusive fail.
     println!("  \x1b[33m⚠ evaluator exhausted turns without reaching verdict\x1b[0m");
+    evaluator_emit_result(false, &["evaluation inconclusive: turn limit reached".into()], session);
+}
+
+fn evaluator_emit_result(passed: bool, findings: &[String], session: &AgentSession) {
+    if passed {
+        println!("  \x1b[32m✓ evaluator passed — all assertions confirmed\x1b[0m");
+    } else {
+        println!("  \x1b[31m✗ evaluator failed — {} finding(s)\x1b[0m", findings.len());
+        for f in findings {
+            println!("    · {f}");
+        }
+        let findings_text = findings.join("\n  · ");
+        session.history.lock().push(json!({
+            "role": "user",
+            "content": format!(
+                "[EVALUATOR] Independent verification found issues:\n  · {findings_text}\n\n\
+                 These assertions were self-reported as passed but failed when checked \
+                 by the evaluator."
+            )
+        }));
+    }
+    itsy::session::contract::set_evaluator_result(
+        itsy::session::contract::EvaluatorResult { passed, findings: findings.to_vec() },
+    );
 }
 
 // std::io::Read import for read_to_string above.
