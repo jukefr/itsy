@@ -54,6 +54,18 @@ use itsy::tui;
 fn max_tool_calls_per_turn() -> u32 {
     itsy::settings::get().max_tool_calls_per_turn
 }
+
+/// Actionable hint injected when the same tool fails twice in a row.
+/// Generic across tasks — no task-specific knowledge, just tool usage tips.
+fn recency_tool_hint(tool_name: &str) -> &'static str {
+    match tool_name {
+        "patch" => "Try `read_and_patch` instead — it reads the current file first then patches atomically, avoiding stale-content mismatches.",
+        "bash" => "Double-check that commands and paths exist. Use `which <cmd>` or `ls <path>` to probe before running complex commands.",
+        "write_file" => "Call `read_file` on the target path first — the write guard requires a prior read before writing.",
+        "read_file" => "Verify the path exists with `bash` before reading.",
+        _ => "Try a different approach, a different tool, or verify your assumptions with a simpler command first.",
+    }
+}
 /// Maximum auto-improvement iterations per file before we DECOMPOSE.
 const MAX_IMPROVE_ITERATIONS: u32 = 4;
 /// Maximum size of any single tool result before we cap it (chars).
@@ -998,6 +1010,9 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
     // Tracks idempotent write tool calls seen this turn (tool_name + arg hash).
     // memory_remember with the same args twice = nop; return early to break spirals.
     let mut per_turn_write_seen: std::collections::HashSet<String> = Default::default();
+    // Tracks consecutive failures per tool name; cleared on success.
+    // When the same tool fails ≥2 times in a row, an actionable hint is injected.
+    let mut recent_tool_failures: std::collections::HashMap<String, u32> = Default::default();
     // Counts consecutive loop-blocked tool calls in the current turn batch.
     // When this hits MAX_CONSECUTIVE_BLOCKS we break out of the inner loop
     // early so the model doesn't receive a wall of N identical rejections,
@@ -1580,6 +1595,30 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     "tool_call_id": id,
                     "content": capped,
                 }));
+
+                // Recency-weighted tool guidance: when the same tool fails
+                // ≥2 times consecutively, inject a brief actionable hint.
+                // Reset the counter on success so hints don't accumulate.
+                {
+                    let had_error = result.get("error").is_some();
+                    if had_error {
+                        let n = recent_tool_failures
+                            .entry(name.clone())
+                            .and_modify(|c| *c += 1)
+                            .or_insert(1);
+                        if *n == 2 {
+                            session.history.lock().push(json!({
+                                "role": "user",
+                                "content": format!(
+                                    "[SYSTEM] `{name}` has failed {n} times in a row. {}",
+                                    recency_tool_hint(&name)
+                                )
+                            }));
+                        }
+                    } else {
+                        recent_tool_failures.remove(&name);
+                    }
+                }
 
                 // ── Improvement loop for file writes/patches ──────────────
                 if (name == "write_file" || name == "patch")

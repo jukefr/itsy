@@ -160,6 +160,27 @@ pub async fn chat_completion(ctx: &ChatContext<'_>) -> Option<Value> {
         // No behaviour change; just observability.
         crate::model::chat_log::record(&body, &value, attempt);
 
+        // If the model was cut off mid-thinking (finish_reason=length),
+        // retry once with thinking disabled so it gets a real response out.
+        // This happens when max_tokens is tight relative to the thinking budget.
+        let finish_reason = value
+            .pointer("/choices/0/finish_reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if finish_reason == "length" && tokens > 0 && attempt == 1 {
+            eprintln!(
+                "  \x1b[33m⚠ finish_reason=length with thinking enabled — \
+                 retrying with thinking disabled\x1b[0m"
+            );
+            crate::model::thinking_budget::apply_thinking_budget(
+                &mut body,
+                &ctx.config.model.base_url,
+                tokens,
+                /* disable = */ true,
+            );
+            continue;
+        }
+
         // Log thinking token usage so we can verify the budget cap is honored.
         // llama-server puts thinking in reasoning_content (not completion_tokens_details).
         {
