@@ -39,9 +39,6 @@ pub struct ToolScore {
     pub total_calls: u32,
 }
 
-impl ToolScore {
-    fn new() -> Self { Self::default() }
-}
 
 /// Per-session trust tracker with optional persistence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,7 +97,7 @@ impl TrustState {
     pub fn record_combo(&mut self, tool: &str, task_type: Option<&str>, success: bool) {
         if self.disabled || tool.is_empty() { return; }
         let key = key_for(tool, task_type);
-        let s = self.scores.entry(key).or_insert_with(ToolScore::new);
+        let s = self.scores.entry(key).or_default();
         s.total_calls = s.total_calls.saturating_add(1);
         if success {
             if self.reset_on_success { s.consecutive_fails = 0; }
@@ -195,7 +192,7 @@ impl TrustState {
         }
         let tmp = with_tmp_suffix(path);
         let body = serde_json::to_string_pretty(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         std::fs::write(&tmp, body)?;
         std::fs::rename(&tmp, path)
     }

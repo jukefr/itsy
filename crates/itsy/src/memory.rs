@@ -381,7 +381,7 @@ impl SqliteBackend {
         // Fallback: substring match on title / content / tags.
         let mut hits = Vec::new();
         let conn = self.conn.lock();
-        let needle = format!("%{}%", task.replace('%', "").replace('_', ""));
+        let needle = format!("%{}%", task.replace(['%', '_'], ""));
         let mut stmt = conn.prepare(
             "SELECT id, type, title, content, tags, relations, source, created_at, updated_at
              FROM memory_objects
@@ -585,7 +585,7 @@ impl JsonBackend {
                 scored.push((obj.clone(), score));
             }
         }
-        scored.sort_by(|a, b| b.1.cmp(&a.1));
+        scored.sort_by_key(|b| std::cmp::Reverse(b.1));
         scored.into_iter().take(limit).map(|(o, _)| o).collect()
     }
 }

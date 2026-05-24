@@ -82,12 +82,12 @@ pub fn render_markdown(text: &str) -> String {
 }
 
 fn render_bold(line: &str) -> String {
-    let re = regex::Regex::new(r"\*\*(.+?)\*\*").unwrap();
+    let re = regex::Regex::new(r"\*\*(.+?)\*\*").expect("valid regex literal");
     re.replace_all(line, |c: &regex::Captures| bold(&c[1])).into_owned()
 }
 
 fn render_inline_code(line: &str) -> String {
-    let re = regex::Regex::new(r"`([^`]+)`").unwrap();
+    let re = regex::Regex::new(r"`([^`]+)`").expect("valid regex literal");
     re.replace_all(line, |c: &regex::Captures| paint(C_YELLOW, &c[1])).into_owned()
 }
 
@@ -123,9 +123,9 @@ fn highlight_line(line: &str, lang: &str) -> String {
     // escapes don't terminate the string early.
     static STR_RES: once_cell::sync::Lazy<[regex::Regex; 3]> = once_cell::sync::Lazy::new(|| {
         [
-            regex::Regex::new(r#""(?:\\.|[^"\\])*""#).unwrap(),
-            regex::Regex::new(r#"'(?:\\.|[^'\\])*'"#).unwrap(),
-            regex::Regex::new(r#"`(?:\\.|[^`\\])*`"#).unwrap(),
+            regex::Regex::new(r#""(?:\\.|[^"\\])*""#).expect("valid regex literal"),
+            regex::Regex::new(r#"'(?:\\.|[^'\\])*'"#).expect("valid regex literal"),
+            regex::Regex::new(r#"`(?:\\.|[^`\\])*`"#).expect("valid regex literal"),
         ]
     });
     for str_re in STR_RES.iter() {
@@ -134,17 +134,17 @@ fn highlight_line(line: &str, lang: &str) -> String {
             .into_owned();
     }
     static LINE_RE: once_cell::sync::Lazy<regex::Regex> =
-        once_cell::sync::Lazy::new(|| regex::Regex::new(r"//.*$").unwrap());
+        once_cell::sync::Lazy::new(|| regex::Regex::new(r"//.*$").expect("valid regex literal"));
     h = LINE_RE.replace_all(&h, |c: &regex::Captures| paint(C_GRAY, &c[0])).into_owned();
     static PY_RE: once_cell::sync::Lazy<regex::Regex> =
-        once_cell::sync::Lazy::new(|| regex::Regex::new(r"#.*$").unwrap());
+        once_cell::sync::Lazy::new(|| regex::Regex::new(r"#.*$").expect("valid regex literal"));
     h = PY_RE.replace_all(&h, |c: &regex::Captures| paint(C_GRAY, &c[0])).into_owned();
     for kw in kws {
-        let re = regex::Regex::new(&format!(r"\b{kw}\b")).unwrap();
+        let re = regex::Regex::new(&format!(r"\b{kw}\b")).expect("valid regex literal");
         h = re.replace_all(&h, |c: &regex::Captures| paint(C_MAGENTA, &c[0])).into_owned();
     }
     static NUM_RE: once_cell::sync::Lazy<regex::Regex> =
-        once_cell::sync::Lazy::new(|| regex::Regex::new(r"\b(\d+)\b").unwrap());
+        once_cell::sync::Lazy::new(|| regex::Regex::new(r"\b(\d+)\b").expect("valid regex literal"));
     h = NUM_RE.replace_all(&h, |c: &regex::Captures| paint(C_CYAN, &c[0])).into_owned();
     h
 }
@@ -252,7 +252,7 @@ pub fn render_contract(c: &crate::session::contract::Contract) -> String {
     out.push_str(&format!(
         "  {} {} {}\n",
         paint(status_color, &format!("[{}]", c.status.as_str())),
-        paint(&format!("{C_BOLD}"), &c.title),
+        paint(C_BOLD, &c.title),
         paint(
             C_GRAY,
             &format!(

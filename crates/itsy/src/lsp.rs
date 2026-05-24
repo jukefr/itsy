@@ -248,10 +248,15 @@ impl LspClient {
     async fn write_message(&self, msg: &Value) -> Result<()> {
         let body = serde_json::to_string(msg)?;
         let framed = format!("Content-Length: {}\r\n\r\n{body}", body.len());
-        let mut inner = self.inner.lock();
-        let stdin = inner.stdin.as_mut().ok_or_else(|| anyhow!("LSP not started"))?;
+        // Take stdin out from under the lock so the guard is dropped before .await.
+        let mut stdin = self.inner.lock().stdin.take()
+            .ok_or_else(|| anyhow!("LSP not started"))?;
+
         stdin.write_all(framed.as_bytes()).await?;
         stdin.flush().await?;
+
+        // Put stdin back for future writes.
+        self.inner.lock().stdin = Some(stdin);
         Ok(())
     }
 
@@ -426,9 +431,7 @@ async fn read_loop(
             Err(_) => return,
         };
         buf.extend_from_slice(&chunk[..n]);
-        loop {
-            // Find header terminator.
-            let Some(hdr_end) = find_subslice(&buf, b"\r\n\r\n") else { break };
+        while let Some(hdr_end) = find_subslice(&buf, b"\r\n\r\n") {
             let header = &buf[..hdr_end];
             let content_length = match parse_content_length(header) {
                 Some(v) => v,

@@ -53,7 +53,7 @@ pub fn repair_json(input: &str) -> String {
 
 fn replace_unquoted_keys(input: &str) -> String {
     static RE: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r#"([\{,]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:"#).unwrap());
+        Lazy::new(|| Regex::new(r#"([\{,]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:"#).expect("valid regex literal"));
     RE.replace_all(input, "$1\"$2\":").into_owned()
 }
 
@@ -61,12 +61,12 @@ fn replace_single_quotes(input: &str) -> String {
     // Best-effort: only convert single-quoted *values* whose content has no
     // embedded single or double quotes. This avoids breaking apostrophes
     // inside legitimate double-quoted strings.
-    static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#"'([^'"\\]*)'"#).unwrap());
+    static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#"'([^'"\\]*)'"#).expect("valid regex literal"));
     RE.replace_all(input, "\"$1\"").into_owned()
 }
 
 fn strip_trailing_commas(input: &str) -> String {
-    static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#",(\s*[}\]])"#).unwrap());
+    static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#",(\s*[}\]])"#).expect("valid regex literal"));
     RE.replace_all(input, "$1").into_owned()
 }
 
@@ -117,11 +117,11 @@ pub fn build_repair_message(opts: &RepairOpts<'_>) -> String {
     let mut guidance: Vec<String> = Vec::new();
 
     static UNTERMINATED_TPL: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"(?i)Unterminated template literal").unwrap());
+        Lazy::new(|| Regex::new(r"(?i)Unterminated template literal").expect("valid regex literal"));
     static CANT_FIND_MODULE: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"(?i)Cannot find module").unwrap());
+        Lazy::new(|| Regex::new(r"(?i)Cannot find module").expect("valid regex literal"));
     static CANT_FIND_NAME: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"(?i)Cannot find name").unwrap());
+        Lazy::new(|| Regex::new(r"(?i)Cannot find name").expect("valid regex literal"));
 
     if UNTERMINATED_TPL.is_match(&issues_text) {
         guidance.push(

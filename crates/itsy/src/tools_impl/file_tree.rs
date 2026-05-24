@@ -272,7 +272,7 @@ fn walk(
 
 fn sort_entries(entries: &mut [ScoredEntry]) {
     if env_sort_mtime() {
-        entries.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+        entries.sort_by_key(|b| std::cmp::Reverse(b.mtime));
     } else {
         entries.sort_by(|a, b| b.score.cmp(&a.score).then(b.mtime.cmp(&a.mtime)));
     }

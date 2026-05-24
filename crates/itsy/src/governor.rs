@@ -356,18 +356,18 @@ pub fn pick_decompose_strategy(content: &str, errors: &[String], file_path: &str
 // ─── Task classifier ────────────────────────────────────────────────────────
 
 static NON_NODE_BACKEND: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)\b(python|django|fastapi|flask|go|golang|rust|actix|axum|ruby|rails|php|laravel|java|spring|c#|dotnet|asp\.net|elixir|phoenix)\b").unwrap()
+    Regex::new(r"(?i)\b(python|django|fastapi|flask|go|golang|rust|actix|axum|ruby|rails|php|laravel|java|spring|c#|dotnet|asp\.net|elixir|phoenix)\b").expect("valid regex literal")
 });
-static BACKEND_A: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\b(api|backend|server|rest|crud|auth|database|endpoint|express|fastify|node|typescript|ts)\b.*\b(create|build|make|implement|set up)\b").unwrap());
-static BACKEND_B: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\b(create|build|make)\b.*\b(api|backend|server|rest|crud|endpoint)\b").unwrap());
-static BACKEND_C: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\b(node|typescript|ts|express|fastify)\b.*\b(api|backend|server|rest|crud)\b").unwrap());
-static CODING: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\b(create|write|build|make|implement|add)\b.*\b(file|function|class|module|component|api|server)\b").unwrap());
-static EDITING: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\b(fix|patch|edit|change|update|modify|replace|rename)\b").unwrap());
-static SEARCH: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\b(find|search|grep|where|which|look for)\b").unwrap());
-static SHELL: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\b(run|execute|test|install|build|compile|deploy)\b").unwrap());
-static EXPLANATION: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\b(explain|what|how|why|describe|show me)\b").unwrap());
-static MULTI_STEP: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\b(and then|then|after that|also|plus|step)\b.*\b(and then|then|also)\b").unwrap());
-static DEBUGGING: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\b(debug|fix|error|bug|crash|broken|failing)\b").unwrap());
+static BACKEND_A: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\b(api|backend|server|rest|crud|auth|database|endpoint|express|fastify|node|typescript|ts)\b.*\b(create|build|make|implement|set up)\b").expect("valid regex literal"));
+static BACKEND_B: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\b(create|build|make)\b.*\b(api|backend|server|rest|crud|endpoint)\b").expect("valid regex literal"));
+static BACKEND_C: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\b(node|typescript|ts|express|fastify)\b.*\b(api|backend|server|rest|crud)\b").expect("valid regex literal"));
+static CODING: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\b(create|write|build|make|implement|add)\b.*\b(file|function|class|module|component|api|server)\b").expect("valid regex literal"));
+static EDITING: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\b(fix|patch|edit|change|update|modify|replace|rename)\b").expect("valid regex literal"));
+static SEARCH: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\b(find|search|grep|where|which|look for)\b").expect("valid regex literal"));
+static SHELL: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\b(run|execute|test|install|build|compile|deploy)\b").expect("valid regex literal"));
+static EXPLANATION: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\b(explain|what|how|why|describe|show me)\b").expect("valid regex literal"));
+static MULTI_STEP: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\b(and then|then|after that|also|plus|step)\b.*\b(and then|then|also)\b").expect("valid regex literal"));
+static DEBUGGING: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?i)\b(debug|fix|error|bug|crash|broken|failing)\b").expect("valid regex literal"));
 
 pub fn classify_task(user_message: &str) -> &'static str {
     let msg = user_message;

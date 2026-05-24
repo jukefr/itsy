@@ -68,6 +68,12 @@ pub struct FileStateTracker {
     ttl: Duration,
 }
 
+impl Default for FileStateTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FileStateTracker {
     pub fn new() -> Self {
         let s = crate::settings::get();

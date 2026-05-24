@@ -92,8 +92,8 @@ pub struct SkillManager {
 }
 
 static FRONTMATTER_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?s)^---\n(.*?)\n---\n(.*)$").unwrap());
-static META_LINE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^(\w+):\s*(.+)$").unwrap());
+    Lazy::new(|| Regex::new(r"(?s)^---\n(.*?)\n---\n(.*)$").expect("valid regex literal"));
+static META_LINE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^(\w+):\s*(.+)$").expect("valid regex literal"));
 
 impl SkillManager {
     pub fn new() -> Self {
@@ -177,11 +177,10 @@ impl SkillManager {
         for s in &self.skills {
             match s.trigger {
                 Trigger::Auto => out.push(s.clone()),
-                Trigger::Match if !s.keywords.is_empty() => {
-                    if s.keywords.iter().any(|kw| msg.contains(&kw.to_lowercase())) {
+                Trigger::Match if !s.keywords.is_empty()
+                    && s.keywords.iter().any(|kw| msg.contains(&kw.to_lowercase())) => {
                         out.push(s.clone());
                     }
-                }
                 _ => {}
             }
         }
@@ -278,8 +277,8 @@ fn parse_skill(content: &str, filename: &str, path: &Path) -> Option<Skill> {
                     "name" => name = value.to_string(),
                     "trigger" => trigger = Trigger::from_str_lenient(value),
                     "description" => description = value.to_string(),
-                    "keywords" => {
-                        if value.starts_with('[') && value.ends_with(']') {
+                    "keywords"
+                        if value.starts_with('[') && value.ends_with(']') => {
                             keywords = value[1..value.len() - 1]
                                 .split(',')
                                 .map(|s| {
@@ -291,7 +290,6 @@ fn parse_skill(content: &str, filename: &str, path: &Path) -> Option<Skill> {
                                 .filter(|s| !s.is_empty())
                                 .collect();
                         }
-                    }
                     _ => {}
                 }
             }

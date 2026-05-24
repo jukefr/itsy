@@ -77,6 +77,7 @@ pub fn set_approval_handler(handler: ApprovalHandler) {
     *slot.lock() = Some(handler);
 }
 
+#[allow(clippy::await_holding_lock)]
 pub async fn await_checkpoint_decision(flow_run_id: &str, checkpoint_name: &str) -> CheckpointDecision {
     let Some(slot) = APPROVAL_HANDLER.get() else { return CheckpointDecision::Approve };
     let guard = slot.lock();
@@ -97,7 +98,6 @@ pub async fn generate_commit_message(task: &str, changed_files: &[String]) -> St
             .collect::<String>()
             .replace(['\n', '\r', '"', '\'', '`', '$', '\\'], " ")
             .trim()
-            .to_string()
     );
     let files_joined = changed_files.iter().take(10).cloned().collect::<Vec<_>>().join(", ");
     let r = match call_prompt(
@@ -109,7 +109,7 @@ pub async fn generate_commit_message(task: &str, changed_files: &[String]) -> St
         Ok(s) => s,
         Err(_) => return fallback,
     };
-    let cv_re = regex::Regex::new(r"^(feat|fix|docs|refactor|test|chore|style|ci|perf|build|revert)(\(.+\))?:").unwrap();
+    let cv_re = regex::Regex::new(r"^(feat|fix|docs|refactor|test|chore|style|ci|perf|build|revert)(\(.+\))?:").expect("valid regex literal");
     let trimmed = r
         .trim()
         .trim_matches(|c| c == '"' || c == '\'')

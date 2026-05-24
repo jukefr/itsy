@@ -145,7 +145,7 @@ pub async fn chat_completion(ctx: &ChatContext<'_>) -> Option<Value> {
         if !res.status().is_success() {
             let status = res.status().as_u16();
             let text = res.text().await.unwrap_or_default();
-            if status >= 400 && status < 500 && attempt == 1 {
+            if (400..500).contains(&status) && attempt == 1 {
                 // One transient-error retry on 4xx, matches upstream.
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 continue;
@@ -158,8 +158,7 @@ pub async fn chat_completion(ctx: &ChatContext<'_>) -> Option<Value> {
             return None;
         }
 
-        let parsed: Option<Value> = res.json().await.ok();
-        let Some(mut value) = parsed else { return None };
+        let mut value: Value = res.json().await.ok()?;
 
         // INTENTIONAL: persist raw request + response for inspection.
         // No behaviour change; just observability.
@@ -268,8 +267,7 @@ pub async fn stream_final_response(
     let mut early_stop = early_stop;
     while let Some(Ok(bytes)) = stream.next().await {
         buffer.push_str(&String::from_utf8_lossy(&bytes));
-        loop {
-            let Some(nl) = buffer.find('\n') else { break };
+        while let Some(nl) = buffer.find('\n') {
             let line = buffer[..nl].to_string();
             buffer.drain(..=nl);
             let line = line.trim();
@@ -427,9 +425,13 @@ fn strip_think_tags(msg: &mut Value) {
 /// Normalise Qwen3-style `<tool_call>` XML that leaks into the content field
 /// when llama-server's OpenAI adapter doesn't convert it. Handles two formats:
 ///
-/// - JSON:  `<tool_call>\n{"name":"fn","arguments":{...}}\n</tool_call>`
-/// - Attr:  `<tool_call><function=fn>\n<parameter=k>v</parameter>\n</function></tool_call>`
-/// Extract Qwen3-style `<tool_call>` XML from the assistant message content.
+///   - JSON:  `<tool_call>\n{"name":"fn","arguments":{...}}\n</tool_call>`
+///   - Attr:  `<tool_call><function=fn>\n<parameter=k>v</parameter>\n</function></tool_call>`
+///
+/// Also strips `<tool_call>…</tool_call>` blocks from `content` so they
+/// never leak to the TUI.  Only populates `tool_calls` on the message when
+/// the message doesn't already carry structured tool calls from the server —
+/// that way we never duplicate a call that was already parsed upstream.
 ///
 /// Always strips `<tool_call>…</tool_call>` blocks from `content` so they
 /// never leak to the TUI.  Only populates `tool_calls` on the message when
@@ -520,8 +522,7 @@ fn extract_xml_tool_calls(msg: &mut Value) {
     // Always strip <tool_call>…</tool_call> blocks from content.
     let clean = {
         let mut s = content.clone();
-        loop {
-            let Some(a) = s.find("<tool_call>") else { break };
+        while let Some(a) = s.find("<tool_call>") {
             if let Some(rel) = s[a..].find("</tool_call>") {
                 s.drain(a..a + rel + "</tool_call>".len());
             } else {
@@ -558,6 +559,7 @@ fn extract_xml_tool_calls(msg: &mut Value) {
 ///     tools are not implemented in itsy; including the hint would cause the
 ///     model to call non-existent tools.
 ///   - `taskType !== 'explanation'` guard kept (matches upstream).
+///
 /// ACCIDENTAL (fixed in 3322058):
 ///   - Previous port had verbose IMPORTANT headers and bullet lists instead of
 ///     upstream's compact single-paragraph Rules line. Verbose prompts degrade
@@ -568,6 +570,7 @@ fn extract_xml_tool_calls(msg: &mut Value) {
 ///     that llama.cpp JSON parser crashes on large tool calls.
 ///   - Working directory was appended after the rules instead of inline in the
 ///     first line, matching upstream's `Working directory: ${process.cwd()}`.
+///
 /// UNVERIFIED:
 ///   - Bootstrap detector prompt line (upstream: `_bootstrapDetector.formatForPrompt()`).
 pub fn build_system_prompt(
@@ -610,5 +613,133 @@ pub fn build_system_prompt(
     prompt.push_str(skill_context);
     prompt.push_str(plugin_context);
     prompt
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── strip_think_tags ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_strip_think_tags_removes_think_block() {
+        let mut msg = json!({"role": "assistant", "content": "Hello <think>I should help</think> world"});
+        strip_think_tags(&mut msg);
+        assert_eq!(msg["content"], "Hello  world");
+    }
+
+    #[test]
+    fn test_strip_think_tags_removes_orphan_close() {
+        let mut msg = json!({"role": "assistant", "content": "Hello </think> world"});
+        strip_think_tags(&mut msg);
+        assert_eq!(msg["content"], "Hello  world");
+    }
+
+    #[test]
+    fn test_strip_think_tags_preserves_no_think() {
+        let mut msg = json!({"role": "assistant", "content": "Hello world"});
+        strip_think_tags(&mut msg);
+        assert_eq!(msg["content"], "Hello world");
+    }
+
+    #[test]
+    fn test_strip_think_tags_removes_missing_content_key() {
+        let mut msg = json!({"role": "system"});
+        strip_think_tags(&mut msg);  // should not panic
+        assert!(msg.get("content").is_none());
+    }
+
+    #[test]
+    fn test_strip_think_tags_handles_only_think() {
+        let mut msg = json!({"role": "assistant", "content": "  <think>only thinking</think>  "});
+        strip_think_tags(&mut msg);
+        // content may be removed or set to whitespace — either is acceptable.
+        assert!(msg.get("content").map(|v| v.as_str().unwrap().trim().is_empty()).unwrap_or(true));
+    }
+
+    #[test]
+    fn test_strip_think_tags_multiple_blocks() {
+        let mut msg = json!({"role": "assistant", "content": "a<think>one</think>b<think>two</think>c"});
+        strip_think_tags(&mut msg);
+        assert_eq!(msg["content"], "abc");
+    }
+
+    // ── extract_xml_tool_calls ───────────────────────────────────────────────
+
+    #[test]
+    fn test_extract_tool_calls_json_format() {
+        let content = "Let me check.\n<tool_call>\n{\"name\":\"read_file\",\"arguments\":{\"path\":\"src/main.rs\"}}\n</tool_call>";
+        let mut msg = json!({"role": "assistant", "content": content});
+        extract_xml_tool_calls(&mut msg);
+        let calls = msg["tool_calls"].as_array().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["function"]["name"], "read_file");
+        // XML should be stripped from content.
+        assert!(!msg["content"].as_str().unwrap().contains("<tool_call>"));
+    }
+
+    #[test]
+    fn test_extract_tool_calls_attr_format() {
+        let content = "<tool_call>\n<function=read_and_patch>\n<parameter=path>src/main.rs</parameter>\n<parameter=old_str>foo</parameter>\n<parameter=new_str>bar</parameter>\n</function>\n</tool_call>";
+        let mut msg = json!({"role": "assistant", "content": content});
+        extract_xml_tool_calls(&mut msg);
+        let calls = msg["tool_calls"].as_array().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["function"]["name"], "read_and_patch");
+        let args: Value = serde_json::from_str(calls[0]["function"]["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(args["path"], "src/main.rs");
+    }
+
+    #[test]
+    fn test_extract_tool_calls_strip_only_when_server_provided() {
+        let content = "<tool_call>\n{\"name\":\"read_file\",\"arguments\":{\"path\":\"x\"}}\n</tool_call>";
+        let mut msg = json!({
+            "role": "assistant",
+            "content": content,
+            "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}]
+        });
+        extract_xml_tool_calls(&mut msg);
+        // Should not add duplicate tool_calls.
+        assert_eq!(msg.get("tool_calls").and_then(|v| v.as_array()).map(|a| a.len()), Some(1));
+        // Content is fully consumed by the tool_call XML — may be removed entirely.
+        assert!(msg.get("content").map(|v| !v.as_str().unwrap_or("").contains("<tool_call>")).unwrap_or(true));
+    }
+
+    #[test]
+    fn test_extract_tool_calls_handles_no_tool_call() {
+        let mut msg = json!({"role": "assistant", "content": "Just text, no tool calls."});
+        extract_xml_tool_calls(&mut msg);
+        assert!(msg.get("tool_calls").is_none());
+        assert_eq!(msg["content"], "Just text, no tool calls.");
+    }
+
+    // ── run_validation (JSON path — no subprocess needed) ────────────────────
+
+    #[test]
+    fn test_run_validation_json_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("bad.json"), b"{invalid json}").unwrap();
+        std::env::set_current_dir(dir.path()).ok();
+        let result = run_validation("bad.json");
+        assert!(result.is_some());
+        assert!(!result.unwrap().passed);
+    }
+
+    #[test]
+    fn test_run_validation_json_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("good.json"), b"{\"key\": \"value\"}").unwrap();
+        std::env::set_current_dir(dir.path()).ok();
+        let result = run_validation("good.json");
+        assert!(result.is_some());
+        assert!(result.unwrap().passed);
+    }
+
+    #[test]
+    fn test_run_validation_rejects_null_bytes() {
+        let result = run_validation("bad\0file.json");
+        assert!(result.is_some());
+        assert!(!result.unwrap().passed);
+    }
 }
 

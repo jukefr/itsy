@@ -527,10 +527,7 @@ fn parse_counts(framework: &str, output: &str) -> (u32, u32, u32) {
 
     // Cargo: "test result: ok. 12 passed; 0 failed; 1 ignored"
     if lc == "cargo-test" {
-        let re = Regex::new(
-            r"(?m)test result:[^\n]*?(\d+)\s+passed;\s*(\d+)\s+failed;\s*(\d+)\s+ignored",
-        )
-        .unwrap();
+        let re = Regex::new(r"(?m)test result:[^\n]*?(\d+)\s+passed;\s*(\d+)\s+failed;\s*(\d+)\s+ignored").expect("valid regex literal");
         let (mut p, mut f, mut s) = (0u32, 0u32, 0u32);
         for cap in re.captures_iter(output) {
             p += cap[1].parse::<u32>().unwrap_or(0);

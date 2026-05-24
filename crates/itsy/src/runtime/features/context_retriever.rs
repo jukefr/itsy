@@ -61,7 +61,7 @@ const STOP_WORDS: &[&str] = &[
 
 fn is_stop_word(w: &str) -> bool {
     let lower = w.to_lowercase();
-    STOP_WORDS.iter().any(|s| *s == lower.as_str())
+    STOP_WORDS.contains(&lower.as_str())
 }
 
 /// Extract search keywords from a user message.
@@ -70,8 +70,8 @@ fn is_stop_word(w: &str) -> bool {
 /// likely symbol names), then meaningful lowercase words. Capped at 5.
 pub fn extract_keywords(message: &str) -> Vec<String> {
     static SPLITTER: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r#"[\s,.\-_/\\()\[\]{}'"`!?;:]+"#).unwrap());
-    static HAS_UPPER: Lazy<Regex> = Lazy::new(|| Regex::new(r"[A-Z]").unwrap());
+        Lazy::new(|| Regex::new(r#"[\s,.\-_/\\()\[\]{}'"`!?;:]+"#).expect("valid regex literal"));
+    static HAS_UPPER: Lazy<Regex> = Lazy::new(|| Regex::new(r"[A-Z]").expect("valid regex literal"));
 
     let words: Vec<&str> = SPLITTER.split(message).filter(|w| !w.is_empty()).collect();
     let mut keywords: Vec<String> = Vec::new();
@@ -115,11 +115,11 @@ pub fn retrieve_context_from_results(results: &[Value], max_files: usize) -> Ret
     }
 
     static PATH_RE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"[a-zA-Z0-9_\-/\\]+\.(ts|js|py|rs|go|java|c|cpp|md)").unwrap()
+        Regex::new(r"[a-zA-Z0-9_\-/\\]+\.(ts|js|py|rs|go|java|c|cpp|md)").expect("valid regex literal")
     });
     static SYM_RE: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"\b[A-Z][a-zA-Z0-9]+\b|\bfunction\s+(\w+)").unwrap());
-    static FN_PREFIX: Lazy<Regex> = Lazy::new(|| Regex::new(r"^function\s+").unwrap());
+        Lazy::new(|| Regex::new(r"\b[A-Z][a-zA-Z0-9]+\b|\bfunction\s+(\w+)").expect("valid regex literal"));
+    static FN_PREFIX: Lazy<Regex> = Lazy::new(|| Regex::new(r"^function\s+").expect("valid regex literal"));
 
     let mut file_set: HashSet<String> = HashSet::new();
     let mut sym_set: HashSet<String> = HashSet::new();

@@ -24,7 +24,7 @@ static TRIGGERS: Lazy<Vec<Regex>> = Lazy::new(|| {
         r"(?i)\brevert\b",
         r"(?i)\blast (change|commit|edit)",
     ];
-    raws.iter().map(|r| Regex::new(r).unwrap()).collect()
+    raws.iter().map(|r| Regex::new(r).expect("valid regex literal")).collect()
 });
 
 /// Does this message imply the user wants context about recent changes?

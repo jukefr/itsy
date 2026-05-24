@@ -135,8 +135,7 @@ fn quant_tier_for(marker: &str) -> &'static str {
 /// Parse a model name string into best-effort hints.
 pub fn detect_model_hints(model_name: &str) -> ModelHints {
     let lower = model_name.to_lowercase();
-    let mut hints = ModelHints::default();
-    hints.quant_tier = "unknown";
+    let mut hints = ModelHints { quant_tier: "unknown", ..Default::default() };
 
     // Family
     for fam in FAMILIES {

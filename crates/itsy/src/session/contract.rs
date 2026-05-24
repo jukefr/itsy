@@ -442,7 +442,7 @@ pub fn render_for_prompt(c: &Contract) -> String {
         "Assertions: {} passed · {} failed · {} pending · {} skipped (of {})\n",
         counts.passed, counts.failed, counts.pending, counts.skipped, counts.total
     ));
-    out.push_str("\n");
+    out.push('\n');
     for a in &c.assertions {
         let badge = match a.state {
             AssertionState::Passed => "[x]",

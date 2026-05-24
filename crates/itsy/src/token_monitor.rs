@@ -80,8 +80,8 @@ impl TokenMonitor {
 
     pub fn get_metrics(&self) -> TokenMetrics {
         let total_tokens = self.total_prompt + self.total_completion;
-        let avg_prompt = if self.total_calls > 0 { self.total_prompt / self.total_calls } else { 0 };
-        let avg_completion = if self.total_calls > 0 { self.total_completion / self.total_calls } else { 0 };
+        let avg_prompt = self.total_prompt.checked_div(self.total_calls).unwrap_or(0);
+        let avg_completion = self.total_completion.checked_div(self.total_calls).unwrap_or(0);
         let efficiency_pct = if self.total_prompt > 0 {
             (self.total_completion as f64 / self.total_prompt as f64) * 100.0
         } else {

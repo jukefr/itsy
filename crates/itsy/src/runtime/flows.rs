@@ -60,19 +60,17 @@ pub fn execute_flow<C, E: std::fmt::Display>(
 ) -> FlowOutcome {
     let mut completed: Vec<(String, Option<StepActionFn<C, E>>)> = Vec::new();
 
-    let len = steps.len();
-    for i in 0..len {
-        let step_name = steps[i].name.clone();
+    for step in &mut steps {
+        let step_name = step.name.clone();
         crate::runtime::logger::info(
             "flow_step_started",
             &format!("{name}.{step_name}"),
             None,
         );
-        let res = (steps[i].action)(ctx);
+        let res = (step.action)(ctx);
         match res {
             Ok(()) => {
-                let comp = steps[i].compensation.take();
-                completed.push((step_name, comp));
+                completed.push((step_name, step.compensation.take()));
             }
             Err(e) => {
                 let err_msg = e.to_string();

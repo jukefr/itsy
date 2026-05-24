@@ -33,10 +33,10 @@ use crate::security::{safe_resolve_path, sanitize_tool_output, PathOptions};
 /// `(?<![\w`])` by capturing the optional preceding char and rejecting
 /// invalid contexts at filter time.
 static FILE_REGEX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(^|[^\w`])@(\.?[^\s`,]*)").unwrap());
+    Lazy::new(|| Regex::new(r"(^|[^\w`])@(\.?[^\s`,]*)").expect("valid regex literal"));
 
 /// Optional `:start-end` (or `:start`) line range suffix.
-static RANGE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^(.+?):(\d+)(?:-(\d+))?$").unwrap());
+static RANGE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^(.+?):(\d+)(?:-(\d+))?$").expect("valid regex literal"));
 
 const MAX_FILE_BYTES: u64 = 5 * 1024 * 1024; // 5 MB
 const MAX_LINES: usize = 500;
@@ -75,7 +75,7 @@ pub fn resolve_references(input: &str, cwd: &Path) -> Vec<ResolvedRef> {
         }
         // Strip trailing punctuation that users tend to attach to refs:
         // `look at @src/foo.rs,` -> `@src/foo.rs`.
-        let raw_path = raw_path.trim_end_matches(|c: char| matches!(c, ',' | ';' | '.'));
+        let raw_path = raw_path.trim_end_matches([',', ';', '.']);
         if raw_path.is_empty() {
             continue;
         }

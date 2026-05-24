@@ -348,7 +348,7 @@ pub const INTERESTING_TOOLS: &[&str] = &[
 
 /// Returns true if `tool` is in [`INTERESTING_TOOLS`].
 pub fn is_interesting_tool(tool: &str) -> bool {
-    INTERESTING_TOOLS.iter().any(|t| *t == tool)
+    INTERESTING_TOOLS.contains(&tool)
 }
 
 /// Patterns that indicate failure even when an exit code looks OK.

@@ -270,7 +270,7 @@ fn declared_primitive_check(declared: &str, value: &Value) -> Option<String> {
     match declared {
         "string" => match value.as_str() {
             None => Some(format!("expected string, got {}", type_name(value))),
-            Some(s) if s.is_empty() => Some("empty string".into()),
+            Some("") => Some("empty string".into()),
             _ => None,
         },
         "int" => {

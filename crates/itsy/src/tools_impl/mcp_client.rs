@@ -285,7 +285,7 @@ impl McpClient {
         // Pull stdin out briefly to write (parking_lot mutex can't be held
         // across await). Put it back regardless of outcome.
         let mut stdin_taken = self.inner.lock().stdin.take();
-        let Some(mut s) = stdin_taken.take() else { return None };
+        let mut s = stdin_taken.take()?;
         let write_res = s.write_all(request_line.as_bytes()).await;
         let flush_res = s.flush().await;
         self.inner.lock().stdin = Some(s);

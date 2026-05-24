@@ -236,7 +236,8 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
     // with a question mark, the user's reply is an answer, not a new vague task.
     let clarifier_enabled = itsy::settings::get().clarifier;
     let assistant_asked_question = {
-        let hist = session.mutable.lock().history.clone();
+        let locked = session.mutable.lock();
+        let hist = &locked.history;
         hist.iter()
             .rev()
             .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("assistant"))
@@ -254,15 +255,16 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
         let needs = features_adapter::check_needs_clarification(&user_msg).await;
         if needs {
             let clarifier_idx = {
-                let mut hist = session.mutable.lock().history.clone();
-                hist.push(json!({"role": "user", "content": user_msg.clone()}));
-                let idx = hist.len();
-                hist.push(json!({
+                let mut locked = session.mutable.lock();
+                locked.history.push(json!({"role": "user", "content": user_msg.clone()}));
+                let idx = locked.history.len();
+                locked.history.push(json!({
                     "role": "system",
                     "content": itsy::session::clarify::get_clarification_instruction(),
                 }));
                 idx
             };
+            // Snapshot for async use — must clone since lock can't be held across .await.
             let snapshot = (session.mutable.lock().history.clone(), session.shared.read().config.clone());
             let chat_ctx = ChatContext {
                 model_name: &snapshot.1.model.name,
@@ -284,19 +286,19 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             // whether or not the model responded — otherwise it sticks
             // around and re-fires on every subsequent turn.
             {
-                let mut hist = session.mutable.lock().history.clone();
-                if clarifier_idx < hist.len() {
-                    let is_clarifier = hist[clarifier_idx]
+                let mut locked = session.mutable.lock();
+                if clarifier_idx < locked.history.len() {
+                    let is_clarifier = locked.history[clarifier_idx]
                         .get("role")
                         .and_then(|r| r.as_str())
                         == Some("system")
-                        && hist[clarifier_idx]
+                        && locked.history[clarifier_idx]
                             .get("content")
                             .and_then(|c| c.as_str())
                             .map(|s| s.contains("vague"))
                             .unwrap_or(false);
                     if is_clarifier {
-                        hist.remove(clarifier_idx);
+                        locked.history.remove(clarifier_idx);
                     }
                 }
             }
@@ -403,9 +405,9 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
 
     // 6) Maybe pre-compact the history before the first call.
     {
-        let mut hist = session.mutable.lock().history.clone();
-        if itsy::session::compaction::maybe_compact(&mut hist) {
-            println!("{}", tui::compacted(hist.len() as u32));
+        let mut locked = session.mutable.lock();
+        if itsy::session::compaction::maybe_compact(&mut locked.history) {
+            println!("{}", tui::compacted(locked.history.len() as u32));
         }
     }
 
@@ -436,8 +438,8 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
 
         // Mid-turn eviction every 3 tool calls.
         if state.tool_calls_this_turn > 0 && state.tool_calls_this_turn % 3 == 0 {
-            let mut hist = session.mutable.lock().history.clone();
-            let evicted = itsy::session::compaction::mid_turn_evict(&mut hist);
+            let mut locked = session.mutable.lock();
+            let evicted = itsy::session::compaction::mid_turn_evict(&mut locked.history);
             if evicted > 0 {
                 session.shared.write().token_monitor.record_eviction();
             }
@@ -536,10 +538,10 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
         let response_content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
         let response_has_content = !response_content.trim().is_empty();
         if state.empty_retry_injected && (!tool_calls.is_empty() || response_has_content) {
-            let mut hist = session.mutable.lock().history.clone();
-            if hist.len() >= 2 {
-                hist.pop();
-                hist.pop();
+            let mut locked = session.mutable.lock();
+            if locked.history.len() >= 2 {
+                locked.history.pop();
+                locked.history.pop();
             }
             state.empty_retry_injected = false;
         }
@@ -903,17 +905,22 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     println!("{}", tui::tool_start(&name));
                 }
 
+                // Extract needed data under brief locks, then release before .await.
+                let config = session.shared.read().config.clone();
+                let read_tracker_arc = session.shared.read().read_tracker.clone();
+                let file_state_arc = session.shared.read().file_state.clone();
+                let snapshot_manager_arc = session.mutable.lock().snapshot_manager.clone();
                 let result = {
                     let ctx = ExecCtx {
-                        config: &session.shared.read().config.clone(),
+                        config: &config,
                         flags: &session.ro.flags,
                         memory: Arc::new(parking_lot::Mutex::new(MemoryStore::new(&session.ro.cwd))),
                         mcp_bridge: Some(session.ro.mcp_bridge.clone()),
                         mcp_client: None,
                         fullscreen: fs_handle.clone(),
-                        read_tracker: &session.shared.read().read_tracker,
-                        file_state: &session.shared.read().file_state,
-                        snapshot_manager: &session.mutable.lock().snapshot_manager,
+                        read_tracker: &*read_tracker_arc,
+                        file_state: &*file_state_arc,
+                        snapshot_manager: &*snapshot_manager_arc,
                     };
                     execute_tool(&name, args.clone(), &ctx).await
                 };
@@ -1432,9 +1439,9 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                 .unwrap_or(false)
         {
             if let Some(content) = &content_opt {
-                let mut hist = session.mutable.lock().history.clone();
-                hist.push(json!({"role": "assistant", "content": content}));
-                hist.push(json!({
+                let mut locked = session.mutable.lock();
+                locked.history.push(json!({"role": "assistant", "content": content}));
+                locked.history.push(json!({
                     "role": "user",
                     "content": "[SYSTEM] You responded without using any tools. This task requires file operations. Use the appropriate tools (read_file, write_file, patch, etc.) — actually do it.",
                 }));
@@ -1458,10 +1465,11 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     "  \x1b[33m⚠ text-only streak: {} consecutive responses without tools — forcing tool use ({n})\x1b[0m",
                     n
                 );
-                let mut hist = session.mutable.lock().history.clone();
+                let mut locked = session.mutable.lock();
                 if let Some(content) = &content_opt {
-                    hist.push(json!({"role": "assistant", "content": content}));
+                    locked.history.push(json!({"role": "assistant", "content": content}));
                 }
+                drop(locked);
                 let has_contract = itsy::settings::get().contract
                     && itsy::session::contract::current()
                         .map(|c| {
@@ -1478,7 +1486,10 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     "[SYSTEM] You have responded with text only multiple times without using tools. \
                      Use a tool to make progress instead of describing what you plan to do."
                 };
-                hist.push(json!({"role": "user", "content": msg}));
+                {
+                    let mut locked = session.mutable.lock();
+                    locked.history.push(json!({"role": "user", "content": msg}));
+            }
                 continue;
             }
         }
@@ -1530,10 +1541,12 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                                 == itsy::session::contract::AssertionState::Failed)
                             .map(|a| a.id.as_str())
                             .collect();
-                        let mut hist = session.mutable.lock().history.clone();
+                        // Push assistant content to real history, then release lock.
+                        let mut locked = session.mutable.lock();
                         if let Some(content) = &content_opt {
-                            hist.push(json!({"role": "assistant", "content": content}));
+                            locked.history.push(json!({"role": "assistant", "content": content}));
                         }
+                        drop(locked);
                         let mut msg = String::from(
                             "[SYSTEM] The turn cannot end yet — the contract is not closed.\n\n"
                         );
@@ -1597,7 +1610,10 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                                  Keep working until they all pass."
                             );
                         }
-                        hist.push(json!({"role": "user", "content": msg}));
+                        {
+                            let mut locked = session.mutable.lock();
+                            locked.history.push(json!({"role": "user", "content": msg}));
+                        }
                         continue;
                     }
                     // Exhausted the retry budget — record + let turn end.
@@ -1618,9 +1634,9 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                 if let Some(signal) = session.mutable.lock().early_stop
                     .check_greeting(content, state.tool_calls_this_turn > 0)
                 {
-                    let mut hist = session.mutable.lock().history.clone();
-                    hist.push(json!({"role": "assistant", "content": content}));
-                    hist.push(json!({"role": "user", "content": signal.injection}));
+                    let mut locked = session.mutable.lock();
+                    locked.history.push(json!({"role": "assistant", "content": content}));
+                    locked.history.push(json!({"role": "user", "content": signal.injection}));
                     continue;
                 }
             }
@@ -1641,8 +1657,9 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             // No content + no tool calls + nothing tried — try streaming.
             let cfg = session.shared.read().config.clone();
             let hist = session.mutable.lock().history.clone();
-            let mut early = &mut session.mutable.lock().early_stop;
             let fs_handle = session.mutable.lock().fullscreen.clone();
+            // Swap early_stop out of the lock so the guard is dropped before .await.
+            let mut early = std::mem::take(&mut session.mutable.lock().early_stop);
             if let Some(ref fs) = fs_handle {
                 fs.set_streaming(true);
             }
@@ -2214,11 +2231,9 @@ async fn handle_mcp_tool_call(id: Value, params: Option<Value>, session: &AgentS
         }
         "itsy_bash" => {
             let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
-            if regex::Regex::new(r"rm\s+-rf\s+/[^.]")
-                .unwrap()
+            if regex::Regex::new(r"rm\s+-rf\s+/[^.]").expect("valid regex literal")
                 .is_match(command)
-                || regex::Regex::new(r"(?i)format\s+c:")
-                    .unwrap()
+                || regex::Regex::new(r"(?i)format\s+c:").expect("valid regex literal")
                     .is_match(command)
             {
                 "Error: destructive command blocked".into()
@@ -2495,8 +2510,8 @@ async fn run_repl(session: &AgentSession) -> Result<()> {
     let mut input = String::new();
     loop {
         {
-            let hist = session.mutable.lock().history.clone();
-            print!("{}\n> ", tui::render_status(hist.len()));
+            let locked = session.mutable.lock();
+            print!("{}\n> ", tui::render_status(locked.history.len()));
             stdout.lock().flush().ok();
         }
         input.clear();

@@ -214,7 +214,7 @@ pub static KNOWN_PROFILES: Lazy<HashMap<&'static str, Profile>> = Lazy::new(|| {
 fn match_profile(model_name: &str) -> Option<(&'static str, &'static Profile)> {
     let name = model_name.to_lowercase();
     let mut keys: Vec<&&'static str> = KNOWN_PROFILES.keys().collect();
-    keys.sort_by(|a, b| b.len().cmp(&a.len()));
+    keys.sort_by_key(|b| std::cmp::Reverse(b.len()));
     for k in keys {
         if name.contains(*k) {
             return Some((*k, &KNOWN_PROFILES[*k]));

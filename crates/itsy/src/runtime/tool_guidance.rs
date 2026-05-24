@@ -94,15 +94,14 @@ pub fn select_tool_skill_cards(messages: &[Value]) -> String {
                     }
                 }
             }
-            "user" => {
-                if last_user_text.is_empty() {
+            "user"
+                if last_user_text.is_empty() => {
                     if let Some(c) = msg.get("content").and_then(|v| v.as_str()) {
                         if !c.starts_with("[SYSTEM]") {
                             last_user_text = c;
                         }
                     }
                 }
-            }
             _ => {}
         }
     }

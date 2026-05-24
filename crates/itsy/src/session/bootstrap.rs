@@ -180,7 +180,7 @@ fn scan_node(cwd: &Path, parts: &mut BootstrapParts) {
         .get("engines")
         .and_then(|e| e.get("node"))
         .and_then(|v| v.as_str())
-        .map(|v| strip_version(v));
+        .map(strip_version);
 
     let node_ver = from_file.or(from_engines);
 
@@ -289,7 +289,7 @@ fn scan_rust(cwd: &Path, parts: &mut BootstrapParts) {
     parts.test = Some("cargo test".into());
     let cargo = read(cwd, "Cargo.toml");
     static BIN_RE: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r#"\[\[bin\]\]\s*\nname\s*=\s*"([^"]+)""#).unwrap());
+        Lazy::new(|| Regex::new(r#"\[\[bin\]\]\s*\nname\s*=\s*"([^"]+)""#).expect("valid regex literal"));
     if let Some(c) = BIN_RE.captures(&cargo) {
         parts.entry = Some(format!("src/{}.rs", &c[1]));
     } else if exists(cwd, "src/main.rs") {
@@ -301,7 +301,7 @@ fn scan_rust(cwd: &Path, parts: &mut BootstrapParts) {
 
 fn scan_go(cwd: &Path, parts: &mut BootstrapParts) {
     let gomod = read(cwd, "go.mod");
-    static GO_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^go\s+(\d+\.\d+)").unwrap());
+    static GO_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^go\s+(\d+\.\d+)").expect("valid regex literal"));
     let ver = GO_RE.captures(&gomod).map(|c| c[1].to_string());
     parts.runtime = Some(match ver {
         Some(v) => format!("Go {v}"),

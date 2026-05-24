@@ -23,19 +23,18 @@ static VAGUE_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
         r"(?i)^(make it|do the|fix the)\s+(better|work|thing|stuff)$",
         r"(?i)^(same|again|more|another)$",
     ];
-    raws.iter().map(|r| Regex::new(r).unwrap()).collect()
+    raws.iter().map(|r| Regex::new(r).expect("valid regex literal")).collect()
 });
 
 static CONFIRMATION_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)^(yes|no|ok|sure|go|do it|y|n|yep|nope|yeah|nah)$").unwrap());
+    Lazy::new(|| Regex::new(r"(?i)^(yes|no|ok|sure|go|do it|y|n|yep|nope|yeah|nah)$").expect("valid regex literal"));
 
 static MULTI_WORD_CONFIRMATION_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)^(go ahead|go for it|just do it|do that|do both|read it|show me|that one|sounds good|let's do it|let's go|that works)\b")
-        .unwrap()
+    Regex::new(r"(?i)^(go ahead|go for it|just do it|do that|do both|read it|show me|that one|sounds good|let's do it|let's go|that works)\b").expect("valid regex literal")
 });
 
 static MULTI_NUMBER_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)^(both\s+)?\d+(\s*,\s*|\s+and\s+)\d+$").unwrap());
+    Lazy::new(|| Regex::new(r"(?i)^(both\s+)?\d+(\s*,\s*|\s+and\s+)\d+$").expect("valid regex literal"));
 
 /// Boolean check: does this message look too vague to act on?
 pub fn is_vague(message: &str) -> bool {

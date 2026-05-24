@@ -240,7 +240,7 @@ fn cmd_budget(ctx: &CommandCtx) -> String {
         })
         .sum();
 
-    let usage = if max_budget == 0 { 0 } else { current_est * 100 / max_budget };
+    let usage = current_est.checked_mul(100).and_then(|n| n.checked_div(max_budget)).unwrap_or(0);
     let filled = (usage / 5).min(20);
     let bar: String = "█".repeat(filled) + &"░".repeat(20 - filled);
 

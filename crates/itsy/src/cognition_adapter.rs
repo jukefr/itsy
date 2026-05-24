@@ -30,7 +30,7 @@ pub async fn classify_task_compiled<F: Fn(&str) -> &'static str>(
     let cleaned = text
         .trim()
         .to_lowercase()
-        .trim_end_matches(|c: char| matches!(c, '.' | ',' | '!' | '?'))
+        .trim_end_matches(['.', ',', '!', '?'])
         .to_string();
     match cleaned.as_str() {
         "coding" => "coding",
@@ -69,19 +69,19 @@ pub fn route_fallback() -> RouteDecision {
 
 static STRONG_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
     vec![
-        Regex::new(r"(?i)\b(refactor|redesign|architect|rewrite|migrate|convert)\b").unwrap(),
-        Regex::new(r"(?i)\b(multi.?file|multiple files|across files|all files)\b").unwrap(),
-        Regex::new(r"(?i)\b(system|framework|infrastructure|full.?stack)\b").unwrap(),
-        Regex::new(r"(?i)\b(test suite|integration test|e2e)\b").unwrap(),
-        Regex::new(r"(?i)\b(and then|step \d|first.*then.*finally)\b").unwrap(),
+        Regex::new(r"(?i)\b(refactor|redesign|architect|rewrite|migrate|convert)\b").expect("valid regex literal"),
+        Regex::new(r"(?i)\b(multi.?file|multiple files|across files|all files)\b").expect("valid regex literal"),
+        Regex::new(r"(?i)\b(system|framework|infrastructure|full.?stack)\b").expect("valid regex literal"),
+        Regex::new(r"(?i)\b(test suite|integration test|e2e)\b").expect("valid regex literal"),
+        Regex::new(r"(?i)\b(and then|step \d|first.*then.*finally)\b").expect("valid regex literal"),
     ]
 });
 
 static FAST_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
     vec![
-        Regex::new(r"(?i)\b(fix typo|rename|add comment|format|lint)\b").unwrap(),
-        Regex::new(r"(?i)\b(what is|explain|show me|read)\b").unwrap(),
-        Regex::new(r"(?i)\b(simple|quick|small|minor)\b").unwrap(),
+        Regex::new(r"(?i)\b(fix typo|rename|add comment|format|lint)\b").expect("valid regex literal"),
+        Regex::new(r"(?i)\b(what is|explain|show me|read)\b").expect("valid regex literal"),
+        Regex::new(r"(?i)\b(simple|quick|small|minor)\b").expect("valid regex literal"),
     ]
 });
 

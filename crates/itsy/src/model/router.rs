@@ -43,7 +43,7 @@ static STRONG_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
         r"(?i)\b(and then|step \d|first.*then.*finally)\b",
     ]
     .iter()
-    .map(|p| Regex::new(p).unwrap())
+    .map(|p| Regex::new(p).expect("valid regex literal"))
     .collect()
 });
 
@@ -54,7 +54,7 @@ static FAST_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
         r"(?i)\b(simple|quick|small|minor)\b",
     ]
     .iter()
-    .map(|p| Regex::new(p).unwrap())
+    .map(|p| Regex::new(p).expect("valid regex literal"))
     .collect()
 });
 

@@ -24,6 +24,12 @@ pub struct WriteCheck {
     pub blocked: bool,
 }
 
+impl Default for ReadTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ReadTracker {
     pub fn new() -> Self {
         Self {
@@ -75,7 +81,7 @@ impl ReadTracker {
             return WriteCheck { ok: true, reason: None, warning: false, blocked: false };
         };
         // Creating a new file is always fine.
-        if !fs::metadata(&c).is_ok() {
+        if fs::metadata(&c).is_err() {
             return WriteCheck { ok: true, reason: None, warning: false, blocked: false };
         }
         if self.clean_paths.lock().contains(&c) {

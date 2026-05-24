@@ -277,7 +277,7 @@ fn sanitize_fts_query(input: &str) -> Option<String> {
 
 /// LIKE-based fallback used when an FTS query yields nothing.
 fn like_fallback(conn: &Connection, query: &str, cap: u32) -> Result<Vec<SymbolHit>> {
-    let like = format!("%{}%", query.replace('%', "").replace('_', ""));
+    let like = format!("%{}%", query.replace(['%', '_'], ""));
     if like.len() <= 2 {
         return Ok(vec![]);
     }

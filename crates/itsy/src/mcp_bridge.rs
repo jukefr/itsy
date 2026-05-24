@@ -89,7 +89,7 @@ impl McpBridge {
             let mut inner = self.inner.lock();
             inner.stdin.take()
         };
-        let Some(mut s) = stdin_taken.take() else { return None; };
+        let mut s = stdin_taken.take()?;
         let write_res = s.write_all(line.as_bytes()).await;
         {
             let mut inner = self.inner.lock();

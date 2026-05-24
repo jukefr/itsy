@@ -17,7 +17,7 @@ struct Category {
 }
 
 fn r(s: &str) -> Regex {
-    Regex::new(&format!("(?i){s}")).unwrap()
+    Regex::new(&format!("(?i){s}")).expect("valid regex literal")
 }
 
 static CATEGORIES: Lazy<Vec<(&'static str, Category)>> = Lazy::new(|| {
@@ -163,7 +163,7 @@ pub fn classify_tool_category(message: &str) -> Classification {
         return Classification { category: FALLBACK.into(), confidence: 0.0, scores: HashMap::new() };
     }
     let trimmed = message.trim();
-    let action_re = Regex::new(r"(?i)\b(run|fix|read|show|find|build|test|git|npm|pip|go|cd|ls|rm|mv|cp)\b").unwrap();
+    let action_re = Regex::new(r"(?i)\b(run|fix|read|show|find|build|test|git|npm|pip|go|cd|ls|rm|mv|cp)\b").expect("valid regex literal");
     if trimmed.len() <= SHORT_MSG_THRESHOLD && !action_re.is_match(trimmed) {
         let mut scores = HashMap::new();
         scores.insert("respond".to_string(), 1.0);
@@ -272,7 +272,7 @@ pub fn is_affirmation(s: &str) -> bool {
 /// Detect quoted absolute paths or paths with a slash/extension.
 pub fn looks_like_path(s: &str) -> bool {
     static RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
-        regex::Regex::new(r#"[\\/]|\.\w{1,5}\s*$|^["'].*["']$"#).unwrap()
+        regex::Regex::new(r#"[\\/]|\.\w{1,5}\s*$|^["'].*["']$"#).expect("valid regex literal")
     });
     RE.is_match(s.trim())
 }
@@ -280,10 +280,7 @@ pub fn looks_like_path(s: &str) -> bool {
 /// Detect option-references like "option 2", "do 3", "first", "second".
 pub fn looks_like_option_ref(s: &str) -> bool {
     static RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
-        regex::Regex::new(
-            r"(?i)^(option\s+\d|work\s+on\s+\d|do\s+\d|start\s+with\s+\d|\d+\.?\s*$|first|second|third|fourth)\b",
-        )
-        .unwrap()
+        regex::Regex::new(r"(?i)^(option\s+\d|work\s+on\s+\d|do\s+\d|start\s+with\s+\d|\d+\.?\s*$|first|second|third|fourth)\b").expect("valid regex literal")
     });
     RE.is_match(s.trim())
 }

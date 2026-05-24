@@ -61,7 +61,7 @@ fn assert_url_safe(raw: &str) -> Result<Url> {
         return Err(anyhow!("refused: loopback URL"));
     }
     static RFC1918: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)").unwrap()
+        Regex::new(r"^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)").expect("valid regex literal")
     });
     if RFC1918.is_match(&host) {
         return Err(anyhow!("refused: RFC1918 URL"));
@@ -104,11 +104,10 @@ fn robots_allows(robots: &str, path: &str) -> bool {
         };
         match k.as_str() {
             "user-agent" => in_block = v == "*",
-            "disallow" if in_block => {
-                if !v.is_empty() && path.starts_with(v) {
+            "disallow" if in_block
+                && !v.is_empty() && path.starts_with(v) => {
                     return false;
                 }
-            }
             _ => {}
         }
     }
@@ -180,7 +179,8 @@ pub async fn web_search(query: &str, limit: usize) -> Result<Vec<WebSearchResult
         }
     }
     // SearXNG fallback (operator-configured).
-    if let Some(url) = crate::settings::get().searx_url.as_deref() {
+    let searx_url = crate::settings::get().searx_url.clone();
+    if let Some(ref url) = searx_url {
         if let Ok(mut r) = search_searxng(&client, url, query, limit).await {
             if !r.is_empty() {
                 dedupe_by_url(&mut r);
@@ -338,7 +338,7 @@ pub async fn web_fetch_page(url: &str, timeout_secs: u64) -> Result<WebPage> {
 }
 
 fn extract_title(html: &str) -> String {
-    static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?is)<title[^>]*>(.*?)</title>").unwrap());
+    static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?is)<title[^>]*>(.*?)</title>").expect("valid regex literal"));
     RE.captures(html)
         .map(|c| html_unescape(&strip_tags(&c[1])).trim().to_string())
         .unwrap_or_default()
@@ -346,16 +346,10 @@ fn extract_title(html: &str) -> String {
 
 fn extract_meta_description(html: &str) -> String {
     static RE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(
-            r#"(?is)<meta[^>]+name=["']description["'][^>]+content=["']([^"']*)["']"#,
-        )
-        .unwrap()
+        Regex::new(r#"(?is)<meta[^>]+name=["']description["'][^>]+content=["']([^"']*)["']"#).expect("valid regex literal")
     });
     static RE_OG: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(
-            r#"(?is)<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']*)["']"#,
-        )
-        .unwrap()
+        Regex::new(r#"(?is)<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']*)["']"#).expect("valid regex literal")
     });
     if let Some(c) = RE.captures(html) {
         return html_unescape(&c[1]).trim().to_string();
@@ -369,7 +363,8 @@ fn extract_meta_description(html: &str) -> String {
 fn extract_readable(html: &str) -> String {
     let cleaned = strip_noise(html);
     // Prefer high-signal containers in priority order.
-    let candidates: [(&str, fn(&str) -> Option<String>); 5] = [
+    type ContainerExtractor = (&'static str, fn(&str) -> Option<String>);
+    let candidates: [ContainerExtractor; 5] = [
         ("article", |h| extract_tag(h, "article")),
         ("main", |h| extract_tag(h, "main")),
         ("role-main", extract_role_main),
@@ -423,14 +418,14 @@ fn extract_readable(html: &str) -> String {
 }
 
 fn strip_noise(html: &str) -> String {
-    static SCRIPT: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?is)<script[^>]*>.*?</script>").unwrap());
-    static STYLE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?is)<style[^>]*>.*?</style>").unwrap());
-    static NAV: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?is)<nav[^>]*>.*?</nav>").unwrap());
-    static HEADER: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?is)<header[^>]*>.*?</header>").unwrap());
-    static FOOTER: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?is)<footer[^>]*>.*?</footer>").unwrap());
-    static ASIDE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?is)<aside[^>]*>.*?</aside>").unwrap());
-    static NOSCRIPT: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?is)<noscript[^>]*>.*?</noscript>").unwrap());
-    static COMMENT: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?is)<!--.*?-->").unwrap());
+    static SCRIPT: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?is)<script[^>]*>.*?</script>").expect("valid regex literal"));
+    static STYLE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?is)<style[^>]*>.*?</style>").expect("valid regex literal"));
+    static NAV: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?is)<nav[^>]*>.*?</nav>").expect("valid regex literal"));
+    static HEADER: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?is)<header[^>]*>.*?</header>").expect("valid regex literal"));
+    static FOOTER: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?is)<footer[^>]*>.*?</footer>").expect("valid regex literal"));
+    static ASIDE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?is)<aside[^>]*>.*?</aside>").expect("valid regex literal"));
+    static NOSCRIPT: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?is)<noscript[^>]*>.*?</noscript>").expect("valid regex literal"));
+    static COMMENT: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?is)<!--.*?-->").expect("valid regex literal"));
     let mut s = html.to_string();
     for re in [&*SCRIPT, &*STYLE, &*NAV, &*HEADER, &*FOOTER, &*ASIDE, &*NOSCRIPT, &*COMMENT] {
         s = re.replace_all(&s, "").into_owned();
@@ -485,7 +480,7 @@ fn html_to_text(html: &str) -> String {
 }
 
 fn strip_tags(s: &str) -> String {
-    static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?s)<[^>]+>").unwrap());
+    static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?s)<[^>]+>").expect("valid regex literal"));
     // Insert a newline for paragraph-like breaks before stripping.
     let s = s
         .replace("</p>", "\n")

@@ -7,8 +7,7 @@
 //! We nudge temperature differently per attempt:
 //!   - attempt 1 (initial fail)  → lower: become more deterministic
 //!   - attempt 2 (still failing) → higher: explore a different approach
-//!   - attempt 3+                → back to original: the deterministic retry
-//!                                  might finally work
+//!   - attempt 3+  → back to original: the deterministic retry might finally work
 //!
 //! Applied as a DELTA on top of the configured temperature, never as an
 //! absolute value, so user config remains the anchor.

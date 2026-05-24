@@ -299,7 +299,7 @@ fn slice_text<'a>(source: &'a str, node: &Node) -> Option<&'a str> {
     if end > source.len() || start > end {
         return None;
     }
-    std::str::from_utf8(&source.as_bytes()[start..end]).ok()
+    Some(&source[start..end])
 }
 
 /// First line of the declaration, trimmed and capped at 200 chars.
@@ -317,7 +317,7 @@ fn first_line_signature(source: &str, node: &Node) -> Option<String> {
     let mut s = line.to_string();
     if s.len() > 200 {
         s.truncate(200);
-        s.push_str("…");
+        s.push('…');
     }
     Some(s)
 }

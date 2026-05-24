@@ -13,23 +13,23 @@ pub struct SecretPattern {
 
 pub static SECRET_PATTERNS: Lazy<Vec<SecretPattern>> = Lazy::new(|| {
     vec![
-        SecretPattern { name: "openai_key", re: Regex::new(r"\bsk-(?:proj-|ant-|or-)?[A-Za-z0-9_-]{20,}\b").unwrap() },
-        SecretPattern { name: "anthropic_key", re: Regex::new(r"\bsk-ant-[A-Za-z0-9_-]{20,}\b").unwrap() },
-        SecretPattern { name: "bearer", re: Regex::new(r"\b[Bb]earer\s+[A-Za-z0-9_\-.=:+/]{16,}").unwrap() },
-        SecretPattern { name: "github_pat", re: Regex::new(r"\bghp_[A-Za-z0-9]{30,}\b").unwrap() },
-        SecretPattern { name: "github_oauth", re: Regex::new(r"\bgho_[A-Za-z0-9]{30,}\b").unwrap() },
-        SecretPattern { name: "google_api", re: Regex::new(r"\bAIza[0-9A-Za-z_-]{30,}\b").unwrap() },
-        SecretPattern { name: "aws_key", re: Regex::new(r"\bAKIA[0-9A-Z]{16}\b").unwrap() },
-        SecretPattern { name: "jwt", re: Regex::new(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b").unwrap() },
-        SecretPattern { name: "slack", re: Regex::new(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b").unwrap() },
+        SecretPattern { name: "openai_key", re: Regex::new(r"\bsk-(?:proj-|ant-|or-)?[A-Za-z0-9_-]{20,}\b").expect("valid regex literal") },
+        SecretPattern { name: "anthropic_key", re: Regex::new(r"\bsk-ant-[A-Za-z0-9_-]{20,}\b").expect("valid regex literal") },
+        SecretPattern { name: "bearer", re: Regex::new(r"\b[Bb]earer\s+[A-Za-z0-9_\-.=:+/]{16,}").expect("valid regex literal") },
+        SecretPattern { name: "github_pat", re: Regex::new(r"\bghp_[A-Za-z0-9]{30,}\b").expect("valid regex literal") },
+        SecretPattern { name: "github_oauth", re: Regex::new(r"\bgho_[A-Za-z0-9]{30,}\b").expect("valid regex literal") },
+        SecretPattern { name: "google_api", re: Regex::new(r"\bAIza[0-9A-Za-z_-]{30,}\b").expect("valid regex literal") },
+        SecretPattern { name: "aws_key", re: Regex::new(r"\bAKIA[0-9A-Z]{16}\b").expect("valid regex literal") },
+        SecretPattern { name: "jwt", re: Regex::new(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b").expect("valid regex literal") },
+        SecretPattern { name: "slack", re: Regex::new(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b").expect("valid regex literal") },
         SecretPattern {
             name: "env_api_key",
-            re: Regex::new(r#"\b([A-Z][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD|API)[A-Z0-9_]*)\s*=\s*["']?([^\s"'\n]{8,})["']?"#).unwrap(),
+            re: Regex::new(r#"\b([A-Z][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD|API)[A-Z0-9_]*)\s*=\s*["']?([^\s"'\n]{8,})["']?"#).expect("valid regex literal"),
         },
         // Private key blocks are normally handled by an offline tool; the
         // multi-line form does not work with the regex crate's default DOTALL
         // semantics so we approximate with the (?s) flag.
-        SecretPattern { name: "private_key", re: Regex::new(r"(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----").unwrap() },
+        SecretPattern { name: "private_key", re: Regex::new(r"(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----").expect("valid regex literal") },
     ]
 });
 
@@ -79,14 +79,14 @@ pub fn redact_value(value: &serde_json::Value) -> serde_json::Value {
 
 static SENSITIVE_PATH_RES: Lazy<Vec<Regex>> = Lazy::new(|| {
     vec![
-        Regex::new(r"(?i)[/\\]\.ssh[/\\]").unwrap(),
-        Regex::new(r"(?i)[/\\]\.aws[/\\]credentials").unwrap(),
-        Regex::new(r"(?i)[/\\]\.gnupg[/\\]").unwrap(),
-        Regex::new(r"(?i)[/\\]\.netrc$").unwrap(),
-        Regex::new(r"(?i)[/\\]etc[/\\](shadow|gshadow|sudoers)").unwrap(),
-        Regex::new(r"(?i)[/\\]\.password-store[/\\]").unwrap(),
-        Regex::new(r"(?i)[/\\]\.docker[/\\]config\.json$").unwrap(),
-        Regex::new(r"(?i)[/\\]\.kube[/\\]config$").unwrap(),
+        Regex::new(r"(?i)[/\\]\\.ssh[/\\]").expect("valid regex literal"),
+        Regex::new(r"(?i)[/\\]\\.aws[/\\]credentials").expect("valid regex literal"),
+        Regex::new(r"(?i)[/\\]\\.gnupg[/\\]").expect("valid regex literal"),
+        Regex::new(r"(?i)[/\\]\\.netrc$").expect("valid regex literal"),
+        Regex::new(r"(?i)[/\\]etc[/\\](shadow|gshadow|sudoers)").expect("valid regex literal"),
+        Regex::new(r"(?i)[/\\]\\.password-store[/\\]").expect("valid regex literal"),
+        Regex::new(r"(?i)[/\\]\\.docker[/\\]config\.json$").expect("valid regex literal"),
+        Regex::new(r"(?i)[/\\]\\.kube[/\\]config$").expect("valid regex literal"),
     ]
 });
 
@@ -252,15 +252,15 @@ pub fn build_command(base: &str, trusted: &[&str], user_args: &[&str]) -> String
 
 static ANSI_RES: Lazy<Vec<Regex>> = Lazy::new(|| {
     vec![
-        Regex::new(r"\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]").unwrap(),
-        Regex::new(r"\x1b\][\x20-\x7e]*?(?:\x07|\x1b\\)").unwrap(),
-        Regex::new(r"\x1b[PX\^_][\x20-\x7e]*?\x1b\\").unwrap(),
-        Regex::new(r"\x1b[@-_]").unwrap(),
-        Regex::new(r"[\x80-\x9f]").unwrap(),
+        Regex::new(r"\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]").expect("valid regex literal"),
+        Regex::new(r"\x1b\][\x20-\x7e]*?(?:\x07|\x1b\\)").expect("valid regex literal"),
+        Regex::new(r"\x1b[PX\^_][\x20-\x7e]*?\x1b\\").expect("valid regex literal"),
+        Regex::new(r"\x1b[@-_]").expect("valid regex literal"),
+        Regex::new(r"[\x80-\x9f]").expect("valid regex literal"),
     ]
 });
 
-static C0_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]").unwrap());
+static C0_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]").expect("valid regex literal"));
 
 pub fn strip_ansi(input: &str) -> String {
     if input.is_empty() {

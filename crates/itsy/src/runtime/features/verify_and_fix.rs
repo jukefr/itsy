@@ -151,7 +151,7 @@ impl VerifyAndFixLoop {
                 while end > 0 && !content.is_char_boundary(end) {
                     end -= 1;
                 }
-                let truncated_tokens = (content.len() - end + 3) / 4;
+                let truncated_tokens = (content.len() - end).div_ceil(4);
                 format!(
                     "{}\n... ({} more tokens truncated)",
                     &content[..end],

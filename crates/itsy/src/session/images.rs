@@ -42,7 +42,7 @@ static FILE_REGEX: Lazy<Regex> = Lazy::new(|| {
     // (?<![\w`]) is not supported by `regex`. Emulate by capturing the
     // preceding character if any and skipping matches where it's a word
     // character or backtick.
-    Regex::new(r"(?:^|[^\w`])@(\.?[^\s`,]*(?:\.[^\s`,]+)+)").unwrap()
+    Regex::new(r"(?:^|[^\w`])@(\.?[^\s`,]*(?:\.[^\s`,]+)+)").expect("valid regex literal")
 });
 
 /// Extract images from a message. Out-of-tree and sensitive paths are
@@ -51,7 +51,7 @@ pub fn extract_images(message: &str, cwd: &Path) -> Vec<ImageRef> {
     let mut out = Vec::new();
     for cap in FILE_REGEX.captures_iter(message) {
         let raw = match cap.get(1) {
-            Some(m) => m.as_str().trim_end_matches(|c: char| c == '.' || c == ',' || c == ';'),
+            Some(m) => m.as_str().trim_end_matches(['.', ',', ';']),
             None => continue,
         };
         if raw.is_empty() {

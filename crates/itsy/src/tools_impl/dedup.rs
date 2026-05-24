@@ -42,7 +42,7 @@ pub fn bash_is_read_only(args: &Value) -> bool {
         "cd", "export", "unset", "source", ".", "exec", "eval",
         "tee", "shred",
     ];
-    for segment in cmd.split(|c: char| matches!(c, '|' | ';' | '&')) {
+    for segment in cmd.split(['|', ';', '&']) {
         let trimmed = segment.trim();
         if trimmed.is_empty() {
             continue;

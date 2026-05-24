@@ -326,8 +326,8 @@ async fn exec_bash(args: &Value, cwd: &Path, _ctx: &ExecCtx<'_>) -> Value {
     };
     let command = rtk_rewrite(command);
 
-    let blocking = regex::Regex::new(r"(?i)^(node|python|python3|ruby|php|go run|deno run|bun run)\s+.*\b(server\.(js|py|rb|php|ts)|app\.(js|py|rb|php|ts))\b").unwrap();
-    let explicit = regex::Regex::new(r"(?i)\b(uvicorn|gunicorn|rails\s+s|npm\s+start|yarn\s+start|npm\s+run\s+dev|python3?\s+-m\s+(flask|django|uvicorn|aiohttp\.web|fastapi)|puma|unicorn|passenger)\b").unwrap();
+    let blocking = regex::Regex::new(r"(?i)^(node|python|python3|ruby|php|go run|deno run|bun run)\s+.*\b(server\.(js|py|rb|php|ts)|app\.(js|py|rb|php|ts))\b").expect("valid regex literal");
+    let explicit = regex::Regex::new(r"(?i)\b(uvicorn|gunicorn|rails\s+s|npm\s+start|yarn\s+start|npm\s+run\s+dev|python3?\s+-m\s+(flask|django|uvicorn|aiohttp\.web|fastapi)|puma|unicorn|passenger)\b").expect("valid regex literal");
     if (blocking.is_match(&command) || explicit.is_match(&command))
         && !command.contains("--check")
         && !command.contains("--version")
@@ -340,7 +340,7 @@ async fn exec_bash(args: &Value, cwd: &Path, _ctx: &ExecCtx<'_>) -> Value {
         });
     }
     // Interactive-stdin guard
-    let script_re = regex::Regex::new(r#"(?:^|\s)(python3?|node|ruby)\s+["']?([^\s"']+)"#).unwrap();
+    let script_re = regex::Regex::new(r#"(?:^|\s)(python3?|node|ruby)\s+["']?([^\s"']+)"#).expect("valid regex literal");
     if let Some(caps) = script_re.captures(&command) {
         let target_rel = caps[2].to_string();
         let target = cwd.join(&target_rel);
@@ -379,8 +379,9 @@ async fn exec_bash(args: &Value, cwd: &Path, _ctx: &ExecCtx<'_>) -> Value {
                 return json!({"result": "(no matches found)", "command": command});
             }
             let body = if trimmed.is_empty() { "(no output)".to_string() } else { trimmed.clone() };
+            let error_diagnosis = crate::settings::get().error_diagnosis;
             let with_hint = maybe_prepend_error_diagnosis(
-                crate::settings::get().error_diagnosis,
+                error_diagnosis,
                 &command,
                 &body,
                 result.exit_code,
@@ -408,8 +409,9 @@ async fn exec_bash(args: &Value, cwd: &Path, _ctx: &ExecCtx<'_>) -> Value {
                 if code == 1 && trimmed.is_empty() && is_grep_command(&command) {
                     return json!({"result": "(no matches found)", "command": command});
                 }
+                let error_diagnosis = crate::settings::get().error_diagnosis;
                 let with_hint = maybe_prepend_error_diagnosis(
-                    crate::settings::get().error_diagnosis,
+                    error_diagnosis,
                     &command,
                     &trimmed,
                     code,
@@ -683,7 +685,7 @@ async fn exec_explain_symbol(args: &Value, ctx: &ExecCtx<'_>, cwd: &Path) -> Val
             }
         }
     }
-    let sym_re = regex::Regex::new(r"^[A-Za-z_][A-Za-z0-9_:.$-]*$").unwrap();
+    let sym_re = regex::Regex::new(r"^[A-Za-z_][A-Za-z0-9_:.$-]*$").expect("valid regex literal");
     if !sym_re.is_match(symbol) {
         return json!({"result": format!("Symbol \"{symbol}\" is not a valid identifier.")});
     }
@@ -839,7 +841,7 @@ async fn exec_run(args: &Value, cwd: &Path) -> Value {
     let Some(command) = args.get("command").and_then(|v| v.as_str()) else {
         return json!({"error": "run: command missing"});
     };
-    let script_re = regex::Regex::new(r#"^(python3?|node|ruby)\s+["']?([^\s"']+)"#).unwrap();
+    let script_re = regex::Regex::new(r#"^(python3?|node|ruby)\s+["']?([^\s"']+)"#).expect("valid regex literal");
     if let Some(caps) = script_re.captures(command) {
         let target = cwd.join(&caps[2]);
         if target.exists() {
@@ -1302,13 +1304,235 @@ async fn exec_close_contract(args: &Value, cwd: &Path, config: &Config) -> Value
     match contract::close(cwd, status) {
         Ok(c) => {
             let counts = c.counts();
-            json!({
-                "result": format!(
-                    "Contract `{}` closed as {} — {} passed / {} failed / {} skipped of {}.",
-                    c.id, c.status.as_str(), counts.passed, counts.failed, counts.skipped, counts.total,
-                ),
-            })
+            json!({"result": format!(
+                "Contract `{}` closed as {} — {} passed / {} failed / {} skipped of {}.",
+                c.id,
+                c.status.as_str(),
+                counts.passed,
+                counts.failed,
+                counts.skipped,
+                counts.total,
+            )})
         }
         Err(e) => json!({"error": format!("close_contract: {e}")}),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── first_n_lines ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_first_n_lines_returns_first_n_lines() {
+        let s = "line1\nline2\nline3\nline4";
+        assert_eq!(first_n_lines(s, 2), "line1\nline2");
+    }
+
+    #[test]
+    fn test_first_n_lines_returns_all_when_fewer_lines() {
+        let s = "line1\nline2";
+        assert_eq!(first_n_lines(s, 10), "line1\nline2");
+    }
+
+    #[test]
+    fn test_first_n_lines_returns_empty_for_empty_input() {
+        assert_eq!(first_n_lines("", 5), "");
+    }
+
+    #[test]
+    fn test_first_n_lines_zero_returns_first_line() {
+        // n=0 triggers on first newline — returns everything up to it.
+        assert_eq!(first_n_lines("line1\nline2\nline3", 0), "line1");
+    }
+
+    #[test]
+    fn test_first_n_lines_handles_trailing_newline() {
+        let s = "line1\nline2\n";
+        assert_eq!(first_n_lines(s, 2), "line1\nline2");
+    }
+
+    // ── truncate_short ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_truncate_short_preserves_short_string() {
+        assert_eq!(truncate_short("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_short_truncates_long_string() {
+        let r = truncate_short("hello world", 5);
+        assert!(r.starts_with("hello"));
+        assert!(r.ends_with('…'));
+        assert_eq!(r.chars().count(), 6); // 5 chars + ellipsis
+    }
+
+    #[test]
+    fn test_truncate_short_respects_char_boundary() {
+        // Multi-byte chars may cause truncation at a shorter boundary.
+        let r = truncate_short("héllo wörld", 4);
+        assert!(r.len() <= 7); // ~4 bytes + 3-byte ellipsis
+        assert!(r.ends_with('…'));
+    }
+
+    #[test]
+    fn test_truncate_short_exact_length() {
+        assert_eq!(truncate_short("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_short_empty_input() {
+        assert_eq!(truncate_short("", 5), "");
+    }
+
+    // ── is_grep_command ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_is_grep_command_detects_grep() {
+        assert!(is_grep_command("grep foo bar"));
+    }
+
+    #[test]
+    fn test_is_grep_command_detects_rg() {
+        assert!(is_grep_command("rg -n pattern file"));
+    }
+
+    #[test]
+    fn test_is_grep_command_detects_pipe_last() {
+        assert!(is_grep_command("make build | grep error"));
+    }
+
+    #[test]
+    fn test_is_grep_command_detects_after_and() {
+        assert!(is_grep_command("cd /app && rg pattern"));
+    }
+
+    #[test]
+    fn test_is_grep_command_rejects_non_grep() {
+        assert!(!is_grep_command("cat foo.txt"));
+    }
+
+    #[test]
+    fn test_is_grep_command_rejects_empty() {
+        assert!(!is_grep_command(""));
+    }
+
+    #[test]
+    fn test_is_grep_command_handles_semicolon_chain() {
+        assert!(is_grep_command("make; grep foo"));
+    }
+
+    // ── trim_output ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_trim_output_preserves_short() {
+        assert_eq!(trim_output("hello", 100), "hello");
+    }
+
+    #[test]
+    fn test_trim_output_truncates_long() {
+        // trim_output counts UTF-8 bytes, not chars. The suffix "\n... truncated"
+        // Keeps max-500 bytes head + 300 bytes tail joined by "\n...(truncated)...\n".
+        let r = trim_output(&"a".repeat(1000), 100);
+        assert!(r.len() > 300 && r.len() < 330, "got len {}", r.len());
+        assert!(r.contains("(truncated)"), "got: {r}");
+    }
+
+    #[test]
+    fn test_trim_output_handles_empty() {
+        assert_eq!(trim_output("", 10), "");
+    }
+
+    // ── sanitize_args ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_sanitize_args_strips_ansi() {
+        let mut args = json!({"path": "\x1b[31mhello\x1b[0m"});
+        sanitize_args(&mut args);
+        assert_eq!(args["path"], "hello");
+    }
+
+    #[test]
+    fn test_sanitize_args_preserves_plain_text() {
+        let mut args = json!({"path": "src/main.rs"});
+        sanitize_args(&mut args);
+        assert_eq!(args["path"], "src/main.rs");
+    }
+
+    #[test]
+    fn test_sanitize_args_handles_empty_args() {
+        let mut args = json!({});
+        sanitize_args(&mut args);  // should not panic
+        assert_eq!(args, json!({}));
+    }
+
+    // ── cap_tool_result ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_cap_tool_result_preserves_small() {
+        let r = cap_tool_result("short content", 0.9);
+        assert_eq!(r, "short content");
+    }
+
+    #[test]
+    fn test_cap_tool_result_truncates_for_low_context() {
+        // cap_tool_result only truncates when context_ratio < 0.40 (cap = 16000)
+        // or 0.40-0.65 (cap = 8000). A 1000-char string won't be truncated
+        // by any of these caps — use a large string to truly test truncation.
+        let long = "a".repeat(20000);
+        let r = cap_tool_result(&long, 0.1);
+        assert!(r.len() < 17000, "got len {}", r.len());
+    }
+
+    #[test]
+    fn test_cap_tool_result_handles_empty() {
+        assert_eq!(cap_tool_result("", 0.5), "");
+    }
+
+    // ── exec_read_file integration ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_exec_read_file_returns_file_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, b"line1\nline2\nline3").unwrap();
+        let args = json!({"path": file_path.to_str().unwrap()});
+        let result = exec_read_file(&args, dir.path()).await;
+        assert!(result.get("error").is_none(), "got error: {:?}", result);
+        let text = result["result"].as_str().unwrap();
+        assert!(text.contains("3 lines"), "got: {text}");
+        assert!(text.contains("line1"));
+        assert!(text.contains("line2"));
+        assert!(text.contains("line3"));
+    }
+
+    #[tokio::test]
+    async fn test_exec_read_file_rejects_missing_path() {
+        let args = json!({});
+        let result = exec_read_file(&args, Path::new(".")).await;
+        assert!(result["error"].as_str().unwrap().contains("path missing"));
+    }
+
+    #[tokio::test]
+    async fn test_exec_read_file_reports_nonexistent_file() {
+        let args = json!({"path": "/nonexistent/path/xyz"});
+        let result = exec_read_file(&args, Path::new(".")).await;
+        assert!(result["error"].as_str().unwrap().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_exec_read_file_line_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = (1..=100).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n");
+        let file_path = dir.path().join("range.txt");
+        std::fs::write(&file_path, &content).unwrap();
+        let args = json!({"path": file_path.to_str().unwrap(), "start_line": 5, "end_line": 10});
+        let result = exec_read_file(&args, dir.path()).await;
+        let text = result["result"].as_str().unwrap();
+        assert!(text.contains("line5"), "got: {text}");
+        assert!(text.contains("line9"), "got: {text}");
+        assert!(!text.contains("line4"), "got: {text}");
+        assert!(text.contains("line10"), "got: {text}");  // end_line is exclusive stop, line 10 is included
     }
 }

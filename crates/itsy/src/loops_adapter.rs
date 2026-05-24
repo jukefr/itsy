@@ -90,9 +90,7 @@ pub struct FlowResult {
 /// returns an error, prior steps are compensated in reverse order.
 pub async fn execute_flow<C>(_name: &str, mut steps: Vec<FlowStep<C>>, ctx: &mut C) -> FlowResult {
     let mut completed: Vec<(String, Option<StepFn<C>>)> = Vec::new();
-    let len = steps.len();
-    for i in 0..len {
-        let step = &mut steps[i];
+    for step in &mut steps {
         let name = step.name.clone();
         let action_res = (step.action)(ctx).await;
         match action_res {

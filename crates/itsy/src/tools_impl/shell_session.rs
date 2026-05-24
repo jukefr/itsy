@@ -362,11 +362,11 @@ impl ShellSession {
     }
 
     fn check_containment(&self, command: &str) -> Result<(), String> {
-        let sub_re = regex::Regex::new(r"\b(?:bash|sh|zsh|ksh|fish|pwsh|powershell|cmd)\s+-c\b").unwrap();
+        let sub_re = regex::Regex::new(r"\b(?:bash|sh|zsh|ksh|fish|pwsh|powershell|cmd)\s+-c\b").expect("valid regex literal");
         if sub_re.is_match(command) {
             return Err("(refused: -c sub-shells bypass cwd containment)\n".into());
         }
-        let cd_re = regex::Regex::new(r"(?:^|[;&|])\s*(?:cd|pushd|chdir)\s+([^\s;&|]+)").unwrap();
+        let cd_re = regex::Regex::new(r"(?:^|[;&|])\s*(?:cd|pushd|chdir)\s+([^\s;&|]+)").expect("valid regex literal");
         let mut simulated = self.options.cwd.clone();
         for cap in cd_re.captures_iter(command) {
             let target = cap[1].trim_matches(|c| c == '\'' || c == '"').to_string();

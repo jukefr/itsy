@@ -316,9 +316,7 @@ impl Fullscreen {
     }
 
     pub fn with_theme(theme: Theme) -> Self {
-        let mut st = FullscreenState::default();
-        st.theme = theme;
-        Self { state: Arc::new(Mutex::new(st)) }
+        Self { state: Arc::new(Mutex::new(FullscreenState { theme, ..Default::default() })) }
     }
 
     // ── Public API mirroring the JS class ────────────────────────────────
@@ -372,10 +370,7 @@ impl Fullscreen {
     pub fn stream_token(&self, token: &str) {
         let mut st = self.state.lock();
         // Append to a trailing Assistant Text line; otherwise create one.
-        let need_new = match st.active().chat_lines.last() {
-            Some(ChatLine::Text { role: ChatRole::Assistant, .. }) => false,
-            _ => true,
-        };
+        let need_new = !matches!(st.active().chat_lines.last(), Some(ChatLine::Text { role: ChatRole::Assistant, .. }));
         if need_new {
             st.push_line(ChatLine::Text { role: ChatRole::Assistant, text: String::new() });
         }
@@ -737,7 +732,7 @@ fn render_input<'a>(st: &'a FullscreenState) -> Paragraph<'a> {
 fn render_palette<'a>(st: &'a FullscreenState, area: Rect) -> (Paragraph<'a>, Rect) {
     let theme = &st.theme;
     let filtered = filtered_commands(&st.input);
-    let max_h = area.height.saturating_sub(2).min(12).max(3) as usize;
+    let max_h = area.height.saturating_sub(2).clamp(3, 12) as usize;
     let visible = filtered.len().min(max_h);
     let scroll = st.palette_scroll.min(filtered.len().saturating_sub(visible));
     let sel = st.palette_selection.min(filtered.len().saturating_sub(1));
@@ -809,7 +804,7 @@ fn render_modal<'a>(modal: &'a PendingModal, area: Rect, theme: &Theme) -> (Para
         .border_style(Style::default().fg(theme.warning))
         .title(Span::styled(" confirm ", Style::default().fg(theme.warning)));
     let p = Paragraph::new(lines).block(block).alignment(Alignment::Left);
-    let w = area.width.min(60).max(20);
+    let w = area.width.clamp(20, 60);
     let h = (modal.options.len() as u16 + 5).min(area.height.saturating_sub(2)).max(5);
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
@@ -1026,16 +1021,14 @@ where
         let mut st = state.lock();
         if let Some(modal) = st.modal.as_mut() {
             match key.code {
-                KeyCode::Up => {
-                    if modal.selection > 0 {
+                KeyCode::Up
+                    if modal.selection > 0 => {
                         modal.selection -= 1;
                     }
-                }
-                KeyCode::Down => {
-                    if modal.selection + 1 < modal.options.len() {
+                KeyCode::Down
+                    if modal.selection + 1 < modal.options.len() => {
                         modal.selection += 1;
                     }
-                }
                 KeyCode::Enter => {
                     modal.resolved = Some(SelectionResult::Selected(modal.selection));
                 }

@@ -39,13 +39,12 @@ const HEADER_MARKER: &str = "[MULTI-FILE-EDIT]";
 /// source: opens a snapshot checkpoint (when provided), then optionally
 /// appends a coordination header onto the conversation history.
 ///
-/// * `task`                  - the user's task description (kept on the
-///                             signature for parity, not currently inlined).
-/// * `files`                 - files being edited this turn.
+/// * `task`  - the user's task description (kept on the signature for parity).
+/// * `files`  - files being edited this turn.
 /// * `conversation_history`  - mutated in place; must be an array of
-///                             `{role, content}` JSON objects.
-/// * `snapshot`              - optional snapshot manager that receives a
-///                             `multi-file-<unix_ms>` label.
+///   `{role, content}` JSON objects.
+/// * `snapshot`  - optional snapshot manager that receives a
+///   `multi-file-<unix_ms>` label.
 pub fn coordinate_multi_file_edit(
     _task: &str,
     files: &[String],

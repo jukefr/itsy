@@ -44,7 +44,7 @@ pub fn maybe_compact(history: &mut Vec<Value>) -> bool {
 
 /// Mid-turn eviction: truncate large arguments in old assistant messages and
 /// replace tool results with stubs. JS lines 786-863.
-pub fn mid_turn_evict(history: &mut Vec<Value>) -> u32 {
+pub fn mid_turn_evict(history: &mut [Value]) -> u32 {
     let s = crate::settings::get();
     let max_budget = (s.detected_window as f64) * 0.6;
     if (estimate_history_tokens(history) as f64) <= max_budget {
@@ -56,7 +56,7 @@ pub fn mid_turn_evict(history: &mut Vec<Value>) -> u32 {
         .enumerate()
         .filter(|(_, m)| m.get("tool_calls").is_some())
         .map(|(i, _)| i)
-        .last()
+        .next_back()
         .unwrap_or(0);
     // First pass: truncate huge args in older assistant tool_calls.
     for m in history.iter_mut().take(last_assistant_idx) {

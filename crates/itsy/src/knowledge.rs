@@ -70,13 +70,13 @@ static STOP_WORDS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
 });
 
 static FRONTMATTER_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?s)^---\n(.*?)\n---\n(.*)$").unwrap());
+    Lazy::new(|| Regex::new(r"(?s)^---\n(.*?)\n---\n(.*)$").expect("valid regex literal"));
 static FRONTMATTER_STRIP_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?s)^---\n.*?\n---\n").unwrap());
+    Lazy::new(|| Regex::new(r"(?s)^---\n.*?\n---\n").expect("valid regex literal"));
 static KEYWORDS_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?i)keywords?:\s*(.+)").unwrap());
+    Lazy::new(|| Regex::new(r"(?i)keywords?:\s*(.+)").expect("valid regex literal"));
 static HEADING_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?m)^#\s+(.+)").unwrap());
+    Lazy::new(|| Regex::new(r"(?m)^#\s+(.+)").expect("valid regex literal"));
 
 // ─── Public types (kept compatible with previous stub) ──────────────────────
 
@@ -162,7 +162,7 @@ pub fn search<'a>(
         .filter(|(s, _)| *s > 0)
         .collect();
 
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.sort_by_key(|b| std::cmp::Reverse(b.0));
     scored.into_iter().take(max_results).map(|(_, d)| d).collect()
 }
 
@@ -418,7 +418,7 @@ impl KnowledgeLoader {
             })
             .filter(|(s, _)| *s > 0)
             .collect();
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.sort_by_key(|b| std::cmp::Reverse(b.0));
 
         let max_chars = opts.max_tokens.unwrap_or(self.max_tokens).saturating_mul(4);
         let mut out: Vec<SelectedEntry> = Vec::new();
@@ -587,7 +587,7 @@ fn derive_signals(rel: &str, content: &str) -> (Vec<String>, String, String) {
 
     let path_tokens: Vec<String> = rel
         .to_lowercase()
-        .split(|c: char| matches!(c, '/' | '\\' | '_' | '-' | '.' | ' ' | '\t'))
+        .split(['/', '\\', '_', '-', '.', ' ', '\t'])
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
         .collect();
