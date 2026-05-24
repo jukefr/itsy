@@ -127,6 +127,10 @@ struct App {
     last_log_trial: String,
     last_log_file_count: usize,
     status_msg: Option<(String, Instant)>,
+    // Keep harbor alive for the lifetime of the TUI; Child::drop doesn't
+    // kill the process but holding the handle here makes ownership explicit.
+    #[allow(dead_code)]
+    harbor_child: Option<std::process::Child>,
 }
 
 impl Default for App {
@@ -140,13 +144,14 @@ impl Default for App {
             trials: Vec::new(),
             stats: JobStats::default(),
             list_state: ListState::default(),
-            log_scroll: 0,
+            log_scroll: usize::MAX,
             log_lines: Vec::new(),
             finished: false,
             last_poll: Instant::now() - Duration::from_secs(60),
             last_log_trial: String::new(),
             last_log_file_count: 0,
             status_msg: None,
+            harbor_child: None,
         }
     }
 }
@@ -178,8 +183,8 @@ impl App {
     }
 
     fn log_scroll_down(&mut self) {
-        if self.log_scroll + 1 < self.log_lines.len() {
-            self.log_scroll += 1;
+        if self.log_scroll.saturating_add(1) < self.log_lines.len() {
+            self.log_scroll = self.log_scroll.saturating_add(1);
         }
     }
 
@@ -389,7 +394,7 @@ fn refresh_log_if_changed(app: &mut App) {
     let changed = trial_name != app.last_log_trial || file_count != app.last_log_file_count;
 
     if changed {
-        let was_at_bottom = app.log_scroll + 5 >= app.log_lines.len().max(1);
+        let was_at_bottom = app.log_scroll.saturating_add(5) >= app.log_lines.len().max(1);
         app.log_lines = load_rich_log(&chats_dir);
         app.last_log_trial = trial_name;
         app.last_log_file_count = file_count;
@@ -841,7 +846,7 @@ fn render_agent_log(f: &mut Frame, app: &App, area: Rect) {
 
     let log_height = area.height.saturating_sub(2) as usize;
     let total = app.log_lines.len();
-    let end = (app.log_scroll + 1).min(total);
+    let end = app.log_scroll.saturating_add(1).min(total);
     let start = end.saturating_sub(log_height);
 
     let lines: Vec<Line> = app.log_lines[start..end].iter().map(|l| {
@@ -1044,7 +1049,7 @@ fn main() -> Result<()> {
 
             eprintln!("Launching harbor — job: {}  dir: {}", name, job_dir.display());
 
-            let _harbor = build_harbor_command(&tasks, &model, attempts, concurrent, &abs_jobs_dir, &name, &binary)
+            let harbor_child = build_harbor_command(&tasks, &model, attempts, concurrent, &abs_jobs_dir, &name, &binary)
                 .spawn()
                 .context("failed to spawn harbor")?;
 
@@ -1062,6 +1067,7 @@ fn main() -> Result<()> {
                 job_name: name,
                 model,
                 started_at: Some(Instant::now()),
+                harbor_child: Some(harbor_child),
                 ..Default::default()
             };
             poll_job_dir(&mut app);

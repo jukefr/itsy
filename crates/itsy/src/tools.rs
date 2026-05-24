@@ -248,10 +248,30 @@ pub fn get_all_tools(config: &Config, stage2_category: Option<&str>, deps: &Tool
     }
     if mode == RoutingMode::TwoStage {
         if let Some(cat) = stage2_category {
-            return two_stage_for_category(cat, &all_tools);
+            let mut tools = two_stage_for_category(cat, &all_tools);
+            inject_contract_tools(&mut tools, &all_tools);
+            return tools;
         }
     }
     all_tools
+}
+
+/// When the contract feature requires `propose_contract` as the first call,
+/// ensure it survives category filtering so the agent can always open a
+/// contract regardless of which two-stage category was selected.
+fn inject_contract_tools(tools: &mut Vec<Value>, all_tools: &[Value]) {
+    if crate::session::contract::current().is_some() {
+        return; // contract already open — full toolkit handles it
+    }
+    let contract_names: &[&str] = &["propose_contract"];
+    for name in contract_names {
+        if tools.iter().any(|t| t.pointer("/function/name").and_then(|v| v.as_str()) == Some(name)) {
+            continue;
+        }
+        if let Some(tool) = all_tools.iter().find(|t| t.pointer("/function/name").and_then(|v| v.as_str()) == Some(*name)) {
+            tools.push(tool.clone());
+        }
+    }
 }
 
 #[cfg(test)]

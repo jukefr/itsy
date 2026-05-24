@@ -223,6 +223,14 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             };
             // Snapshot for async use — must clone since lock can't be held across .await.
             let snapshot = (session.mutable.lock().history.clone(), session.shared.read().config.clone());
+            let system_prompt = {
+                let shared = session.shared.read();
+                let mem = shared.memory.lock();
+                itsy::model::prompts::build_full_system_prompt(
+                    &snapshot.1, "explanation", &snapshot.0,
+                    &*mem, &shared.skills, &shared.plugins, &session.ro.cwd,
+                )
+            };
             let chat_ctx = ChatContext {
                 model_name: &snapshot.1.model.name,
                 base_url: &snapshot.1.model.base_url,
@@ -232,10 +240,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                 conversation: &snapshot.0,
                 tools: Vec::new(),
                 current_task_type: None,
-                system_prompt: itsy::model::prompts::build_full_system_prompt(
-                    &snapshot.1, "explanation", &snapshot.0,
-                    &session.shared.read().memory, &session.shared.read().skills, &session.shared.read().plugins, &session.ro.cwd,
-                ),
+                system_prompt,
                 force_disable_thinking: false,
             };
             let response = chat_completion(&chat_ctx).await;
@@ -332,11 +337,9 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
         &user_msg,
         session.mutable.lock().current_tool_category.as_deref(),
     );
-    session.mutable.lock().current_tool_category = if route.category == "respond" {
-        Some("respond".into())
-    } else {
-        None
-    };
+    // Persist the routing decision so the next turn's affirmation guard can
+    // reuse it (e.g., "yes" after a "coding" turn stays in coding tools).
+    session.mutable.lock().current_tool_category = Some(route.category.clone());
     let stage2_category: Option<String> = if route.category == "respond" {
         Some("respond".into())
     } else {
@@ -357,7 +360,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
     session.mutable.lock().trace.record_classification(
         task_type,
         stage2_category.as_deref(),
-        0.0,
+        route.confidence,
     );
 
     // 6) Maybe pre-compact the history before the first call.
@@ -446,10 +449,14 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             (cfg, hist, tools)
         };
 
-        let system_prompt = itsy::model::prompts::build_full_system_prompt(
-            &cfg, task_type, &hist,
-            &session.shared.read().memory, &session.shared.read().skills, &session.shared.read().plugins, &session.ro.cwd,
-        );
+        let system_prompt = {
+            let shared = session.shared.read();
+            let mem = shared.memory.lock();
+            itsy::model::prompts::build_full_system_prompt(
+                &cfg, task_type, &hist,
+                &*mem, &shared.skills, &shared.plugins, &session.ro.cwd,
+            )
+        };
         let chat_ctx = ChatContext {
             model_name: &cfg.model.name,
             base_url: &cfg.model.base_url,
@@ -612,11 +619,8 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                 }
 
                 // Loop detection: block identical tool calls after 3 repeats.
-                if let Some(action) = state.check_loop_detection(
-                    &name, &args, &id, &mut session.mutable.lock().history,
-                    &mut session.mutable.lock().tool_repeat_counts,
-                    &mut session.mutable.lock().mutated_paths,
-                    &mut session.mutable.lock().bash_loop_keys,
+                if let Some(_action) = state.check_loop_detection(
+                    &name, &args, &id, &mut session.mutable.lock(),
                 ) {
                     state.consecutive_blocks += 1;
                     if state.consecutive_blocks >= MAX_CONSECUTIVE_BLOCKS {
@@ -672,7 +676,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     let ctx = ExecCtx {
                         config: &config,
                         flags: &session.ro.flags,
-                        memory: Arc::new(parking_lot::Mutex::new(MemoryStore::new(&session.ro.cwd))),
+                        memory: session.shared.read().memory.clone(),
                         mcp_bridge: Some(session.ro.mcp_bridge.clone()),
                         mcp_client: None,
                         fullscreen: fs_handle.clone(),
@@ -722,10 +726,10 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     // edit cycle (patch → coqc → patch → coqc …); only consecutive
                     // bash calls with no mutation in between indicate a stuck loop.
                     {
-                        let keys: Vec<String> = session.mutable.lock().bash_loop_keys.drain().collect();
-                        let mut counts = session.mutable.lock().tool_repeat_counts.clone();
+                        let mut locked = session.mutable.lock();
+                        let keys: Vec<String> = locked.bash_loop_keys.drain().collect();
                         for k in keys {
-                            counts.remove(&k);
+                            locked.tool_repeat_counts.remove(&k);
                         }
                     }
                 }
@@ -1843,7 +1847,7 @@ async fn handle_mcp_tool_call(id: Value, params: Option<Value>, session: &AgentS
         }
         "itsy_memory_load" => {
             let task = args.get("task").and_then(|v| v.as_str()).unwrap_or("");
-            let items = session.shared.read().memory.load_for_task(task);
+            let items = session.shared.read().memory.lock().load_for_task(task);
             if items.is_empty() {
                 "No relevant memory found.".into()
             } else {
@@ -1858,7 +1862,7 @@ async fn handle_mcp_tool_call(id: Value, params: Option<Value>, session: &AgentS
             let kind = args.get("type").and_then(|v| v.as_str()).unwrap_or("context");
             let title = args.get("title").and_then(|v| v.as_str()).unwrap_or("");
             let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
-            let obj = session.shared.write().memory
+            let obj = session.shared.read().memory.lock()
                 .remember(kind, title, content, Vec::new());
             format!("Remembered: [{}] {} ({})", obj.kind, obj.title, obj.id)
         }
@@ -2002,7 +2006,7 @@ fn build_session(config: Config, flags: Flags, cwd: PathBuf, mcp_bridge: Arc<Mcp
         },
         shared: parking_lot::RwLock::new(AgentSessionShared {
             config,
-            memory: MemoryStore::new(&cwd),
+            memory: Arc::new(parking_lot::Mutex::new(MemoryStore::new(&cwd))),
             skills,
             plugins,
             tokens: TokenTracker::new(),

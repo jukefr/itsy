@@ -4,26 +4,21 @@ Audit findings, updated to reflect remediation progress.
 
 ---
 
-## P0 — Monolithic `handle_turn` (1514 lines)
+## P0 Monolithic handle_turn 1514 lines
 
-`src/bin/itsy.rs:217–1730`. Contains the entire agent loop: clarifier,
-contract preamble, routing, tool dispatch, quality monitoring, loop detection,
-improvement loops, early-stop nudge, badger guard, greeting guard, streaming,
-contract close-the-loop, auto-commit. ~14 levels of nesting.
+src/bin/itsy.rs:174-1280 (1106 lines, down from 1514). Still contains
+the main chat loop, improvement loops, streaming, badger guard, and
+greeting guard.
 
-**Progress:** 21 constituent functions (~720 lines) extracted to library
-modules under `model/prompts.rs`, `session/compaction.rs`,
-`runtime/tool_guidance.rs`, `runtime/agent_loop.rs`. Routing logic
-consolidated into `classify_and_filter` in `runtime/tool_router.rs`.
-`TurnState` struct created for per-turn counters.
+**Extracted as TurnState methods in runtime/agent_loop.rs:**
+- check_quality_monitor — validates tool names
+- check_contract_gate — blocks mutating calls before contract exists
+- check_idempotent_write — dedup memory_remember / mark_assertion
+- check_no_progress — nudge after N read-only batches
+- check_text_only_streak — force tool use after N text responses
+- check_contract_close_loop — refuse end turn with unclosed assertions
+- check_loop_detection — block identical tool calls after 3 repeats
 
-**Remaining:** The core loop body (`async fn handle_turn`) is still 1514 lines
-with interleaved guards. Unit testing requires extracting each guard into its
-own method on `TurnState`.
-
-**Fix:** Extract ~6 named helpers from the loop body:
-`maybe_run_clarifier`, `evaluate_one_tool_call`, `maybe_badger`,
-`maybe_close_contract_loop`, `maybe_stream_final`.
 
 ---
 

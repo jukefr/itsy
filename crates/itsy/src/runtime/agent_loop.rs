@@ -39,7 +39,7 @@ pub struct AgentSessionReadOnly {
 /// Read-mostly state behind an `RwLock`.
 pub struct AgentSessionShared {
     pub config: Config,
-    pub memory: MemoryStore,
+    pub memory: Arc<parking_lot::Mutex<MemoryStore>>,
     pub skills: SkillManager,
     pub plugins: PluginLoader,
     pub tokens: TokenTracker,
@@ -467,11 +467,12 @@ impl TurnState {
         name: &str,
         args: &Value,
         id: &str,
-        history: &mut Vec<Value>,
-        tool_repeat_counts: &mut std::collections::HashMap<String, u32>,
-        mutated_paths: &mut std::collections::HashSet<String>,
-        bash_loop_keys: &mut std::collections::HashSet<String>,
+        session: &mut AgentSessionMutable,
     ) -> Option<GuardAction> {
+        let history = &mut session.history;
+        let tool_repeat_counts = &mut session.tool_repeat_counts;
+        let mutated_paths = &mut session.mutated_paths;
+        let bash_loop_keys = &mut session.bash_loop_keys;
         use sha2::{Digest, Sha256};
         let args_str = serde_json::to_string(args).unwrap_or_default();
         let key = format!("{}{}", name, args_str);
