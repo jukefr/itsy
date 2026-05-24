@@ -1,0 +1,111 @@
+{
+    "id": "1622e5c8-e1d4-42b5-b5d1-454c0fce42c0",
+    "task_name": "prove-plus-comm",
+    "trial_name": "prove-plus-comm__oYUDBUX",
+    "trial_uri": "file:///workspace/itsy/jobs/scoreboard-3x-20260524/prove-plus-comm__oYUDBUX",
+    "task_id": {
+        "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+        "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c",
+        "path": "prove-plus-comm"
+    },
+    "source": "terminal-bench",
+    "task_checksum": "c2e6faf1396913cf529854f75a27939b6f05ac811f1415150312aa6d22248a1c",
+    "config": {
+        "task": {
+            "path": "prove-plus-comm",
+            "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+            "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c",
+            "name": null,
+            "ref": null,
+            "overwrite": false,
+            "download_dir": null,
+            "source": "terminal-bench"
+        },
+        "trial_name": "prove-plus-comm__oYUDBUX",
+        "trials_dir": "/workspace/itsy/jobs/scoreboard-3x-20260524",
+        "timeout_multiplier": 1.0,
+        "agent_timeout_multiplier": null,
+        "verifier_timeout_multiplier": null,
+        "agent_setup_timeout_multiplier": null,
+        "environment_build_timeout_multiplier": null,
+        "agent": {
+            "name": null,
+            "import_path": "itsy_agent:ItsyAgent",
+            "model_name": "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+            "skills": [],
+            "override_timeout_sec": null,
+            "override_setup_timeout_sec": null,
+            "max_timeout_sec": null,
+            "kwargs": {},
+            "env": {},
+            "mcp_servers": []
+        },
+        "environment": {
+            "type": "docker",
+            "import_path": null,
+            "force_build": false,
+            "delete": true,
+            "cpu_enforcement_policy": "auto",
+            "memory_enforcement_policy": "auto",
+            "override_cpus": null,
+            "override_memory_mb": null,
+            "override_storage_mb": null,
+            "override_gpus": null,
+            "suppress_override_warnings": false,
+            "mounts": null,
+            "extra_docker_compose": [],
+            "env": {},
+            "kwargs": {}
+        },
+        "verifier": {
+            "override_timeout_sec": null,
+            "max_timeout_sec": null,
+            "env": {},
+            "disable": false
+        },
+        "artifacts": [],
+        "extra_instruction_paths": [],
+        "job_id": "c23dc859-2473-4697-b2fc-6820e9ffc0cf"
+    },
+    "agent_info": {
+        "name": "itsy",
+        "version": "0.1.0",
+        "model_info": {
+            "name": "Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+            "provider": "unsloth"
+        }
+    },
+    "agent_result": {
+        "n_input_tokens": null,
+        "n_cache_tokens": null,
+        "n_output_tokens": null,
+        "cost_usd": null,
+        "rollout_details": null,
+        "metadata": {}
+    },
+    "verifier_result": {
+        "rewards": {
+            "reward": 1.0
+        }
+    },
+    "exception_info": null,
+    "started_at": "2026-05-24T05:04:31.786098Z",
+    "finished_at": "2026-05-24T05:09:56.465782Z",
+    "environment_setup": {
+        "started_at": "2026-05-24T05:04:31.786528Z",
+        "finished_at": "2026-05-24T05:04:49.666011Z"
+    },
+    "agent_setup": {
+        "started_at": "2026-05-24T05:04:49.666026Z",
+        "finished_at": "2026-05-24T05:05:02.268174Z"
+    },
+    "agent_execution": {
+        "started_at": "2026-05-24T05:05:02.268213Z",
+        "finished_at": "2026-05-24T05:09:41.078562Z"
+    },
+    "verifier": {
+        "started_at": "2026-05-24T05:09:41.239015Z",
+        "finished_at": "2026-05-24T05:09:45.683365Z"
+    },
+    "step_results": null
+}

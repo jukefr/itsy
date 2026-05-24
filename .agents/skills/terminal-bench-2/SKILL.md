@@ -39,6 +39,7 @@ uv run --with harbor harbor run \
   --model unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS \
   --n-attempts 3 \
   --n-concurrent 1 \
+  --agent-timeout-multiplier 2 \
   --jobs-dir $PWD/jobs \
   --job-name fix-git-3x \
   2>&1 &
@@ -57,6 +58,7 @@ The five things you'll change between runs:
 | Difficulty / tag | `--include-task-name <glob>` matched against task names |
 | Attempts per task | `--n-attempts N` |
 | Concurrent trials | `--n-concurrent N` (keep at 1 if `llama-server --parallel 1`) |
+| Agent timeout | `--agent-timeout-multiplier N` (default 1×=750s; use 2 for complex tasks) |
 | Output dir | `--jobs-dir` + `--job-name` |
 
 ## Memory safety — MANDATORY after every task
@@ -233,6 +235,7 @@ uv run --with harbor harbor run \
   --agent-import-path itsy_agent:ItsyAgent \
   --model <model> \
   --n-attempts <N> --n-concurrent <C> \
+  --agent-timeout-multiplier 2 \
   --jobs-dir /workspace/itsy/jobs \
   --job-name <job-name> \
   -i <task1> -i <task2> ... \
