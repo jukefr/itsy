@@ -2013,7 +2013,13 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
         if itsy::settings::get().contract {
             if let Some(c) = itsy::session::contract::current() {
                 let counts = c.counts();
-                let needs_more_work = counts.pending > 0 || counts.failed > 0;
+                let all_passed = counts.pending == 0
+                    && counts.failed == 0
+                    && counts.passed == counts.total;
+                let contract_still_open = c.status
+                    == itsy::session::contract::ContractStatus::Active;
+                let needs_more_work =
+                    counts.pending > 0 || counts.failed > 0 || (all_passed && contract_still_open);
                 if needs_more_work {
                     const MAX_CONTRACT_LOOP: u32 = 12;
                     let n = *per_turn_repeats
@@ -2047,7 +2053,14 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                         let mut msg = String::from(
                             "[SYSTEM] The turn cannot end yet — the contract is not closed.\n\n"
                         );
-                        if !failed_ids.is_empty() {
+                        if all_passed && contract_still_open {
+                            msg.push_str(
+                                "Every assertion is `passed`. \
+                                 Call `close_contract` `completed` RIGHT NOW to finish the task. \
+                                 Do not run any more commands or write any more text — \
+                                 just call `close_contract` `completed`."
+                            );
+                        } else if !failed_ids.is_empty() {
                             // Failed assertions take absolute priority — show them with the
                             // last recorded evidence so the model has its own failure context
                             // back in front of it, then suppress the "verify pending" branch
@@ -2095,11 +2108,11 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                                 pending_ids.len(),
                                 pending_ids[0]
                             ));
+                            msg.push_str(
+                                "Once every assertion is `passed`, call `close_contract` `completed`. \
+                                 Keep working until they all pass."
+                            );
                         }
-                        msg.push_str(
-                            "Once every assertion is `passed`, call `close_contract` `completed`. \
-                             Keep working until they all pass."
-                        );
                         hist.push(json!({"role": "user", "content": msg}));
                         continue;
                     }
@@ -2451,34 +2464,25 @@ async fn run_evaluator_phase(
     let cwd = session.cwd.to_string_lossy().to_string();
     let config = session.config.lock().clone();
 
-    let assertions_block: String = contract
-        .assertions
-        .iter()
-        .map(|a| format!("  A.{}: {}", a.id, a.text))
-        .collect::<Vec<_>>()
-        .join("\n");
-
     let system_prompt = format!(
-        "You are an adversarial evaluator. A code generator finished the following task and \
-         self-reported that all assertions passed — but self-reports are unreliable.\n\n\
+        "You are an adversarial evaluator. A code generator claimed to have completed the \
+         following task — your job is to independently verify whether it actually did.\n\n\
          TASK:\n{task}\n\n\
-         CLAIMED ASSERTIONS (generator marked all passed):\n{assertions_block}\n\n\
          Working directory: {cwd}\n\n\
-         Your job: verify each assertion is ACTUALLY true by running the checks yourself. \
-         Treat nothing as given. Use `bash` to run commands and observe real output. \
-         Use `read_file` to inspect files if needed.\n\n\
-         When you have checked every assertion (or found a clear failure), call \
-         `evaluator_verdict` with:\n\
-         - passed=true if all assertions confirmed\n\
-         - passed=false + findings describing each failure if any assertion fails\n\n\
-         Be terse. One bash call per assertion. If the first check reveals a fundamental \
-         failure, call evaluator_verdict immediately."
+         You have no knowledge of what the generator did or claimed. Devise your own \
+         verification strategy from the task description alone. Use `bash` to run commands \
+         and observe real output. Use `read_file` to inspect files.\n\n\
+         When you have enough evidence, call `evaluator_verdict` with:\n\
+         - passed=true if the task is genuinely complete\n\
+         - passed=false + findings describing what is wrong or missing\n\n\
+         Be terse and direct. If the first check reveals a clear failure, call \
+         evaluator_verdict immediately."
     );
 
     let tools = evaluator_tools();
     let mut history: Vec<Value> = vec![json!({
         "role": "user",
-        "content": "Begin evaluation. Verify each assertion independently."
+        "content": "Begin evaluation."
     })];
 
     println!("\n  \x1b[36m◆ evaluator phase starting ({} assertions)\x1b[0m", contract.assertions.len());
