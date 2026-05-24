@@ -17,6 +17,7 @@ use clap::Parser;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader as TokioBufReader};
 
+use itsy::runtime::agent_loop::{AgentSession, AgentSessionReadOnly, AgentSessionShared, AgentSessionMutable, GuardAction};
 use itsy::commands::{handle_command, CommandCtx, CommandResult};
 use itsy::config::{check_endpoint, load_config, load_dotenv, Config, Flags};
 use itsy::cognition_adapter::classify_task_compiled;
@@ -166,50 +167,6 @@ struct Cli {
 }
 
 // ── Agent session: shared per-process state ──────────────────────────────────
-
-/// Immutable after startup — no lock required.
-struct AgentSessionReadOnly {
-    pub flags: Flags,
-    pub cwd: PathBuf,
-    pub mcp_bridge: Arc<McpBridge>,
-}
-
-/// Read-mostly state behind an `RwLock`.
-struct AgentSessionShared {
-    pub config: Config,
-    pub memory: MemoryStore,
-    pub skills: SkillManager,
-    pub plugins: PluginLoader,
-    pub tokens: TokenTracker,
-    pub token_monitor: TokenMonitor,
-    pub sessions: SessionStore,
-    pub read_tracker: Arc<itsy::tools_impl::read_tracker::ReadTracker>,
-    pub file_state: Arc<itsy::session::file_state::FileStateTracker>,
-}
-
-/// Frequently-written state behind a single `Mutex`.
-struct AgentSessionMutable {
-    pub history: Vec<Value>,
-    pub scorer: ToolScorer,
-    pub verification: VerificationHistory,
-    pub early_stop: EarlyStopDetector,
-    pub trace: TraceRecorder,
-    pub current_tool_category: Option<String>,
-    pub fullscreen: Option<Arc<itsy::fullscreen::Fullscreen>>,
-    pub tool_repeat_counts: std::collections::HashMap<String, u32>,
-    pub mutated_paths: std::collections::HashSet<String>,
-    pub bash_loop_keys: std::collections::HashSet<String>,
-    pub readonly_turn_count: u32,
-    pub total_mutating_calls: u32,
-    pub snapshot_manager: Arc<itsy::session::snapshot::SnapshotManager>,
-}
-
-/// Bundle of state that lives across user turns within a single agent run.
-struct AgentSession {
-    pub ro: AgentSessionReadOnly,
-    pub shared: parking_lot::RwLock<AgentSessionShared>,
-    pub mutable: parking_lot::Mutex<AgentSessionMutable>,
-}
 
 // ── Helpers: estimation & history compaction ─────────────────────────────────
 
@@ -583,72 +540,16 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             // Push the assistant message verbatim.
             session.mutable.lock().history.push(msg.clone());
 
-            // Quality monitor: catch empty tool names and hallucinated tool names
-            // before executing. Injects a targeted correction and retries.
-            // Cap at 2 consecutive corrections to avoid a spiral.
-            {
-                let mut known: Vec<&str> = chat_ctx
-                    .tools
-                    .iter()
-                    .filter_map(|t| t.pointer("/function/name").and_then(|v| v.as_str()))
-                    .collect();
-                known.sort_unstable();
-
-                let bad: Vec<(String, String)> = tool_calls
-                    .iter()
-                    .filter_map(|tc| {
-                        let name = tc
-                            .pointer("/function/name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                        if name.is_empty() || !known.contains(&name) {
-                            Some((id.to_string(), name.to_string()))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-
-                if !bad.is_empty() {
-                    let n = *state.per_turn_repeats
-                        .entry("__quality_correction".into())
-                        .and_modify(|n| *n += 1)
-                        .or_insert(1);
-                    if n <= 2 {
-                        let tool_list = known.join(", ");
-                        for (id, name) in &bad {
-                            let err = if name.is_empty() {
-                                format!(
-                                    "Error: tool name is empty. Available tools: {tool_list}."
-                                )
-                            } else {
-                                format!(
-                                    "Error: `{name}` is not a valid tool. \
-                                     Available tools: {tool_list}."
-                                )
-                            };
-                            session.mutable.lock().history.push(json!({
-                                "role": "tool",
-                                "tool_call_id": id,
-                                "content": err,
-                            }));
-                        }
-                        session.mutable.lock().history.push(json!({
-                            "role": "user",
-                            "content": format!(
-                                "[SYSTEM] One or more tool calls used an invalid tool name. \
-                                 Call tools by their exact name. Available: {tool_list}."
-                            )
-                        }));
-                        eprintln!(
-                            "  \x1b[33m⚠ quality-monitor: {} invalid tool name(s) \
-                             — steering ({n}/2)\x1b[0m",
-                            bad.len()
-                        );
-                        continue;
-                    }
-                }
+            // Quality monitor: validate tool names before executing.
+            let known: Vec<&str> = chat_ctx.tools
+                .iter()
+                .filter_map(|t| t.pointer("/function/name").and_then(|v| v.as_str()))
+                .collect();
+            if let Some(GuardAction::Inject { ref message }) = state.check_quality_monitor(
+                &tool_calls, &known, &mut session.mutable.lock().history,
+            ) {
+                eprintln!("  \x1b[33m\u{26a0} {message}\x1b[0m");
+                continue;
             }
 
             for tc in &tool_calls {
@@ -686,73 +587,28 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     }
                 };
 
-                // Contract-first gate: when the contract feature is on
-                // and the model is on an action-y task without an
-                // active contract yet, refuse the first mutating tool
-                // calls until it commits to a contract. Read-only
-                // exploration and the contract tools themselves stay
-                // free. Bounded by `MAX_CONTRACT_GATE_REFUSALS` so a
-                // model that genuinely can't produce a contract
-                // doesn't get stuck forever.
-                const MAX_CONTRACT_GATE_REFUSALS: u32 = 3;
+                // Track contract tools + mutating state for batch progress tracking.
                 let is_contract_tool = matches!(
                     name.as_str(),
-                    "propose_contract"
-                        | "mark_assertion"
-                        | "mark_feature"
-                        | "contract_status"
-                        | "close_contract"
+                    "propose_contract" | "mark_assertion" | "mark_feature"
+                        | "contract_status" | "close_contract"
                 );
-                if is_contract_tool {
-                    batch_had_contract_progress = true;
-                }
-                // Gate fires for any task type EXCEPT pure-explanation —
-                // those don't produce mutating side effects anyway.
-                // (Earlier we matched only a whitelist of action tasks
-                // and lost coverage on `search` / `shell` task types
-                // where the model still git-merge'd / git-commit'd.)
-                let task_is_action = !matches!(task_type, "explanation" | "respond");
+                if is_contract_tool { batch_had_contract_progress = true; }
+
                 let is_mutating = match name.as_str() {
                     "write_file" | "append_file" | "patch" | "read_and_patch"
                     | "create_and_run" | "run" | "memory_remember" | "memory_forget" => true,
                     "bash" => !itsy::tools_impl::dedup::bash_is_read_only(&args),
                     _ => false,
                 };
-                if name == "bash" && is_mutating {
-                    batch_had_active_bash = true;
-                }
-                if itsy::settings::get().contract
-                    && task_is_action
-                    && itsy::session::contract::current().is_none()
-                    && !is_contract_tool
-                    && is_mutating
-                {
-                    let refused = state.per_turn_repeats
-                        .entry("__contract_gate".into())
-                        .and_modify(|n| *n += 1)
-                        .or_insert(1);
-                    if *refused <= MAX_CONTRACT_GATE_REFUSALS {
-                        println!(
-                            "  \x1b[33m⚠ blocked `{name}` — define what 'done' means first ({}/{})\x1b[0m",
-                            *refused, MAX_CONTRACT_GATE_REFUSALS
-                        );
-                        session.mutable.lock().history.push(json!({
-                            "role": "tool",
-                            "tool_call_id": id,
-                            "content": "[BLOCKED] No contract yet. Before any mutating action, call `propose_contract` \
-                                with: (1) a short title, (2) a 2-3 sentence brief, (3) 2-6 assertions you'll verify \
-                                (each one-line, testable, ≤120 chars; e.g. \"Exit code is 0 when running pytest\", \
-                                \"about.md byte-for-byte matches the lost commit's version\"). Read-only tools \
-                                (read_file, search, find_files, git status/log/show, …) are still allowed."
-                        }));
-                        continue;
-                    }
-                    // Exhausted the gate budget — let the call through
-                    // so the model isn't permanently blocked.
-                    session.mutable.lock().trace.record_error(
-                        "contract_gate_exhausted",
-                        "model never proposed a contract; letting tools through",
-                    );
+                if name == "bash" && is_mutating { batch_had_active_bash = true; }
+
+                // Contract gate: block mutating calls before contract exists.
+                if let Some(GuardAction::Inject { ref message }) = state.check_contract_gate(
+                    &name, is_mutating, &id, &mut session.mutable.lock().history,
+                ) {
+                    println!("  \x1b[33m\u{26a0} {message}\x1b[0m");
+                    continue;
                 }
 
                 // General identical-call loop detection: covers ALL tools.
@@ -866,36 +722,11 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     }
                 }
 
-                // Pure-tool dedup catches read-only spirals; state.improvement_attempts
-                // catches failed mutating calls; the per-turn tool-call cap is
-                // the final backstop.
-
-                // Idempotent-write dedup: memory_remember/memory_forget/mark_assertion
-                // with identical args in the same turn is a no-op. Break the spiral
-                // before executing and return a short-circuit result.
-                // mark_assertion is included because the model sometimes marks the same
-                // assertion as passed multiple times in a row instead of moving on.
-                const IDEMPOTENT_WRITE_TOOLS: &[&str] = &["memory_remember", "memory_forget", "mark_assertion"];
-                if IDEMPOTENT_WRITE_TOOLS.contains(&name.as_str()) {
-                    let write_key = itsy::tools_impl::dedup::idempotent_write_key(&name, &args);
-                    if !state.per_turn_write_seen.insert(write_key) {
-                        let skip_msg = if name == "mark_assertion" {
-                            let id_str = args.get("id").and_then(|v| v.as_str()).unwrap_or("?");
-                            let state_str = args.get("state").and_then(|v| v.as_str()).unwrap_or("?");
-                            format!(
-                                "[DUPLICATE] mark_assertion for `{id_str}` as `{state_str}` was already called this turn. \
-                                 Move on to the next pending assertion — do not repeat the same mark."
-                            )
-                        } else {
-                            "[already stored this turn — identical call skipped]".to_string()
-                        };
-                        session.mutable.lock().history.push(json!({
-                            "role": "tool",
-                            "tool_call_id": id,
-                            "content": serde_json::to_string(&json!({"result": skip_msg})).unwrap_or_default()
-                        }));
-                        continue;
-                    }
+                // Idempotent-write dedup: skip duplicate memory_remember / mark_assertion.
+                if state.check_idempotent_write(
+                    &name, &args, &id, &mut session.mutable.lock().history,
+                ).is_some() {
+                    continue;
                 }
 
                 let started = Instant::now();
@@ -1347,37 +1178,13 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             state.per_turn_repeats.insert("__text_only_streak".into(), 0);
 
             // No-progress nudge within a single handle_turn: fires when the
-            // model has made N consecutive tool-call batches with no mutating
-            // calls. Tight threshold (2) before the first edit; looser (6) after.
-            if !batch_had_mutating && !batch_had_contract_progress && !batch_had_active_bash && !batch_had_fresh_read {
-                let count = {
-                    let c = &mut session.mutable.lock().readonly_turn_count;
-                    *c += 1;
-                    *c
-                };
-                let total_mutations = session.mutable.lock().total_mutating_calls;
-                let threshold = if total_mutations == 0 { 3u32 } else { 6u32 };
-                if count >= threshold {
-                    session.mutable.lock().readonly_turn_count = 0;
-                    println!(
-                        "  \x1b[33m⚠ no-progress nudge: {} read-only batches — pushing model to act\x1b[0m",
-                        count
-                    );
-                    session.mutable.lock().history.push(json!({
-                        "role": "user",
-                        "content": format!(
-                            "[SYSTEM] You have spent {} consecutive rounds reading files \
-                             without making any changes. You already have enough information. \
-                             STOP reading — make a concrete edit RIGHT NOW. Call patch or \
-                             write_file to modify a file. Do not call read_file, bash, \
-                             graph_search, or any other read-only tool until you have made \
-                             at least one actual change.",
-                            count
-                        )
-                    }));
-                }
-            } else {
-                session.mutable.lock().readonly_turn_count = 0;
+            // No-progress nudge: if N consecutive read-only batches, push model to act.
+            if let Some(GuardAction::Inject { ref message }) = state.check_no_progress(
+                batch_had_mutating, batch_had_contract_progress,
+                batch_had_active_bash, batch_had_fresh_read,
+                session,
+            ) {
+                println!("  \x1b[33m\u{26a0} {message}\x1b[0m");
             }
 
             // Loop back to chat_completion — model may want to call more tools.
@@ -1446,199 +1253,20 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             }
         }
 
-        // Text-only streak guard: if the model generates 3+ consecutive
-        // text-only responses without calling any tool, it is stuck.
-        // This fires regardless of state.tool_calls_this_turn so it catches
-        // the "text flood after tool calls" pattern that bypasses the
-        // badger and empty-response guards (both gated on == 0).
-        {
-            let n = *state.per_turn_repeats
-                .entry("__text_only_streak".into())
-                .and_modify(|n| *n += 1)
-                .or_insert(1);
-            const MAX_TEXT_ONLY_STREAK: u32 = 3;
-            if n >= MAX_TEXT_ONLY_STREAK && state.current_category.as_deref() != Some("respond") {
-                println!(
-                    "  \x1b[33m⚠ text-only streak: {} consecutive responses without tools — forcing tool use ({n})\x1b[0m",
-                    n
-                );
-                let mut locked = session.mutable.lock();
-                if let Some(content) = &content_opt {
-                    locked.history.push(json!({"role": "assistant", "content": content}));
-                }
-                drop(locked);
-                let has_contract = itsy::settings::get().contract
-                    && itsy::session::contract::current()
-                        .map(|c| {
-                            let cnt = c.counts();
-                            cnt.pending > 0 || cnt.failed > 0
-                        })
-                        .unwrap_or(false);
-                let msg = if has_contract {
-                    "[SYSTEM] You have responded with text only multiple times without using tools. \
-                     The contract has unverified assertions. Stop writing explanations — call a tool right now. \
-                     Run a verification command with `bash`, then call `mark_assertion` with the result. \
-                     Do NOT respond with text. Use a tool."
-                } else {
-                    "[SYSTEM] You have responded with text only multiple times without using tools. \
-                     Use a tool to make progress instead of describing what you plan to do."
-                };
-                {
-                    let mut locked = session.mutable.lock();
-                    locked.history.push(json!({"role": "user", "content": msg}));
-            }
-                continue;
-            }
+        // Text-only streak guard: force tool use after N consecutive text responses.
+        if let Some(GuardAction::Inject { ref message }) = state.check_text_only_streak(
+            content_opt.as_deref(), &mut session.mutable.lock().history,
+        ) {
+            println!("  \x1b[33mM-bM-^ZM-  {message}\x1b[0m");
         }
 
-        // Contract close-the-loop guard. If a contract is active AND
-        // unclosed when the model tries to end the turn (final text
-        // response, no tool calls this iteration), refuse: the model
-        // must call mark_assertion for each pending assertion and then
-        // close_contract. This is what makes the contract actually do
-        // its job — without it, the model proposes the contract and
-        // walks away, defeating the whole point of the feature.
-        //
-        // Bounded to MAX_CONTRACT_LOOP retries so we don't spin
-        // forever on a model that refuses to engage with the contract
-        // tools.
-        if itsy::settings::get().contract {
-            if let Some(c) = itsy::session::contract::current() {
-                let counts = c.counts();
-                let all_passed = counts.pending == 0
-                    && counts.failed == 0
-                    && counts.passed == counts.total;
-                let contract_still_open = c.status
-                    == itsy::session::contract::ContractStatus::Active;
-                let needs_more_work =
-                    counts.pending > 0 || counts.failed > 0 || (all_passed && contract_still_open);
-                if needs_more_work {
-                    const MAX_CONTRACT_LOOP: u32 = 12;
-                    let n = *state.per_turn_repeats
-                        .entry("__contract_loop".into())
-                        .and_modify(|n| *n += 1)
-                        .or_insert(1);
-                    if n <= MAX_CONTRACT_LOOP {
-                        println!(
-                            "  \x1b[33m⚠ contract not closed: {} pending, {} failed — re-asking model to finish ({n}/{MAX_CONTRACT_LOOP})\x1b[0m",
-                            counts.pending, counts.failed
-                        );
-                        // Build a precise list of what's outstanding.
-                        let pending_ids: Vec<&str> = c
-                            .assertions
-                            .iter()
-                            .filter(|a| a.state
-                                == itsy::session::contract::AssertionState::Pending)
-                            .map(|a| a.id.as_str())
-                            .collect();
-                        let failed_ids: Vec<&str> = c
-                            .assertions
-                            .iter()
-                            .filter(|a| a.state
-                                == itsy::session::contract::AssertionState::Failed)
-                            .map(|a| a.id.as_str())
-                            .collect();
-                        // Push assistant content to real history, then release lock.
-                        let mut locked = session.mutable.lock();
-                        if let Some(content) = &content_opt {
-                            locked.history.push(json!({"role": "assistant", "content": content}));
-                        }
-                        drop(locked);
-                        let mut msg = String::from(
-                            "[SYSTEM] The turn cannot end yet — the contract is not closed.\n\n"
-                        );
-                        if all_passed && contract_still_open {
-                            msg.push_str(
-                                "Every assertion is `passed`. \
-                                 Call `close_contract` `completed` RIGHT NOW to finish the task. \
-                                 Do not run any more commands or write any more text — \
-                                 just call `close_contract` `completed`."
-                            );
-                        } else if !failed_ids.is_empty() {
-                            // Failed assertions take absolute priority — show them with the
-                            // last recorded evidence so the model has its own failure context
-                            // back in front of it, then suppress the "verify pending" branch
-                            // entirely to avoid conflicting instructions.
-                            let failed_blocks: Vec<String> = c
-                                .assertions
-                                .iter()
-                                .filter(|a| {
-                                    a.state == itsy::session::contract::AssertionState::Failed
-                                })
-                                .map(|a| {
-                                    let mut block = format!("  `{}` — {}", a.id, a.text);
-                                    if let Some(ev) = &a.evidence {
-                                        block.push_str(&format!("\n    last evidence: {ev}"));
-                                    }
-                                    if let Some(chk) = &a.last_check {
-                                        block.push_str(&format!(
-                                            "\n    last command:  {}\n    exit_code:     {}\n    observation:   {}",
-                                            chk.command, chk.exit_code, chk.observation
-                                        ));
-                                    }
-                                    block
-                                })
-                                .collect();
-                            msg.push_str(&format!(
-                                "FAILED assertion(s) — diagnose each failure below and fix it \
-                                 before the contract can close:\n\n{}\n\n\
-                                 For each: re-examine what you produced, understand exactly why \
-                                 the check failed (look at the observation above), make the \
-                                 necessary edits or re-runs, then call `mark_assertion` again \
-                                 with state=passed. Do NOT call `close_contract` until every \
-                                 assertion is `passed`.\n\n",
-                                failed_blocks.join("\n\n")
-                            ));
-                        } else if !pending_ids.is_empty() {
-                            // No failures — just unverified assertions. One at a time to avoid
-                            // thinking-budget overflow on small quantised models.
-                            msg.push_str(&format!(
-                                "You have {} pending assertion(s). Verify ONE now — start with \
-                                 `{}`. Run a check command, call `mark_assertion` with the id, \
-                                 state (passed/failed), the command you ran, exit_code, and \
-                                 actual observation. If it PASSES: stop, the next turn handles \
-                                 the rest. If it FAILS: keep working right now — fix the issue \
-                                 and re-mark before stopping.\n\n",
-                                pending_ids.len(),
-                                pending_ids[0]
-                            ));
-                            msg.push_str(
-                                "Once every assertion is `passed`, call `close_contract` `completed`. \
-                                 Keep working until they all pass."
-                            );
-                        }
-                        {
-                            let mut locked = session.mutable.lock();
-                            locked.history.push(json!({"role": "user", "content": msg}));
-                        }
-                        continue;
-                    }
-                    // Exhausted the retry budget — record + let turn end.
-                    session.mutable.lock().trace.record_error(
-                        "contract_loop_exhausted",
-                        &format!(
-                            "model gave up; {} pending + {} failed at end of turn",
-                            counts.pending, counts.failed
-                        ),
-                    );
-                }
-            }
+        // Contract close-the-loop guard: refuse to end turn with unclosed assertions.
+        if let Some(GuardAction::Inject { ref message }) = state.check_contract_close_loop(
+            content_opt.as_deref(), &mut session.mutable.lock().history,
+        ) {
+            println!("  \x1b[33m\u{26a0} {message}\x1b[0m");
+            continue;
         }
-
-        // Greeting guard: detect lost-context greeting after failures.
-        if state.tool_calls_this_turn > 0 {
-            if let Some(content) = &content_opt {
-                if let Some(signal) = session.mutable.lock().early_stop
-                    .check_greeting(content, state.tool_calls_this_turn > 0)
-                {
-                    let mut locked = session.mutable.lock();
-                    locked.history.push(json!({"role": "assistant", "content": content}));
-                    locked.history.push(json!({"role": "user", "content": signal.injection}));
-                    continue;
-                }
-            }
-        }
-
         // Stream/print the final response.
         if let Some(content) = &content_opt {
             session.mutable.lock().history
