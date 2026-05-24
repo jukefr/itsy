@@ -9,6 +9,7 @@ use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use std::time::Duration;
 use std::time::Instant;
 
 use anyhow::Result;
@@ -376,10 +377,11 @@ fn looks_like_option_ref(s: &str) -> bool {
 
 /// Auto-compact: trim oldest non-system messages once the budget is exceeded.
 /// Mirrors JS lines 700-760 but without the LLM-based summary path.
-fn maybe_compact(history: &mut Vec<Value>, config: &Config) -> bool {
+fn maybe_compact(history: &mut Vec<Value>) -> bool {
     let estimated = estimate_history_tokens(history);
+    let s = itsy::settings::get();
     let max_ctx_tokens =
-        (config.context.detected_window as f64) * (config.context.max_budget_pct as f64 / 100.0);
+        (s.detected_window as f64) * (s.max_budget_pct as f64 / 100.0);
     if (estimated as f64) <= max_ctx_tokens * 0.8 && history.len() <= 30 {
         return false;
     }
@@ -410,8 +412,9 @@ fn maybe_compact(history: &mut Vec<Value>, config: &Config) -> bool {
 /// Mid-turn eviction: when in the middle of a tool chain and history blows up,
 /// truncate large arguments in old assistant messages and replace tool results
 /// with stubs. JS lines 786-863.
-fn mid_turn_evict(history: &mut Vec<Value>, config: &Config) -> u32 {
-    let max_budget = (config.context.detected_window as f64) * 0.6;
+fn mid_turn_evict(history: &mut Vec<Value>) -> u32 {
+    let s = itsy::settings::get();
+    let max_budget = (s.detected_window as f64) * 0.6;
     if (estimate_history_tokens(history) as f64) <= max_budget {
         return 0;
     }
@@ -557,7 +560,7 @@ fn get_plugin_prompts(plugins: &PluginLoader, task_type: Option<&str>) -> String
 
 /// JS `getKnowledgeContext`. Walks the project's `knowledge/` directory and
 /// pulls in docs that overlap with the last user message.
-fn get_knowledge_context(messages: &[Value], config: &Config) -> String {
+fn get_knowledge_context(messages: &[Value]) -> String {
     let Some(last_user) = messages
         .iter()
         .rev()
@@ -568,7 +571,8 @@ fn get_knowledge_context(messages: &[Value], config: &Config) -> String {
     let Some(query) = last_user.get("content").and_then(|c| c.as_str()) else {
         return String::new();
     };
-    let max_tokens = (config.context.detected_window as f64 * 0.04)
+    let s = itsy::settings::get();
+    let max_tokens = (s.detected_window as f64 * 0.04)
         .clamp(200.0, 1500.0) as usize;
     let loader = get_knowledge_loader();
     loader.format_for_prompt(query, &SelectOptions { max_tokens: Some(max_tokens) })
@@ -750,9 +754,9 @@ fn build_full_system_prompt(
         let cwd_path = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let cwd = cwd_path.to_string_lossy().into_owned();
         if let Some(c) = active {
-            return build_contract_active_prompt(&c, &cwd_path, &cwd, config);
+            return build_contract_active_prompt(&c, &cwd_path, &cwd);
         }
-        return build_contract_proposal_prompt(&cwd_path, &cwd, config);
+        return build_contract_proposal_prompt(&cwd_path, &cwd);
     }
 
     let memory = session.memory.lock();
@@ -776,7 +780,7 @@ fn build_full_system_prompt(
     );
 
     // Knowledge auto-injection.
-    let know = get_knowledge_context(messages, config);
+    let know = get_knowledge_context(messages);
     if !know.is_empty() {
         prompt.push_str(&know);
     }
@@ -845,11 +849,12 @@ fn contract_verification_guidance(cwd: &std::path::Path) -> String {
         .unwrap_or_default()
 }
 
-fn build_contract_proposal_prompt(cwd_path: &std::path::Path, cwd: &str, config: &Config) -> String {
-    let model_line = if config.model.name.is_empty() {
+fn build_contract_proposal_prompt(cwd_path: &std::path::Path, cwd: &str) -> String {
+    let model_name = itsy::settings::get().model_name.clone();
+    let model_line = if model_name.is_empty() {
         String::new()
     } else {
-        format!("\nModel: {}", config.model.name)
+        format!("\nModel: {model_name}")
     };
     let verification = contract_verification_guidance(cwd_path);
     format!(
@@ -892,12 +897,12 @@ fn build_contract_active_prompt(
     c: &itsy::session::contract::Contract,
     cwd_path: &std::path::Path,
     cwd: &str,
-    config: &Config,
 ) -> String {
-    let model_line = if config.model.name.is_empty() {
+    let model_name = itsy::settings::get().model_name.clone();
+    let model_line = if model_name.is_empty() {
         String::new()
     } else {
-        format!("\nModel: {}", config.model.name)
+        format!("\nModel: {model_name}")
     };
     let body = itsy::session::contract::render_for_prompt(c);
     let verification = contract_verification_guidance(cwd_path);
@@ -942,7 +947,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
 
     // Trace recording: start a fresh trace for this turn.
     {
-        let model_name = session.config.lock().model.name.clone();
+        let model_name = itsy::settings::get().model_name.clone();
         session.trace.lock().start(prompt_in, &model_name);
     }
     session.token_monitor.lock().mark_next_call_new_turn();
@@ -955,7 +960,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
     // responds so it doesn't linger across turns.
     // Ports the assistantAskedQuestion bypass: if the model's last turn ended
     // with a question mark, the user's reply is an answer, not a new vague task.
-    let clarifier_enabled = session.config.lock().features.clarifier;
+    let clarifier_enabled = itsy::settings::get().clarifier;
     let assistant_asked_question = {
         let hist = session.history.lock();
         hist.iter()
@@ -986,7 +991,11 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             };
             let snapshot = (session.history.lock().clone(), session.config.lock().clone());
             let chat_ctx = ChatContext {
-                config: &snapshot.1,
+                model_name: &snapshot.1.model.name,
+                base_url: &snapshot.1.model.base_url,
+                api_key: snapshot.1.model.api_key.clone(),
+                timeout: Duration::from_secs(snapshot.1.model.timeout),
+                temp_adapt: snapshot.1.features.temp_adapt,
                 conversation: &snapshot.0,
                 tools: Vec::new(),
                 current_task_type: None,
@@ -1138,8 +1147,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
     // 6) Maybe pre-compact the history before the first call.
     {
         let mut hist = session.history.lock();
-        let cfg = session.config.lock().clone();
-        if maybe_compact(&mut hist, &cfg) {
+        if maybe_compact(&mut hist) {
             println!("{}", tui::compacted(hist.len() as u32));
         }
     }
@@ -1199,9 +1207,8 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
 
         // Mid-turn eviction every 3 tool calls.
         if tool_calls_this_turn > 0 && tool_calls_this_turn % 3 == 0 {
-            let cfg = session.config.lock().clone();
             let mut hist = session.history.lock();
-            let evicted = mid_turn_evict(&mut hist, &cfg);
+            let evicted = mid_turn_evict(&mut hist);
             if evicted > 0 {
                 session.token_monitor.lock().record_eviction();
             }
@@ -1253,7 +1260,11 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
 
         let system_prompt = build_full_system_prompt(&cfg, task_type, &hist, session);
         let chat_ctx = ChatContext {
-            config: &cfg,
+            model_name: &cfg.model.name,
+            base_url: &cfg.model.base_url,
+            api_key: cfg.model.api_key.clone(),
+            timeout: Duration::from_secs(cfg.model.timeout),
+            temp_adapt: cfg.features.temp_adapt,
             conversation: &hist,
             tools,
             current_task_type: Some(task_type),
@@ -1824,7 +1835,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     })
                     .unwrap_or_default();
                 let context_ratio = {
-                    let window = session.config.lock().context.detected_window as f32;
+                    let window = itsy::settings::get().detected_window as f32;
                     if window > 0.0 { last_prompt_tokens as f32 / window } else { 0.0 }
                 };
                 let capped = cap_tool_result(&tool_content, context_ratio);
@@ -1902,7 +1913,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                             // LLM self-critique: ask "does this still do
                             // what the user wanted?" Cheap to wire, costs
                             // one LLM call per accepted edit when enabled.
-                            if session.config.lock().features.validate_edits {
+                            if itsy::settings::get().validate_edits {
                                 if let Ok(content) = std::fs::read_to_string(&file_path) {
                                     let cfg_snapshot = session.config.lock().clone();
                                     let result = features_adapter::validate_edit_with_config(
@@ -2415,7 +2426,10 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                 fs.set_streaming(true);
             }
             if let Some(out) = stream_final_response(
-                &cfg,
+                &cfg.model.name,
+                &cfg.model.base_url,
+                cfg.model.api_key.as_deref(),
+                cfg.model.timeout,
                 &hist,
                 Some(&mut early),
                 |tok| {
@@ -2467,8 +2481,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
         println!("{}", tui::turn_summary(tool_calls_this_turn));
 
         // Auto-commit (Feature: git.auto_commit).
-        let auto_commit = session.config.lock().git.auto_commit
-            || itsy::settings::get().auto_commit;
+        let auto_commit = itsy::settings::get().auto_commit;
         if auto_commit {
             try_auto_commit(&session.cwd, &user_msg, &edited_files).await;
         }
@@ -2482,7 +2495,7 @@ fn record_usage(data: &Value, session: &AgentSession, is_tool_call: bool) {
     if let Some(usage) = data.get("usage") {
         let pt = usage.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
         let ct = usage.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-        let model = session.config.lock().model.name.clone();
+        let model = itsy::settings::get().model_name.clone();
         session
             .tokens
             .lock()
@@ -2701,7 +2714,11 @@ async fn run_evaluator_phase(
 
     for turn in 0..MAX_TURNS {
         let ctx = itsy::model_client::ChatContext {
-            config: &config,
+            model_name: &config.model.name,
+            base_url: &config.model.base_url,
+            api_key: config.model.api_key.clone(),
+            timeout: Duration::from_secs(config.model.timeout),
+            temp_adapt: config.features.temp_adapt,
             conversation: &history,
             tools: tools.clone(),
             current_task_type: Some("evaluation"),
@@ -3064,7 +3081,11 @@ async fn run_eval(config: &Config, suite_name: &str) -> i32 {
                     async move {
                         let conv = vec![json!({"role": "user", "content": input})];
                         let chat_ctx = ChatContext {
-                            config: &cfg,
+                            model_name: &cfg.model.name,
+                            base_url: &cfg.model.base_url,
+                            api_key: cfg.model.api_key.clone(),
+                            timeout: Duration::from_secs(cfg.model.timeout),
+                            temp_adapt: cfg.features.temp_adapt,
                             conversation: &conv,
                             tools: get_all_tools(&cfg, None, &ToolDeps::default()),
                             current_task_type: None,
@@ -3090,7 +3111,11 @@ async fn run_eval(config: &Config, suite_name: &str) -> i32 {
                     async move {
                         let conv = vec![json!({"role": "user", "content": input})];
                         let chat_ctx = ChatContext {
-                            config: &cfg,
+                            model_name: &cfg.model.name,
+                            base_url: &cfg.model.base_url,
+                            api_key: cfg.model.api_key.clone(),
+                            timeout: Duration::from_secs(cfg.model.timeout),
+                            temp_adapt: cfg.features.temp_adapt,
                             conversation: &conv,
                             tools: Vec::new(),
                             current_task_type: None,
@@ -3215,9 +3240,8 @@ async fn run_repl(session: &AgentSession) -> Result<()> {
     let mut input = String::new();
     loop {
         {
-            let cfg = session.config.lock();
             let hist = session.history.lock();
-            print!("{}\n> ", tui::render_status(&cfg, hist.len()));
+            print!("{}\n> ", tui::render_status(hist.len()));
             stdout.lock().flush().ok();
         }
         input.clear();
@@ -3267,8 +3291,7 @@ async fn run_fullscreen_repl(session: Arc<AgentSession>) -> Result<()> {
     let fs = Arc::new(Fullscreen::with_theme(Theme::from_env()));
     {
         // Seed the status bar from the current config + cwd.
-        let cfg = session.config.lock();
-        fs.set_model(cfg.model.name.clone());
+        fs.set_model(itsy::settings::get().model_name.clone());
         fs.set_status(format!("cwd: {}", session.cwd.display()));
     }
 
@@ -3306,8 +3329,7 @@ async fn run_fullscreen_repl(session: Arc<AgentSession>) -> Result<()> {
         }
         // Periodic status refresh.
         {
-            let cfg = session.config.lock();
-            fs.set_model(cfg.model.name.clone());
+            fs.set_model(itsy::settings::get().model_name.clone());
             let totals = session.tokens.lock().stats();
             fs.set_token_count(totals.prompt as u32, totals.completion as u32);
         }
@@ -3343,6 +3365,86 @@ async fn run_fullscreen_repl(session: Arc<AgentSession>) -> Result<()> {
     // dead handle if anything async fires later.
     *session.fullscreen.lock() = None;
     Ok(())
+}
+
+/// Build [`Config`] and [`Flags`] from CLI args, then merge everything into
+/// global [`Settings`]. Exits the process on errors (missing model, bad --set).
+fn build_config_and_settings(cli: &Cli) -> (Config, Flags) {
+    let flags = Flags {
+        model: cli.model.clone(),
+        provider: cli.provider.clone(),
+        endpoint: cli.endpoint.clone(),
+        base_url: cli.endpoint.clone(),
+        classic: cli.classic,
+        verbose: cli.verbose,
+    };
+    let mut config = load_config(&flags);
+
+    if let Some(m) = cli.second_opinion_model.clone() {
+        config.second_opinion.model = Some(m);
+    }
+    if let Some(e) = cli.second_opinion_endpoint.clone() {
+        config.second_opinion.endpoint = Some(e);
+    }
+
+    if config.model.name.is_empty() {
+        eprintln!("\n  ✗ No model configured.");
+        eprintln!("  Edit {}", itsy::paths::config_file().display());
+        eprintln!("  Run `itsy --init` to re-run the setup wizard.\n");
+        std::process::exit(1);
+    }
+
+    // Build the merged Settings (config + CLI) and install globally.
+    let mut s = itsy::settings::from_full_config(&config);
+    if cli.auto_approve {
+        s.auto_approve = true;
+    }
+    if let Some(v) = cli.max_tool_calls_per_turn {
+        s.max_tool_calls_per_turn = v;
+    }
+    if let Some(v) = cli.max_output_tokens {
+        s.max_output_tokens = v;
+    }
+    if let Some(v) = cli.thinking_budget {
+        s.thinking_budget = v;
+    }
+    if let Some(v) = cli.request_timeout_ms {
+        s.request_timeout_ms = v;
+    }
+    if let Some(v) = cli.bash_timeout {
+        s.bash_timeout = v;
+    }
+    if let Some(v) = cli.tool_routing.clone() {
+        s.tool_routing = v;
+    }
+    if let Some(v) = cli.allow_outside_paths {
+        s.allow_outside_paths = v;
+    }
+    if let Some(v) = cli.web_browse {
+        s.web_browse = v;
+    }
+    if let Some(v) = cli.shell_persist {
+        s.shell_persist = v;
+    }
+    if let Some(v) = cli.profile.clone() {
+        s.profile = Some(v);
+    }
+    if cli.verbose {
+        s.verbose = true;
+    }
+    // Generic `--set key=value` overrides.
+    for entry in &cli.set_overrides {
+        let Some((k, v)) = entry.split_once('=') else {
+            eprintln!("  ✗ --set expects `key=value`, got `{entry}`");
+            std::process::exit(1);
+        };
+        if let Err(e) = s.apply_set_override(k.trim(), v.trim()) {
+            eprintln!("  ✗ --set {entry}: {e}");
+            std::process::exit(1);
+        }
+    }
+    itsy::settings::init(s);
+    (config, flags)
 }
 
 // ── Main dispatcher ──────────────────────────────────────────────────────────
@@ -3382,99 +3484,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    let flags = Flags {
-        model: cli.model.clone(),
-        provider: cli.provider.clone(),
-        endpoint: cli.endpoint.clone(),
-        base_url: cli.endpoint.clone(),
-        classic: cli.classic,
-        verbose: cli.verbose,
-    };
-    let mut config = load_config(&flags);
-
-    if let Some(m) = cli.second_opinion_model.clone() {
-        config.second_opinion.model = Some(m);
-    }
-    if let Some(e) = cli.second_opinion_endpoint.clone() {
-        config.second_opinion.endpoint = Some(e);
-    }
-
-    if config.model.name.is_empty() {
-        eprintln!("\n  ✗ No model configured.");
-        eprintln!("  Edit {}", itsy::paths::config_file().display());
-        eprintln!("  Run `itsy --init` to re-run the setup wizard.\n");
-        std::process::exit(1);
-    }
-
-    // ── Build the merged Settings (config + CLI) and install globally.
-    // Anything below this point that wants a runtime knob reads it from
-    // `itsy::settings::get()` — there is no env-var fallback any more.
-    {
-        let mut s = itsy::settings::from_full_config(&config);
-        // Named CLI flags.
-        if cli.auto_approve {
-            s.auto_approve = true;
-        }
-        if let Some(v) = cli.max_tool_calls_per_turn {
-            s.max_tool_calls_per_turn = v;
-        }
-        if let Some(v) = cli.max_output_tokens {
-            s.max_output_tokens = v;
-        }
-        if let Some(v) = cli.thinking_budget {
-            s.thinking_budget = v;
-        }
-        if let Some(v) = cli.request_timeout_ms {
-            s.request_timeout_ms = v;
-        }
-        if let Some(v) = cli.bash_timeout {
-            s.bash_timeout = v;
-        }
-        if let Some(v) = cli.tool_routing.clone() {
-            s.tool_routing = v;
-        }
-        if let Some(v) = cli.allow_outside_paths {
-            s.allow_outside_paths = v;
-        }
-        if let Some(v) = cli.web_browse {
-            s.web_browse = v;
-        }
-        if let Some(v) = cli.shell_persist {
-            s.shell_persist = v;
-        }
-        if let Some(v) = cli.profile.clone() {
-            s.profile = Some(v);
-        }
-        if cli.verbose {
-            s.verbose = true;
-        }
-        // Generic `--set key=value` overrides.
-        for entry in &cli.set_overrides {
-            let Some((k, v)) = entry.split_once('=') else {
-                eprintln!("  ✗ --set expects `key=value`, got `{entry}`");
-                std::process::exit(1);
-            };
-            if let Err(e) = s.apply_set_override(k.trim(), v.trim()) {
-                eprintln!("  ✗ --set {entry}: {e}");
-                std::process::exit(1);
-            }
-        }
-        // Mirror CLI overrides back into `config` so downstream code that
-        // still threads `&Config` (rather than calling settings::get())
-        // sees the same values during the deprecation window.
-        config.limits.max_tool_calls_per_turn = s.max_tool_calls_per_turn;
-        config.limits.max_output_tokens = s.max_output_tokens;
-        config.limits.request_timeout_ms = s.request_timeout_ms;
-        config.tools.bash_timeout = s.bash_timeout;
-        config.tools.tool_routing = s.tool_routing.clone();
-        config.tools.shell_persist = s.shell_persist;
-        config.tools.web_browse = s.web_browse;
-        config.tui.auto_approve = s.auto_approve;
-        config.security.allow_outside_paths = s.allow_outside_paths;
-        config.features.thinking_budget = s.thinking_budget;
-
-        itsy::settings::init(s);
-    }
+    let (mut config, flags) = build_config_and_settings(&cli);
 
     if cli.print_system_prompt {
         println!("{}", build_system_prompt(&config, "", "", "", None));
@@ -3508,7 +3518,7 @@ async fn main() -> Result<()> {
     let graph_ok = mcp_bridge.init_code_graph(env!("CARGO_PKG_VERSION")).await;
 
     // Welcome banner reflects the actual state of the native code graph.
-    println!("{}", tui::render_welcome(&config, graph_ok));
+    println!("{}", tui::render_welcome(graph_ok));
 
     let session = Arc::new(build_session(config, flags, cwd, mcp_bridge.clone()));
 

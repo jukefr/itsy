@@ -11,13 +11,17 @@ use futures::StreamExt;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use crate::config::build_auth_headers;
+use crate::config::build_auth_headers_for;
 use crate::governor::early_stop::EarlyStopDetector;
 use crate::session::images::{extract_images, format_images_for_api, model_supports_vision};
 use crate::Config;
 
 pub struct ChatContext<'a> {
-    pub config: &'a Config,
+    pub model_name: &'a str,
+    pub base_url: &'a str,
+    pub api_key: Option<String>,
+    pub timeout: Duration,
+    pub temp_adapt: bool,
     pub conversation: &'a [Value],
     pub tools: Vec<Value>,
     pub current_task_type: Option<&'a str>,
@@ -40,7 +44,7 @@ pub async fn chat_completion(ctx: &ChatContext<'_>) -> Option<Value> {
                 return msg.clone();
             };
             let images = extract_images(content, &cwd);
-            if images.is_empty() || !model_supports_vision(&ctx.config.model.name) {
+            if images.is_empty() || !model_supports_vision(ctx.model_name) {
                 return msg.clone();
             }
             let mut parts = vec![json!({"type": "text", "text": content})];
@@ -53,7 +57,7 @@ pub async fn chat_completion(ctx: &ChatContext<'_>) -> Option<Value> {
     messages.extend(processed);
 
     // Adaptive temperature: bumps with repair history if enabled.
-    let temperature = if ctx.config.features.temp_adapt {
+    let temperature = if ctx.temp_adapt {
         let task = ctx.current_task_type.unwrap_or("coding");
         crate::model::adaptive_temp::adaptive_temperature(task, 0)
     } else {
@@ -86,14 +90,14 @@ pub async fn chat_completion(ctx: &ChatContext<'_>) -> Option<Value> {
     };
 
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(ctx.config.model.timeout))
+        .timeout(ctx.timeout)
         .build()
         .ok()?;
 
-    let url = format!("{}/chat/completions", ctx.config.model.base_url);
+    let url = format!("{}/chat/completions", ctx.base_url);
 
     let mut body = json!({
-        "model": ctx.config.model.name,
+        "model": ctx.model_name,
         "messages": messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
@@ -115,7 +119,7 @@ pub async fn chat_completion(ctx: &ChatContext<'_>) -> Option<Value> {
     // providers (Anthropic/OpenAI) handle it differently.
     crate::model::thinking_budget::apply_thinking_budget(
         &mut body,
-        &ctx.config.model.base_url,
+        ctx.base_url,
         tokens,
         /* disable = */ ctx.force_disable_thinking,
     );
@@ -126,7 +130,7 @@ pub async fn chat_completion(ctx: &ChatContext<'_>) -> Option<Value> {
         attempt += 1;
         let res = match client
             .post(&url)
-            .headers(build_auth_headers(ctx.config))
+            .headers(build_auth_headers_for(ctx.api_key.as_deref(), ctx.base_url))
             .json(&body)
             .send()
             .await
@@ -175,7 +179,7 @@ pub async fn chat_completion(ctx: &ChatContext<'_>) -> Option<Value> {
             );
             crate::model::thinking_budget::apply_thinking_budget(
                 &mut body,
-                &ctx.config.model.base_url,
+                ctx.base_url,
                 tokens,
                 /* disable = */ true,
             );
@@ -222,7 +226,10 @@ pub async fn chat_completion(ctx: &ChatContext<'_>) -> Option<Value> {
 
 /// Stream a final text response (no tools, just summarize).
 pub async fn stream_final_response(
-    config: &Config,
+    model_name: &str,
+    base_url: &str,
+    api_key: Option<&str>,
+    timeout_secs: u64,
     conversation: &[Value],
     early_stop: Option<&mut EarlyStopDetector>,
     mut on_token: impl FnMut(&str),
@@ -233,7 +240,7 @@ pub async fn stream_final_response(
     messages.extend(conversation[start..].iter().cloned());
 
     let body = json!({
-        "model": config.model.name,
+        "model": model_name,
         "messages": messages,
         "stream": true,
         "temperature": 0.1,
@@ -241,11 +248,17 @@ pub async fn stream_final_response(
     });
 
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(config.model.timeout))
+        .timeout(Duration::from_secs(timeout_secs))
         .build()
         .ok()?;
-    let url = format!("{}/chat/completions", config.model.base_url);
-    let res = client.post(&url).headers(build_auth_headers(config)).json(&body).send().await.ok()?;
+    let url = format!("{}/chat/completions", base_url);
+    let res = client
+        .post(&url)
+        .headers(build_auth_headers_for(api_key, base_url))
+        .json(&body)
+        .send()
+        .await
+        .ok()?;
     if !res.status().is_success() {
         return None;
     }
@@ -558,7 +571,7 @@ fn extract_xml_tool_calls(msg: &mut Value) {
 /// UNVERIFIED:
 ///   - Bootstrap detector prompt line (upstream: `_bootstrapDetector.formatForPrompt()`).
 pub fn build_system_prompt(
-    config: &Config,
+    _config: &Config,
     memory_context: &str,
     skill_context: &str,
     plugin_context: &str,

@@ -178,7 +178,7 @@ impl ItsyApi {
         };
 
         let mut tool_call_count: u32 = 0;
-        'outer: while tool_call_count < self.config.limits.max_tool_calls_per_turn {
+        'outer: while tool_call_count < crate::settings::get().max_tool_calls_per_turn {
             let mut tools = get_all_tools(&self.config, None, &ToolDeps::default());
             if let Some(whitelist) = &self.options.tools {
                 tools.retain(|t| {
@@ -191,7 +191,11 @@ impl ItsyApi {
             }
 
             let chat_ctx = ChatContext {
-                config: &self.config,
+                model_name: &self.config.model.name,
+                base_url: &self.config.model.base_url,
+                api_key: self.config.model.api_key.clone(),
+                timeout: self.options.timeout,
+                temp_adapt: self.config.features.temp_adapt,
                 conversation: &self.history,
                 tools,
                 current_task_type: None,
@@ -229,7 +233,7 @@ impl ItsyApi {
             if let Some(calls) = tool_calls {
                 if !calls.is_empty() {
                     for tc in calls {
-                        if tool_call_count >= self.config.limits.max_tool_calls_per_turn {
+                        if tool_call_count >= crate::settings::get().max_tool_calls_per_turn {
                             break 'outer;
                         }
                         tool_call_count += 1;

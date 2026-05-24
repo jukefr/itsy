@@ -1,7 +1,6 @@
 //! Rich classic TUI rendering: markdown-lite,
 //! syntax-highlighted code blocks, status bar, welcome banner, diff display.
 
-use crate::Config;
 
 const C_RESET: &str = "\x1b[0m";
 const C_BOLD: &str = "\x1b[1m";
@@ -150,7 +149,7 @@ fn highlight_line(line: &str, lang: &str) -> String {
     h
 }
 
-pub fn render_status(config: &Config, history_len: usize) -> String {
+pub fn render_status(history_len: usize) -> String {
     let cwd = std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
     let short_cwd = cwd
         .rsplit(['/', '\\'])
@@ -162,20 +161,20 @@ pub fn render_status(config: &Config, history_len: usize) -> String {
         .join("/");
     format!(
         "  {} │ {} │ {}",
-        paint(C_CYAN, &config.model.name),
+        paint(C_CYAN, &crate::settings::get().model_name),
         paint(C_GRAY, &format!("{history_len} msgs")),
         paint(C_GRAY, &short_cwd)
     )
 }
 
-pub fn render_welcome(config: &Config, graph_ok: bool) -> String {
+pub fn render_welcome(graph_ok: bool) -> String {
     let cwd = std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
     let lines = [
         "".to_string(),
         format!("{}{}", paint(&format!("{C_BOLD}{C_CYAN}"), "  ⚡ itsy"), paint(C_GRAY, &format!(" v{}", env!("CARGO_PKG_VERSION")))),
         "".to_string(),
-        format!("  Model:    {}", config.model.name),
-        format!("  Endpoint: {}", paint(C_GRAY, &config.model.base_url)),
+        format!("  Model:    {}", crate::settings::get().model_name),
+        format!("  Endpoint: {}", paint(C_GRAY, &crate::settings::get().base_url)),
         format!("  Graph:    {}", if graph_ok { paint(C_GREEN, "✓ indexed") } else { paint(C_GRAY, "disabled") }),
         format!("  Dir:      {}", paint(C_GRAY, &cwd)),
         "".to_string(),

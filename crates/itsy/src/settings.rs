@@ -72,6 +72,12 @@ pub struct Settings {
     /// 0 = use per-task heuristic.
     pub thinking_budget: u32,
 
+    // ── context ──────────────────────────────────────────────────
+    /// Detected context window (auto-detected from /props, fallback to configured).
+    pub detected_window: u32,
+    /// Maximum budget percentage of the context window to use.
+    pub max_budget_pct: u32,
+
     // ── features (mirrors config.features) ───────────────────────
     pub snapshot: bool,
     pub snapshot_auto_rollback: bool,
@@ -175,6 +181,10 @@ impl Settings {
             max_output_tokens: 0,
             thinking_budget: 0,
 
+            // ── context ──────────────────────────────────────────────
+            detected_window: 0,
+            max_budget_pct: 0,
+
             snapshot: true,
             snapshot_auto_rollback: true,
             write_guard: true,
@@ -240,6 +250,8 @@ impl Settings {
         s.model_name = cfg.model.name.clone();
         s.base_url = cfg.model.base_url.clone();
         s.model_strong = cfg.models.as_ref().map(|m| m.strong.clone());
+        s.detected_window = cfg.context.detected_window;
+        s.max_budget_pct = cfg.context.max_budget_pct;
         s.bash_timeout = cfg.tools.bash_timeout;
         s.tool_routing = cfg.tools.tool_routing.clone();
         s.shell_persist = cfg.tools.shell_persist;

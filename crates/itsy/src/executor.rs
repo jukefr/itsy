@@ -250,81 +250,7 @@ async fn exec_append_file(args: &Value, cwd: &Path) -> Value {
     json!({"result": format!("Appended {added} lines to {path} (now {total} lines total)"), "action": "Appended", "path": path})
 }
 
-async fn exec_patch(args: &Value, cwd: &Path, ctx: &ExecCtx<'_>) -> Value {
-    let Some(path) = args.get("path").and_then(|v| v.as_str()) else {
-        return json!({"error": "patch rejected: path missing"});
-    };
-    let safe = match safe_resolve_path(path, cwd, PathOptions::default()) {
-        Ok(s) => s,
-        Err(e) => return json!({"error": format!("patch rejected: {e}")}),
-    };
-    if !safe.full_path.exists() {
-        return json!({"error": format!("File not found: {path}")});
-    }
-    let guard = get_read_tracker().check_write(&safe.full_path, cwd, "patch");
-    if !guard.ok {
-        return json!({"error": guard.reason});
-    }
-    let old_str = args.get("old_str").and_then(|v| v.as_str()).unwrap_or("");
-    let new_str = args.get("new_str").and_then(|v| v.as_str()).unwrap_or("");
-    let content = match fs::read_to_string(&safe.full_path) {
-        Ok(c) => c,
-        Err(e) => return json!({"error": e.to_string()}),
-    };
-    get_snapshot_manager(cwd.to_path_buf()).note(&safe.full_path, Some(content.clone()));
-    if old_str.is_empty() {
-        return json!({"error": "patch: old_str is empty"});
-    }
-    let count = content.matches(old_str).count();
-    if count == 0 {
-        // Last-chance recovery: ask the model to merge the intended
-        // change into the current file. Gated on config.features.semantic_merge.
-        if ctx.config.features.semantic_merge {
-            if let Some(merged) = crate::features_adapter::semantic_merge(path, new_str, &content).await {
-                if let Err(e) = fs::write(&safe.full_path, &merged) {
-                    return json!({"error": e.to_string()});
-                }
-                get_file_state_tracker().record_write(&safe.full_path, &merged);
-                get_read_tracker().record_patch(&safe.full_path, cwd);
-                let old_lines = content.split('\n').count();
-                let new_lines = merged.split('\n').count();
-                return json!({
-                    "result": format!("Patched {path} via semantic merge ({old_lines} → {new_lines} lines)"),
-                    "action": "Edited",
-                    "path": path,
-                    "line": 1,
-                });
-            }
-        }
-        return json!({"error": format!("old_str not found in {path}")});
-    }
-    if count > 1 {
-        return json!({"error": format!("old_str matches {count} locations. Include more context.")});
-    }
-    let new_content = content.replacen(old_str, new_str, 1);
-    if let Err(e) = fs::write(&safe.full_path, &new_content) {
-        return json!({"error": e.to_string()});
-    }
-    get_file_state_tracker().record_write(&safe.full_path, &new_content);
-    get_read_tracker().record_patch(&safe.full_path, cwd);
-    let prefix = new_content.split(new_str).next().unwrap_or("");
-    let line_num = prefix.split('\n').count();
-    let old_lines = old_str.split('\n').count();
-    let new_lines = new_str.split('\n').count();
-    if let Some(fs_ref) = &ctx.fullscreen {
-        fs_ref.add_diff(path, old_str, new_str, line_num as u32);
-    } else {
-        print!("{}", crate::tui::render_diff(path, old_str, new_str, line_num as u32));
-    }
-    json!({
-        "result": format!("Patched {path}: replaced {old_lines} lines with {new_lines} lines at line {line_num}"),
-        "action": "Edited",
-        "path": path,
-        "line": line_num,
-    })
-}
-
-async fn exec_bash(args: &Value, cwd: &Path, ctx: &ExecCtx<'_>) -> Value {
+async fn exec_bash(args: &Value, cwd: &Path, _ctx: &ExecCtx<'_>) -> Value {
     let Some(command) = args.get("command").and_then(|v| v.as_str()) else {
         return json!({"error": "bash: command missing"});
     };
@@ -367,7 +293,7 @@ async fn exec_bash(args: &Value, cwd: &Path, ctx: &ExecCtx<'_>) -> Value {
     if persistent {
         let shell = get_shell(ShellOptions { cwd: cwd.to_path_buf(), ..Default::default() });
         let result = shell.run(&command).await;
-        let max_output = if ctx.config.context.detected_window < 64_000 { 1500 } else { 3000 };
+        let max_output = if crate::settings::get().detected_window < 64_000 { 1500 } else { 3000 };
         let trimmed = trim_output(&result.stdout, max_output);
         if result.timed_out {
             if let Some(ref m) = marker { let _ = fs::remove_file(m); }
@@ -384,7 +310,7 @@ async fn exec_bash(args: &Value, cwd: &Path, ctx: &ExecCtx<'_>) -> Value {
             }
             let body = if trimmed.is_empty() { "(no output)".to_string() } else { trimmed.clone() };
             let with_hint = maybe_prepend_error_diagnosis(
-                ctx.config.features.error_diagnosis,
+                crate::settings::get().error_diagnosis,
                 &command,
                 &body,
                 result.exit_code,
@@ -413,7 +339,7 @@ async fn exec_bash(args: &Value, cwd: &Path, ctx: &ExecCtx<'_>) -> Value {
                     return json!({"result": "(no matches found)", "command": command});
                 }
                 let with_hint = maybe_prepend_error_diagnosis(
-                    ctx.config.features.error_diagnosis,
+                    crate::settings::get().error_diagnosis,
                     &command,
                     &trimmed,
                     code,

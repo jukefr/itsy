@@ -875,6 +875,30 @@ pub fn build_auth_headers(config: &Config) -> HeaderMap {
     headers
 }
 
+/// Build auth headers from explicit fields (no &Config dependency).
+pub fn build_auth_headers_for(
+    api_key: Option<&str>,
+    base_url: &str,
+) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    let key = env_str("OPENAI_API_KEY")
+        .or_else(|| env_str("ANTHROPIC_API_KEY"))
+        .or_else(|| env_str("DEEPSEEK_API_KEY"))
+        .or_else(|| api_key.map(String::from));
+    if let Some(k) = key {
+        if let Ok(v) = HeaderValue::from_str(&format!("Bearer {k}")) {
+            headers.insert(AUTHORIZATION, v);
+        }
+    }
+    if base_url.contains("openrouter.ai") {
+        if let Ok(v) = HeaderValue::from_str("itsy") {
+            headers.insert("X-Title", v);
+        }
+    }
+    headers
+}
+
 /// Mirror of `checkEndpoint` — prints status, mutates context window if the
 /// remote advertises one. Returns whether the endpoint was reachable.
 pub async fn check_endpoint(config: &mut Config) -> bool {
