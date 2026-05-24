@@ -418,6 +418,7 @@ mod tests {
             evidence: crate::config::EvidenceConfig::default(),
             plugins: crate::config::PluginsConfig::default(),
             diag: crate::config::DiagConfig::default(),
+            second_opinion: crate::config::SecondOpinionConfig::default(),
         }
     }
 

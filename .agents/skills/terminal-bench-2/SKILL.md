@@ -48,12 +48,13 @@ uv run --with harbor harbor run \
 cargo run --bin itsy-bench -- watch $PWD/jobs/fix-git-3x
 ```
 
-The five things you'll change between runs:
+The things you'll change between runs:
 
-| Knob | CLI flag |
+| Knob | How |
 |---|---|
-| Model | `--model` |
+| Main model | `--model` |
 | Endpoint | `--ae ITSY_BASE_URL=...` *or* set it in the agent adapter |
+| Second opinion model | edit `[second_opinion]` in `~/.config/itsy/config.toml` |
 | Task subset | `--include-task-name <name>` (repeatable, supports globs) |
 | Difficulty / tag | `--include-task-name <glob>` matched against task names |
 | Attempts per task | `--n-attempts N` |
@@ -208,7 +209,54 @@ jobs-dir/
 Suggested naming: `<task-or-subset>-<attempts>x-<dateYYYYMMDD>` (e.g.
 `fix-git-3x-20260522`, `scoreboard-3x-20260522`).
 
-### 6. Optional — debug knobs
+### 6. Second opinion model
+
+The agent uses a second model during `propose_contract` to independently
+generate and negotiate contract assertions. Both models propose their own
+assertion sets, the sets are merged, and then each model reviews the combined
+list — bouncing back and forth for up to 3 rounds until both accept or the
+round limit is hit.
+
+**Current config** (`~/.config/itsy/config.toml`):
+
+```toml
+[second_opinion]
+model = "unsloth/gemma-4-26B-A4B-it-GGUF:IQ2_M"
+endpoint = "http://10.0.2.2:8000/v1"
+```
+
+This adds ~60–90 s of overhead per `propose_contract` call (one per task).
+For benchmarking purposes, decide upfront whether you want second opinion on
+or off — don't mix within the same comparison run.
+
+**To disable for a run** (isolate main-model performance):
+
+```toml
+# Comment out or remove the [second_opinion] section entirely
+# [second_opinion]
+# model = "unsloth/gemma-4-26B-A4B-it-GGUF:IQ2_M"
+# endpoint = "http://10.0.2.2:8000/v1"
+```
+
+**To swap the second model** for a run (e.g. compare Gemma4 vs Qwen3.5-9B):
+
+```toml
+[second_opinion]
+model = "unsloth/Qwen3.5-9B-GGUF:Q4_K_XL"
+endpoint = "http://10.0.2.2:8000/v1"
+```
+
+The `negotiated` field in the `propose_contract` tool response tells you
+whether negotiation fired — check `agent/itsy.txt` in a trial directory for
+the line `Assertions were negotiated between main and second-opinion models.`
+
+**Memory note:** Gemma4 (26B IQ2_M) is loaded on demand by the harbor server
+and stays hot for subsequent calls. If you're running trials concurrently
+(`--n-concurrent > 1`) make sure the server has `--parallel ≥ 2` *and*
+enough VRAM to hold both models loaded at the same time, or the second-opinion
+call will time out (120 s hard limit, falls back to main assertions).
+
+### 7. Optional — debug knobs
 
 Things the user might ask for that map to itsy CLI flags or `--set`:
 

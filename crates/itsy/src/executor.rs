@@ -62,7 +62,7 @@ pub async fn execute_tool(name: &str, mut args: Value, ctx: &ExecCtx<'_>) -> Val
         }
         "web_search" => exec_web_search(&args).await,
         "web_fetch" => exec_web_fetch(&args).await,
-        "propose_contract" => exec_propose_contract(&args, &cwd).await,
+        "propose_contract" => exec_propose_contract(&args, &cwd, ctx.config).await,
         "mark_assertion" => exec_mark_assertion(&args, &cwd).await,
         "mark_feature" => exec_mark_feature(&args, &cwd).await,
         "contract_status" => exec_contract_status().await,
@@ -971,7 +971,7 @@ fn truncate(s: &str, n: usize) -> String {
 
 // ── contract tools ─────────────────────────────────────────────────────────
 
-async fn exec_propose_contract(args: &Value, cwd: &Path) -> Value {
+async fn exec_propose_contract(args: &Value, cwd: &Path, config: &Config) -> Value {
     use crate::session::contract;
     let title = match args.get("title").and_then(|v| v.as_str()) {
         Some(t) if !t.trim().is_empty() && t.len() <= 200 => t.to_string(),
@@ -1043,19 +1043,38 @@ async fn exec_propose_contract(args: &Value, cwd: &Path) -> Value {
         })
         .unwrap_or_default();
 
+    // Dual-model negotiation: if a second-opinion model is configured, run an
+    // independent assertion proposal + reconciliation loop before creating the
+    // contract. Falls back to the main model's assertions on any failure.
+    let (assertions, negotiated) =
+        crate::features_adapter::negotiate_assertions(&brief, &title, assertions, config).await;
+
+    if assertions.is_empty() {
+        return json!({"error": "assertion negotiation produced an empty list — please retry"});
+    }
+
     match contract::create(cwd, title.clone(), brief, assertions, features) {
-        Ok(c) => json!({
-            "result": format!(
-                "Contract `{}` created with {} assertions. \
-                 Work the assertions, marking each with mark_assertion as you go. \
-                 Call close_contract(\"completed\") when every assertion is non-pending.",
-                c.id,
-                c.assertions.len()
-            ),
-            "contract_id": c.id,
-            "title": c.title,
-            "assertion_ids": c.assertions.iter().map(|a| a.id.clone()).collect::<Vec<_>>(),
-        }),
+        Ok(c) => {
+            let note = if negotiated {
+                " Assertions were negotiated between main and second-opinion models."
+            } else {
+                ""
+            };
+            json!({
+                "result": format!(
+                    "Contract `{}` created with {} assertions.{} \
+                     Work the assertions, marking each with mark_assertion as you go. \
+                     Call close_contract(\"completed\") when every assertion is non-pending.",
+                    c.id,
+                    c.assertions.len(),
+                    note
+                ),
+                "contract_id": c.id,
+                "title": c.title,
+                "assertion_ids": c.assertions.iter().map(|a| a.id.clone()).collect::<Vec<_>>(),
+                "negotiated": negotiated,
+            })
+        }
         Err(e) => json!({"error": format!("propose_contract: {e}")}),
     }
 }
