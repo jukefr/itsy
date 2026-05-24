@@ -747,13 +747,12 @@ fn build_full_system_prompt(
         && !matches!(task_type, "explanation" | "respond")
     {
         let active = itsy::session::contract::current();
-        let cwd = std::env::current_dir()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let cwd_path = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let cwd = cwd_path.to_string_lossy().into_owned();
         if let Some(c) = active {
-            return build_contract_active_prompt(&c, &cwd, config);
+            return build_contract_active_prompt(&c, &cwd_path, &cwd, config);
         }
-        return build_contract_proposal_prompt(&cwd, config);
+        return build_contract_proposal_prompt(&cwd_path, &cwd, config);
     }
 
     let memory = session.memory.lock();
@@ -839,12 +838,20 @@ fn build_full_system_prompt(
 /// absent here — small models latch onto whatever's loudest, and a
 /// 1.5k-char "you're a coding assistant who can also propose
 /// contracts" loses to a 300-char "you must propose a contract."
-fn build_contract_proposal_prompt(cwd: &str, config: &Config) -> String {
+fn contract_verification_guidance(cwd: &std::path::Path) -> String {
+    itsy::verification::discover(cwd)
+        .prompt_block()
+        .map(|s| format!("\n{s}\n"))
+        .unwrap_or_default()
+}
+
+fn build_contract_proposal_prompt(cwd_path: &std::path::Path, cwd: &str, config: &Config) -> String {
     let model_line = if config.model.name.is_empty() {
         String::new()
     } else {
         format!("\nModel: {}", config.model.name)
     };
+    let verification = contract_verification_guidance(cwd_path);
     format!(
         "You are itsy, working in CONTRACT mode. Working directory: {cwd}.{model_line}\n\
         \n\
@@ -859,7 +866,7 @@ fn build_contract_proposal_prompt(cwd: &str, config: &Config) -> String {
           BAD:   \"the code is correct\"          (not testable)\n\
           BAD:   \"the implementation is complete\" (not testable)\n\
           BAD:   \"all tests pass\"              (vague — which tests?)\n\
-        \n\
+        {verification}\
         Until propose_contract returns, NO other tools are available. \
         `write_file`, `patch`, mutating `bash`, etc. will refuse. \
         Read-only tools (read_file, search) are available but you should not need them — \
@@ -873,6 +880,7 @@ fn build_contract_proposal_prompt(cwd: &str, config: &Config) -> String {
         After it returns the toolkit opens up and you can do the work.\n",
         cwd = cwd,
         model_line = model_line,
+        verification = verification,
     )
 }
 
@@ -882,6 +890,7 @@ fn build_contract_proposal_prompt(cwd: &str, config: &Config) -> String {
 /// instructions/code-graph hints — the contract is enough.
 fn build_contract_active_prompt(
     c: &itsy::session::contract::Contract,
+    cwd_path: &std::path::Path,
     cwd: &str,
     config: &Config,
 ) -> String {
@@ -891,10 +900,12 @@ fn build_contract_active_prompt(
         format!("\nModel: {}", config.model.name)
     };
     let body = itsy::session::contract::render_for_prompt(c);
+    let verification = contract_verification_guidance(cwd_path);
     format!(
         "You are itsy, working under an active contract. Working directory: {cwd}.{model_line}\n\
         \n\
         {body}\n\
+        {verification}\
         \n\
         How to work:\n\
         - ONE tool call per response. Reason only about the immediate next step — not the full solution.\n\
@@ -902,6 +913,7 @@ fn build_contract_active_prompt(
         - Focus on the FIRST pending assertion. Ignore the others for now.\n\
         - Look at the most recent tool result. What is the single most direct action to move toward passing it?\n\
         - Do the work for each pending assertion (write_file / patch / bash — all available now).\n\
+        - Prefer the repo's own tests / verifier scripts over ad-hoc samples whenever they exist.\n\
         - When you've verified an assertion, call `mark_assertion` with:\n\
             id          the assertion id (A.001, A.002, …)\n\
             state       \"passed\" / \"failed\" / \"skipped\"\n\
@@ -915,6 +927,7 @@ fn build_contract_active_prompt(
         cwd = cwd,
         model_line = model_line,
         body = body,
+        verification = verification,
     )
 }
 
@@ -978,6 +991,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                 tools: Vec::new(),
                 current_task_type: None,
                 system_prompt: build_full_system_prompt(&snapshot.1, "explanation", &snapshot.0, session),
+                force_disable_thinking: false,
             };
             let response = chat_completion(&chat_ctx).await;
             // Splice the one-shot clarifier instruction out of history,
@@ -1134,6 +1148,8 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
     let max_tool_calls_this_turn = max_tool_calls_per_turn();
     let mut edited_files: Vec<String> = Vec::new();
     let mut had_mutating_call = false;
+    let mut force_disable_thinking = false;
+    let mut empty_retry_injected = false;
     let mut improvement_attempts: std::collections::HashMap<String, u32> = Default::default();
     // Per-turn "you've already called this" counter, keyed by a hash of
     // (tool_name, args). Catches identical mutating calls (like `rm -rf X`
@@ -1242,6 +1258,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             tools,
             current_task_type: Some(task_type),
             system_prompt,
+            force_disable_thinking,
         };
 
         // Forensic snapshot of the request body about to be sent. Lets a
@@ -1275,18 +1292,28 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
+        let response_content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
+        let response_has_content = !response_content.trim().is_empty();
+        if empty_retry_injected && (!tool_calls.is_empty() || response_has_content) {
+            let mut hist = session.history.lock();
+            if hist.len() >= 2 {
+                hist.pop();
+                hist.pop();
+            }
+            empty_retry_injected = false;
+        }
 
         // Record trace step.
         {
-            let content = msg.get("content").and_then(|c| c.as_str());
             session
                 .trace
                 .lock()
-                .record_model_response(content, Some(&tool_calls));
+                .record_model_response(Some(response_content), Some(&tool_calls));
         }
 
         // 7a) Model emitted tool calls → execute them.
         if !tool_calls.is_empty() {
+            force_disable_thinking = false;
             let mut batch_had_mutating = false;
             // Contract-lifecycle calls (mark_assertion, close_contract, etc.)
             // count as meaningful forward progress — don't accumulate toward
@@ -2133,14 +2160,16 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             const MAX_EMPTY_RETRIES: u32 = 2;
             let n = *per_turn_repeats.entry("__empty_response".into()).and_modify(|n| *n += 1).or_insert(1);
             if n <= MAX_EMPTY_RETRIES {
-                println!("  \x1b[33m⚠ Model returned empty response — retrying ({n}/{MAX_EMPTY_RETRIES})\x1b[0m");
+                force_disable_thinking = true;
+                empty_retry_injected = true;
+                println!("  \x1b[33m⚠ Model returned empty response — retrying ({n}/{MAX_EMPTY_RETRIES}) with thinking disabled\x1b[0m");
                 session.history.lock().push(json!({
                     "role": "assistant",
                     "content": content_opt.clone().unwrap_or_default(),
                 }));
                 session.history.lock().push(json!({
                     "role": "user",
-                    "content": "[SYSTEM] Your previous turn was empty. Please respond — either call a tool to gather information, or give a direct text answer. Do not return an empty turn.",
+                    "content": "[SYSTEM] Your previous turn was empty. Thinking is disabled for the retry. Respond with exactly one concrete next step: either call a tool, or give a direct text answer. Do not return an empty turn.",
                 }));
                 continue;
             }
@@ -2153,6 +2182,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             }));
             break;
         }
+        force_disable_thinking = false;
 
         // Badger: action-task gave no-tool short response. Skip when the
         // router pinned us to `respond` (no tools available — badgering
@@ -2676,6 +2706,7 @@ async fn run_evaluator_phase(
             tools: tools.clone(),
             current_task_type: Some("evaluation"),
             system_prompt: system_prompt.clone(),
+            force_disable_thinking: false,
         };
 
         let Some(response) = itsy::model_client::chat_completion(&ctx).await else {
@@ -3038,6 +3069,7 @@ async fn run_eval(config: &Config, suite_name: &str) -> i32 {
                             tools: get_all_tools(&cfg, None, &ToolDeps::default()),
                             current_task_type: None,
                             system_prompt: build_system_prompt(&cfg, "", "", "", None),
+                            force_disable_thinking: false,
                         };
                         let data = chat_completion(&chat_ctx).await?;
                         let calls = data.pointer("/choices/0/message/tool_calls")?.as_array()?;
@@ -3063,6 +3095,7 @@ async fn run_eval(config: &Config, suite_name: &str) -> i32 {
                             tools: Vec::new(),
                             current_task_type: None,
                             system_prompt: build_system_prompt(&cfg, "", "", "", None),
+                            force_disable_thinking: false,
                         };
                         let data = chat_completion(&chat_ctx).await?;
                         data.pointer("/choices/0/message/content")

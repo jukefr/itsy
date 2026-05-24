@@ -2,6 +2,7 @@
 //! spirals, and greeting regression in streamed model output.
 
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct StopSignal {
@@ -19,12 +20,12 @@ pub struct EarlyStopDetector {
     pub enable_greeting_detection: bool,
     /// Consecutive bash non-zero exits before injecting a correction.
     pub max_consecutive_bash_failures: u32,
-    patch_failures: HashMap<String, u32>,
-    patch_attempts: HashMap<String, u32>,
+    patch_failures: HashMap<PathBuf, u32>,
+    patch_attempts: HashMap<PathBuf, u32>,
     /// Files blocked from patching after a stuck spiral.
     /// Cleared when the model successfully reads the file — forces
     /// re-read before re-patch rather than a permanent session ban.
-    patch_blocked_files: HashSet<String>,
+    patch_blocked_files: HashSet<PathBuf>,
     consecutive_bash_failures: u32,
 }
 
@@ -47,17 +48,25 @@ impl EarlyStopDetector {
     /// Returns a hard error if this file has been permanently blocked after
     /// a patch spiral. Call this BEFORE executing a patch tool call.
     pub fn check_patch_blocked(&self, file_path: &str) -> Option<StopSignal> {
-        if !self.patch_blocked_files.contains(file_path) {
+        let file_path = normalize_path(file_path);
+        if !self.patch_blocked_files.contains(&file_path) {
             return None;
         }
         Some(StopSignal {
             reason: "patch_blocked",
-            message: format!("Patch on {file_path} blocked — file was stuck-patched earlier."),
+            message: format!(
+                "Patch on {} blocked — file is in hot-file safe mode.",
+                file_path.display()
+            ),
             action: "hard_block",
             injection: format!(
-                "[LOOP DETECTED] patch on '{file_path}' is blocked. You already failed repeatedly \
-                 on this file and were told to stop. Do NOT call patch on this file again. \
-                 Use a completely different tool or target a different file."
+                "[LOOP DETECTED] patch on '{}' is blocked. That file is in HOT-FILE SAFE MODE.\n\
+                 1. Call read_file on '{}' to refresh the exact current content.\n\
+                 2. Then make ONE small edit with a unique old_str / anchor.\n\
+                 3. Re-run the narrowest verifier or compiler check before editing again.\n\
+                 Do NOT keep patching blindly, and do NOT rewrite the whole file from scratch.",
+                file_path.display(),
+                file_path.display(),
             ),
         })
     }
@@ -101,34 +110,42 @@ impl EarlyStopDetector {
     }
 
     pub fn record_patch_result(&mut self, file_path: &str, success: bool, old_str: &str, new_str: &str) -> Option<StopSignal> {
-        let attempts = self.patch_attempts.entry(file_path.to_string()).or_insert(0);
+        let file_path = normalize_path(file_path);
+        let attempts = self.patch_attempts.entry(file_path.clone()).or_insert(0);
         *attempts += 1;
         let total_attempts = *attempts;
 
         let is_noop = success && !old_str.is_empty() && !new_str.is_empty() && old_str == new_str;
         if success && !is_noop {
-            if let Some(f) = self.patch_failures.get_mut(file_path) {
+            if let Some(f) = self.patch_failures.get_mut(&file_path) {
                 *f = f.saturating_sub(1);
             }
             return None;
         }
-        let fails = self.patch_failures.entry(file_path.to_string()).or_insert(0);
+        let fails = self.patch_failures.entry(file_path.clone()).or_insert(0);
         *fails += 1;
         let fail_count = *fails;
         if fail_count >= self.max_patch_failures {
-            self.patch_failures.remove(file_path);
-            self.patch_attempts.remove(file_path);
-            self.patch_blocked_files.insert(file_path.to_string());
+            self.patch_failures.remove(&file_path);
+            self.patch_attempts.remove(&file_path);
+            self.patch_blocked_files.insert(file_path.clone());
             return Some(StopSignal {
                 reason: "patch_spiral",
-                message: format!("Patch stuck on {file_path} ({fail_count} failures, {total_attempts} attempts). Switching to rewrite."),
-                action: "rewrite_file",
+                message: format!(
+                    "Patch stuck on {} ({fail_count} failures, {total_attempts} attempts). Entering hot-file safe mode.",
+                    file_path.display()
+                ),
+                action: "hot_file_safe_mode",
                 injection: format!(
-                    "[SYSTEM] You have attempted to patch {file_path} {total_attempts} times ({fail_count} failures). The file is likely corrupted or your patches don't match. STOP using patch. Instead:\n\
-                     1. Use read_file to see the current state\n\
-                     2. Decide what the ENTIRE file should contain\n\
-                     3. Use write_file to rewrite it completely from scratch\n\
-                     Do NOT attempt another patch on this file."
+                    "[SYSTEM] You have attempted to edit {} {total_attempts} times ({fail_count} failures). \
+                     Enter HOT-FILE SAFE MODE:\n\
+                     1. Call read_file on {} to refresh the exact current content.\n\
+                     2. Make ONE small targeted edit using a unique snippet / anchor.\n\
+                     3. Re-run the narrowest verifier or compiler check before editing again.\n\
+                     Do NOT rewrite the whole file. Do NOT chain multiple blind edits. \
+                     If you cannot identify a unique target, inspect the verifier or failing check first.",
+                    file_path.display(),
+                    file_path.display(),
                 ),
             });
         }
@@ -195,7 +212,7 @@ impl EarlyStopDetector {
 
     /// Call after a successful read_file — unblocks the file for patching.
     pub fn record_read(&mut self, file_path: &str) {
-        self.patch_blocked_files.remove(file_path);
+        self.patch_blocked_files.remove(&normalize_path(file_path));
     }
 
     pub fn new_turn(&mut self) {
@@ -209,5 +226,47 @@ impl EarlyStopDetector {
 impl Default for EarlyStopDetector {
     fn default() -> Self {
         Self::new()
+    }
+}
+fn normalize_path(path: &str) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in Path::new(path).components() {
+        match comp {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+#[cfg(test)]
+mod tests {
+    use super::EarlyStopDetector;
+
+    #[test]
+    fn patch_spiral_enters_hot_file_safe_mode() {
+        let mut detector = EarlyStopDetector::new();
+        let mut signal = None;
+        for _ in 0..detector.max_patch_failures {
+            signal = detector.record_patch_result("src/lib.rs", false, "old", "new");
+        }
+        let signal = signal.expect("expected hot-file signal");
+        assert_eq!(signal.reason, "patch_spiral");
+        assert_eq!(signal.action, "hot_file_safe_mode");
+        assert!(signal.injection.contains("HOT-FILE SAFE MODE"));
+        assert!(signal.injection.contains("Do NOT rewrite the whole file"));
+    }
+
+    #[test]
+    fn read_unblocks_hot_file_safe_mode() {
+        let mut detector = EarlyStopDetector::new();
+        for _ in 0..detector.max_patch_failures {
+            let _ = detector.record_patch_result("src/lib.rs", false, "old", "new");
+        }
+        assert!(detector.check_patch_blocked("src/lib.rs").is_some());
+        detector.record_read("./src/lib.rs");
+        assert!(detector.check_patch_blocked("src/lib.rs").is_none());
     }
 }

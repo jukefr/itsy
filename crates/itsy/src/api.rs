@@ -196,6 +196,7 @@ impl ItsyApi {
                 tools,
                 current_task_type: None,
                 system_prompt: build_system_prompt(&self.config, "", "", "", None),
+                force_disable_thinking: false,
             };
 
             let completion = tokio::time::timeout(self.options.timeout, chat_completion(&chat_ctx)).await;

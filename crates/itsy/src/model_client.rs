@@ -22,6 +22,7 @@ pub struct ChatContext<'a> {
     pub tools: Vec<Value>,
     pub current_task_type: Option<&'a str>,
     pub system_prompt: String,
+    pub force_disable_thinking: bool,
 }
 
 /// Make a chat completion request (non-streaming, for tool use).
@@ -116,7 +117,7 @@ pub async fn chat_completion(ctx: &ChatContext<'_>) -> Option<Value> {
         &mut body,
         &ctx.config.model.base_url,
         tokens,
-        /* disable = */ false,
+        /* disable = */ ctx.force_disable_thinking,
     );
 
     // Mirrors upstream: one POST, one transient-error retry on 4xx.
