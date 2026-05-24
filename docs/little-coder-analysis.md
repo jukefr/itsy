@@ -246,8 +246,12 @@ they note this could be selection bias (hard tasks think more). The
 `temperature: 0.2` setting is meaningful — their llama-server default is ~0.8
 which adds variance; 0.2 reduces it.
 
-We should evaluate adding explicit temperature control per bench run. Medium
-priority.
+**Why we're not adopting this:** Temperature tuning for a specific benchmark is
+the same class of problem as knowledge injection — it's fitting a hyperparameter
+to the answer key, not improving the agent. A temperature that reduces variance
+on TB 2.0 may increase it on a different task distribution. The right fix for
+high-variance outputs is a stronger model or better agent logic, not a
+benchmark-specific sampling temperature. Not adopting.
 
 ---
 
@@ -275,7 +279,7 @@ priority.
 | Full tool skill card system (adopt LC's markdown + 3-priority selection) | **High** | Medium | Their data shows 57% of Write spirals caught pre-failure. Proven mechanism. |
 | Context-aware read trimming (`read-guard`) | **High** | Low | Our dumb 4000-char cap is worse for long tasks. No task-specific knowledge. |
 | Quality monitor (empty/hallucinated/loop detection with steer injection) | **Medium** | Low | 28/80 TB tasks hit it; itsy sees the same failure modes |
-| Temperature control per bench run | **Medium** | Low | LC uses 0.2 for TB; llama-server defaults to ~0.8 |
+| Temperature control per bench run | **Rejected** | — | Benchmark-specific hyperparameter fitting. Same class of problem as knowledge injection — not adopting. |
 | Turn cap at task level | **Low** | Low | Harbor timeout covers the extreme case already |
 | Live context window probe | **Low** | Low | Only matters if users start llama-server with non-default `-c` |
 | Bash whitelist | **Low** | Low | Relevant for interactive use only |
@@ -297,3 +301,14 @@ improvement they produce is the answer key doing the work, not the agent. Users
 working on arbitrary codebases don't have matching cheat sheets. The right fix
 for an agent that fails an algorithmic task is a stronger model or better tooling,
 not a hard-coded answer key.
+
+### H. Temperature control per bench run (`benchmark-profiles`)
+
+little-coder sets `temperature: 0.2` for terminal-bench runs vs. a default of ~0.8.
+
+**Why we didn't take this:** Same class of problem as knowledge injection —
+fitting a hyperparameter to the benchmark's task distribution rather than improving
+the agent. A lower temperature reduces variance on TB 2.0 specifically, but there's
+no principled reason it would generalise to other task distributions or real use.
+The right fix for high-variance model outputs is a better model or better agent
+logic, not a sampling temperature tuned to the answer key.
