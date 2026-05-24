@@ -87,6 +87,7 @@ enum TrialStatus {
 
 #[derive(Clone, Debug)]
 struct ContractAssertion {
+    #[allow(dead_code)]
     id: String,
     text: String,
 }
@@ -201,6 +202,7 @@ enum LogKind {
     ToolErr,    // ✗ error
     ToolBody,   // continuation lines of a tool result
     Nudge,      // system nudge/warning
+    #[allow(dead_code)]
     Tokens,     // [tokens] summary
 }
 
@@ -218,10 +220,9 @@ impl LogLine {
     fn tool_err(s: impl Into<String>) -> Self { Self { kind: LogKind::ToolErr, text: s.into() } }
     fn tool_body(s: impl Into<String>) -> Self { Self { kind: LogKind::ToolBody, text: s.into() } }
     fn nudge(s: impl Into<String>) -> Self { Self { kind: LogKind::Nudge, text: s.into() } }
+    #[allow(dead_code)]
     fn tokens(s: impl Into<String>) -> Self { Self { kind: LogKind::Tokens, text: s.into() } }
 }
-
-// ─── Job directory parsing ────────────────────────────────────────────────────
 
 #[derive(Deserialize, Default)]
 struct ResultJson {

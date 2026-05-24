@@ -185,7 +185,6 @@ struct AgentSessionShared {
     pub sessions: SessionStore,
     pub read_tracker: Arc<itsy::tools_impl::read_tracker::ReadTracker>,
     pub file_state: Arc<itsy::session::file_state::FileStateTracker>,
-    pub knowledge_loader: Arc<itsy::knowledge::KnowledgeLoader>,
 }
 
 /// Frequently-written state behind a single `Mutex`.
