@@ -14,3 +14,4 @@ pub mod share;
 pub mod images;
 pub mod clarify;
 pub mod contract;
+pub mod compaction;

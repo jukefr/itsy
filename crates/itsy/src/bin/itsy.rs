@@ -29,7 +29,6 @@ use itsy::governor::{
     HardFailAction,
 };
 use itsy::governor::early_stop::EarlyStopDetector;
-use itsy::knowledge::{get_knowledge_loader, SelectOptions};
 use itsy::mcp_bridge::McpBridge;
 use itsy::memory::MemoryStore;
 use itsy::model_client::{
@@ -44,7 +43,6 @@ use itsy::session::references::{format_references_for_prompt, resolve_references
 use itsy::session::tokens::TokenTracker;
 use itsy::token_monitor::{CallMetadata, TokenMonitor};
 use itsy::tools::{get_all_tools, ToolDeps};
-use itsy::tools_impl::test_runner;
 use itsy::trace_recorder::TraceRecorder;
 use itsy::tui;
 
@@ -67,8 +65,6 @@ fn recency_tool_hint(tool_name: &str) -> &'static str {
 }
 /// Maximum auto-improvement iterations per file before we DECOMPOSE.
 const MAX_IMPROVE_ITERATIONS: u32 = 4;
-/// Maximum size of any single tool result before we cap it (chars).
-const MAX_TOOL_RESULT_CHARS: usize = 4000;
 
 // ── CLI parsing ──────────────────────────────────────────────────────────────
 
@@ -220,726 +216,6 @@ struct AgentSession {
 // ── Helpers: estimation & history compaction ─────────────────────────────────
 
 /// Cheap heuristic token estimator (~4 chars per token).
-fn estimate_message_tokens(m: &Value) -> u64 {
-    // Mirrors JS estimateMessageTokens — chars/4 ceil.
-    let content_chars = match m.get("content") {
-        Some(Value::String(s)) => s.len(),
-        Some(other) if !other.is_null() => serde_json::to_string(other)
-            .map(|s| s.len())
-            .unwrap_or(0),
-        _ => 0,
-    };
-    // tool_calls messages carry function.name + function.arguments;
-    // upstream adds +20 per call as wire-overhead. Match exactly.
-    let tc_chars = m
-        .get("tool_calls")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .map(|tc| {
-                    let name_len = tc
-                        .pointer("/function/name")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.len())
-                        .unwrap_or(0);
-                    let args_len = tc
-                        .pointer("/function/arguments")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.len())
-                        .unwrap_or(0);
-                    name_len + args_len + 20
-                })
-                .sum::<usize>()
-        })
-        .unwrap_or(0);
-    ((content_chars + tc_chars) as f64 / 4.0).ceil() as u64
-}
-
-fn estimate_history_tokens(history: &[Value]) -> u64 {
-    history.iter().map(estimate_message_tokens).sum()
-}
-
-/// Truncate a string to `max` chars while preserving a small tail. Used for
-/// large tool results so the model still sees what failed at the end.
-/// Returns the first `n` newline-terminated lines of `s`, or all of `s` if
-/// it has fewer lines. Result is always a valid str slice of the input.
-fn first_n_lines(s: &str, n: usize) -> &str {
-    let mut count = 0;
-    for (i, c) in s.char_indices() {
-        if c == '\n' {
-            count += 1;
-            if count >= n {
-                return &s[..i];
-            }
-        }
-    }
-    s
-}
-
-/// Cap a tool result to a context-aware character limit.
-///
-/// `context_ratio` is `last_prompt_tokens / detected_window` (0.0 = empty,
-/// 1.0 = full). The threshold expands when the context is mostly empty so we
-/// don't truncate files unnecessarily early in a task, and tightens when the
-/// context is getting full.
-///
-/// When truncating, we return the first 30 lines (imports, signatures) plus an
-/// explicit grep/offset directive — more useful than the old head+tail slice,
-/// which gave the model partial content with no recovery path.
-fn cap_tool_result(content: &str, context_ratio: f32) -> String {
-    let char_cap: usize = if context_ratio < 0.40 {
-        16_000
-    } else if context_ratio < 0.65 {
-        8_000
-    } else {
-        MAX_TOOL_RESULT_CHARS
-    };
-
-    if content.len() <= char_cap {
-        return content.to_string();
-    }
-
-    let head = first_n_lines(content, 30);
-    // Guard against files with very long lines: cap head at char_cap too.
-    let head = if head.len() > char_cap {
-        let mut end = char_cap;
-        while end > 0 && !content.is_char_boundary(end) {
-            end -= 1;
-        }
-        &content[..end]
-    } else {
-        head
-    };
-    format!(
-        "{head}\n\n\
-         [Output truncated — {} chars total. \
-         Use bash+grep or read_file with offset/limit to target a specific range. \
-         Do not re-read the full result.]",
-        content.len()
-    )
-}
-
-fn truncate_short(s: &str, n: usize) -> String {
-    if s.len() <= n {
-        return s.to_string();
-    }
-    let mut end = n;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &s[..end])
-}
-
-/// Detect a short affirmation like "yes" / "ok" / "go ahead". Keeps the prior
-/// tool category instead of reclassifying — see JS lines 627-644.
-fn is_affirmation(s: &str) -> bool {
-    let trimmed = s.trim().trim_end_matches('.').to_lowercase();
-    matches!(
-        trimmed.as_str(),
-        "yes"
-            | "y"
-            | "yep"
-            | "yeah"
-            | "sure"
-            | "ok"
-            | "okay"
-            | "go"
-            | "proceed"
-            | "do it"
-            | "continue"
-            | "please"
-            | "please do"
-            | "alright"
-    )
-}
-
-/// Detect quoted absolute paths or paths with a slash/extension. The
-/// clarifier shouldn't fire on `'C:\\path\\foo.md'` even though it's short.
-fn looks_like_path(s: &str) -> bool {
-    static RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
-        regex::Regex::new(r#"[\\/]|\.\w{1,5}\s*$|^["'].*["']$"#).unwrap()
-    });
-    RE.is_match(s.trim())
-}
-
-/// Detect option-references like "option 2", "do 3", "first", "second".
-/// The clarifier shouldn't fire on these — they're context-references to
-/// a prior assistant message that proposed choices.
-fn looks_like_option_ref(s: &str) -> bool {
-    static RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
-        regex::Regex::new(
-            r"(?i)^(option\s+\d|work\s+on\s+\d|do\s+\d|start\s+with\s+\d|\d+\.?\s*$|first|second|third|fourth)\b",
-        )
-        .unwrap()
-    });
-    RE.is_match(s.trim())
-}
-
-/// Auto-compact: trim oldest non-system messages once the budget is exceeded.
-/// Mirrors JS lines 700-760 but without the LLM-based summary path.
-fn maybe_compact(history: &mut Vec<Value>) -> bool {
-    let estimated = estimate_history_tokens(history);
-    let s = itsy::settings::get();
-    let max_ctx_tokens =
-        (s.detected_window as f64) * (s.max_budget_pct as f64 / 100.0);
-    if (estimated as f64) <= max_ctx_tokens * 0.8 && history.len() <= 30 {
-        return false;
-    }
-    let target = max_ctx_tokens * 0.7;
-    let mut dropped = false;
-    while history.len() > 6 {
-        let est = estimate_history_tokens(history) as f64;
-        if est < target {
-            break;
-        }
-        let remove_idx = history
-            .iter()
-            .position(|m| m.get("role").and_then(|r| r.as_str()) != Some("system"));
-        let Some(idx) = remove_idx else { break };
-        history.remove(idx);
-        dropped = true;
-    }
-    if dropped {
-        let summary = format!(
-            "[Context compacted to fit {} token budget]",
-            max_ctx_tokens as u32
-        );
-        history.insert(0, json!({"role": "system", "content": summary}));
-    }
-    dropped
-}
-
-/// Mid-turn eviction: when in the middle of a tool chain and history blows up,
-/// truncate large arguments in old assistant messages and replace tool results
-/// with stubs. JS lines 786-863.
-fn mid_turn_evict(history: &mut Vec<Value>) -> u32 {
-    let s = itsy::settings::get();
-    let max_budget = (s.detected_window as f64) * 0.6;
-    if (estimate_history_tokens(history) as f64) <= max_budget {
-        return 0;
-    }
-    // Find last assistant index with tool_calls — we won't touch that one.
-    let last_assistant_idx = history
-        .iter()
-        .enumerate()
-        .filter(|(_, m)| m.get("tool_calls").is_some())
-        .map(|(i, _)| i)
-        .last()
-        .unwrap_or(0);
-    // First pass: truncate huge args in older assistant tool_calls.
-    for m in history.iter_mut().take(last_assistant_idx) {
-        let Some(calls) = m.get_mut("tool_calls").and_then(|v| v.as_array_mut()) else {
-            continue;
-        };
-        for tc in calls.iter_mut() {
-            let Some(args) = tc.pointer_mut("/function/arguments") else { continue };
-            let Some(s) = args.as_str() else { continue };
-            if s.len() <= 200 {
-                continue;
-            }
-            // Minimize all string fields > 100 chars.
-            let minimal = serde_json::from_str::<Value>(s)
-                .ok()
-                .and_then(|v| {
-                    let obj = v.as_object()?;
-                    let mut out = serde_json::Map::new();
-                    for (k, v) in obj.iter() {
-                        match v {
-                            Value::String(s) if s.len() > 100 => {
-                                out.insert(
-                                    k.clone(),
-                                    Value::String(format!("{}…", &s[..80.min(s.len())])),
-                                );
-                            }
-                            other => {
-                                out.insert(k.clone(), other.clone());
-                            }
-                        }
-                    }
-                    Some(Value::Object(out).to_string())
-                })
-                .unwrap_or_else(|| "{}".into());
-            *args = Value::String(minimal);
-        }
-    }
-    // Second pass: evict tool results in the first half.
-    let half = history.len() / 2;
-    let mut evicted = 0u32;
-    let mut i = 0;
-    while i < half && i < history.len() {
-        let role = history[i].get("role").and_then(|r| r.as_str()).unwrap_or("");
-        if role == "tool" {
-            let content = history[i]
-                .get("content")
-                .and_then(|c| c.as_str())
-                .unwrap_or("");
-            let approx = (content.len() / 4) as u64;
-            history[i]["content"] = json!(format!("[evicted: {approx} tokens]"));
-            evicted += 1;
-        }
-        i += 1;
-        if (estimate_history_tokens(history) as f64) <= max_budget * 0.7 {
-            break;
-        }
-    }
-    evicted
-}
-
-// ── System prompt builders ───────────────────────────────────────────────────
-
-/// JS `getMemoryContext`. Loads scored memory for the last user message and
-/// formats it inline (≤ ~800 tokens / 3200 chars).
-fn get_memory_context(messages: &[Value], memory: &MemoryStore) -> String {
-    let Some(last_user) = messages
-        .iter()
-        .rev()
-        .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
-    else {
-        return String::new();
-    };
-    let Some(task) = last_user.get("content").and_then(|c| c.as_str()) else {
-        return String::new();
-    };
-    let items = memory.load_for_task(task);
-    if items.is_empty() {
-        return String::new();
-    }
-    let mut out = String::from("\n\nRelevant project memory:\n");
-    let max_chars = 3200usize;
-    for o in items {
-        let entry = format!("[{}] {}: {}\n", o.kind, o.title, o.content);
-        if out.len() + entry.len() > max_chars {
-            break;
-        }
-        out.push_str(&entry);
-    }
-    out
-}
-
-/// JS `getSkillContext`. Auto-loads matching skills based on the last user
-/// message and formats them (capped at ~4000 chars).
-fn get_skill_context(messages: &[Value], skills: &SkillManager) -> String {
-    let Some(last_user) = messages
-        .iter()
-        .rev()
-        .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
-    else {
-        return String::new();
-    };
-    let Some(msg) = last_user.get("content").and_then(|c| c.as_str()) else {
-        return String::new();
-    };
-    let auto = skills.get_auto_skills(msg);
-    if auto.is_empty() {
-        return String::new();
-    }
-    let formatted = skills.format_for_prompt(&auto);
-    if formatted.len() > 4000 {
-        format!(
-            "{}\n... (skills truncated to fit context)",
-            &formatted[..4000]
-        )
-    } else {
-        formatted
-    }
-}
-
-/// JS `getPluginPrompts`. Plugin-supplied prompt injections gated by task type.
-fn get_plugin_prompts(plugins: &PluginLoader, task_type: Option<&str>) -> String {
-    let injection = plugins.get_prompt_injections(task_type);
-    if injection.is_empty() {
-        return String::new();
-    }
-    let capped = if injection.len() > 2000 {
-        format!("{}\n... (plugin prompts truncated)", &injection[..2000])
-    } else {
-        injection
-    };
-    format!("\n\n{capped}")
-}
-
-/// JS `getKnowledgeContext`. Walks the project's `knowledge/` directory and
-/// pulls in docs that overlap with the last user message.
-fn get_knowledge_context(messages: &[Value]) -> String {
-    let Some(last_user) = messages
-        .iter()
-        .rev()
-        .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
-    else {
-        return String::new();
-    };
-    let Some(query) = last_user.get("content").and_then(|c| c.as_str()) else {
-        return String::new();
-    };
-    let s = itsy::settings::get();
-    let max_tokens = (s.detected_window as f64 * 0.04)
-        .clamp(200.0, 1500.0) as usize;
-    let loader = get_knowledge_loader();
-    loader.format_for_prompt(query, &SelectOptions { max_tokens: Some(max_tokens) })
-}
-
-/// JS `getTestRunnerContext`.
-fn get_test_runner_context(cwd: &Path) -> String {
-    test_runner::format_for_prompt(cwd)
-}
-
-/// Static guidance card for a single tool. Returns `""` for unknown names.
-/// Kept intentionally brief — IQ2_XXS has limited attention, so every extra
-/// sentence costs more than it adds. Focus on the failure mode + fix.
-fn tool_skill_card(name: &str) -> &'static str {
-    match name {
-        "patch" => "\
-### patch\n\
-Applies diffs. Requires EXACT current file content.\n\
-- Hunk failed / context mismatch: call read_file first, rebuild diff from current content\n\
-- Never patch without reading the file in the same turn\n",
-
-        "read_and_patch" => "\
-### read_and_patch (preferred for edits)\n\
-Atomic read + patch. Avoids stale-content failures.\n\
-- Prefer this over separate read_file + patch\n\
-- Context mismatch: call read_file, rebuild diff from fresh content\n",
-
-        "write_file" => "\
-### write_file\n\
-Creates or overwrites. Requires a prior read_file on the same path.\n\
-- \"Prior read required\": call read_file on the path first\n\
-- For targeted edits prefer patch or read_and_patch\n",
-
-        "bash" => "\
-### bash\n\
-Runs shell commands.\n\
-- Command not found: verify with `which <cmd>`\n\
-- Path errors: verify with `ls <path>` before using it\n\
-- Check exit code in the result for test / build commands\n",
-
-        "read_file" => "\
-### read_file\n\
-Reads file content.\n\
-- File not found: verify with bash + ls or find first\n\
-- Large file: use offset/limit to target a range — do not read the whole file\n\
-- Re-read after writing to confirm the change took effect\n",
-
-        _ => "",
-    }
-}
-
-/// Select up to 3 tool guidance cards based on recent errors, recently used
-/// tools, and intent keywords from the last user message.
-/// Priority: error-recovery > recency > intent prediction.
-/// Returns a ready-to-inject string (empty when no cards apply).
-fn select_tool_skill_cards(messages: &[Value]) -> String {
-    // Build id → tool-name map and collect recently-used + errored tools
-    // from the last 16 messages (roughly 4–6 turns).
-    let mut id_to_name: std::collections::HashMap<&str, &str> = Default::default();
-    let mut used_tools: Vec<&str> = Vec::new();
-    let mut error_tools: Vec<&str> = Vec::new();
-    let mut last_user_text: &str = "";
-
-    for msg in messages.iter().rev().take(16) {
-        let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
-        match role {
-            "assistant" => {
-                if let Some(tcs) = msg.get("tool_calls").and_then(|v| v.as_array()) {
-                    for tc in tcs {
-                        let name = tc
-                            .pointer("/function/name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                        if !id.is_empty() && !name.is_empty() {
-                            id_to_name.insert(id, name);
-                            if !used_tools.contains(&name) {
-                                used_tools.push(name);
-                            }
-                        }
-                    }
-                }
-            }
-            "tool" => {
-                let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                let looks_like_error = content.contains("Error")
-                    || content.contains("failed")
-                    || content.contains("not found")
-                    || content.contains("mismatch");
-                if looks_like_error {
-                    if let Some(name) = msg
-                        .get("tool_call_id")
-                        .and_then(|v| v.as_str())
-                        .and_then(|id| id_to_name.get(id))
-                    {
-                        if !error_tools.contains(name) {
-                            error_tools.push(name);
-                        }
-                    }
-                }
-            }
-            "user" => {
-                if last_user_text.is_empty() {
-                    if let Some(c) = msg.get("content").and_then(|v| v.as_str()) {
-                        if !c.starts_with("[SYSTEM]") {
-                            last_user_text = c;
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    // Intent keyword → candidate tool names.
-    let lower = last_user_text.to_ascii_lowercase();
-    let mut intent: Vec<&str> = Vec::new();
-    if lower.contains("patch") || lower.contains("edit") || lower.contains("fix") || lower.contains("change") {
-        intent.push("patch");
-    }
-    if lower.contains("write") || lower.contains("create") {
-        intent.push("write_file");
-    }
-    if lower.contains("read") || lower.contains("show") || lower.contains("check") || lower.contains("look") {
-        intent.push("read_file");
-    }
-    if lower.contains("run") || lower.contains("exec") || lower.contains("build") || lower.contains("test") || lower.contains("compile") {
-        intent.push("bash");
-    }
-
-    // Merge in priority order, deduplicate, cap at 3 cards.
-    let mut selected: Vec<&str> = Vec::new();
-    for name in error_tools.iter().chain(used_tools.iter()).chain(intent.iter()) {
-        if !selected.contains(name) && !tool_skill_card(name).is_empty() {
-            selected.push(name);
-        }
-        if selected.len() >= 3 {
-            break;
-        }
-    }
-
-    if selected.is_empty() {
-        return String::new();
-    }
-
-    const MAX_CARD_CHARS: usize = 1200;
-    let mut out = String::from("\n\n## Tool guidance\n");
-    for name in selected {
-        let card = tool_skill_card(name);
-        if out.len() + card.len() > MAX_CARD_CHARS {
-            break;
-        }
-        out.push_str(card);
-    }
-    out
-}
-
-/// JS `buildCompactSystemPrompt` — assemble the per-call system prompt. Static
-/// sections come from `build_system_prompt`; we layer the dynamic bits on top.
-fn build_full_system_prompt(
-    config: &Config,
-    task_type: &str,
-    messages: &[Value],
-    session: &AgentSession,
-) -> String {
-    // Contract-mode short-circuit: when the contract feature is on AND
-    // the current turn is action-y, the contract is the entire job for
-    // this turn. Return a focused contract-shaped system prompt
-    // instead of the generic kitchen-sink one. We learned the hard way
-    // that a 1.5k-char generic prompt with a paragraph about
-    // `propose_contract` buried in it loses every time — the model's
-    // reasoning layer notices the requirement but the tool-call
-    // decoder picks an easier neighbour. The fix is to make the
-    // contract the WHOLE prompt.
-    if itsy::settings::get().contract
-        && !matches!(task_type, "explanation" | "respond")
-    {
-        let active = itsy::session::contract::current();
-        let cwd_path = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        let cwd = cwd_path.to_string_lossy().into_owned();
-        if let Some(c) = active {
-            return build_contract_active_prompt(&c, &cwd_path, &cwd);
-        }
-        return build_contract_proposal_prompt(&cwd_path, &cwd);
-    }
-
-    let memory = session.memory.lock();
-    let mem_ctx = get_memory_context(messages, &memory);
-    drop(memory);
-
-    let skills = session.skills.lock();
-    let skill_ctx = get_skill_context(messages, &skills);
-    drop(skills);
-
-    let plugins = session.plugins.lock();
-    let plugin_ctx = get_plugin_prompts(&plugins, Some(task_type));
-    drop(plugins);
-
-    let mut prompt = build_system_prompt(
-        config,
-        &mem_ctx,
-        &skill_ctx,
-        &plugin_ctx,
-        Some(task_type),
-    );
-
-    // Knowledge auto-injection.
-    let know = get_knowledge_context(messages);
-    if !know.is_empty() {
-        prompt.push_str(&know);
-    }
-
-    // Code-graph hits for long user messages — gated on
-    // `features.context_retrieval`. Uses the local code graph (no LLM).
-    if config.features.context_retrieval {
-        if let Some(last_user) = messages
-            .iter()
-            .rev()
-            .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
-            .and_then(|m| m.get("content").and_then(|c| c.as_str()))
-        {
-            if last_user.len() > 200 {
-                if let Some(graph) = itsy::code_graph::try_get_code_graph() {
-                    if let Ok(hits) = graph.search_graph(last_user, 1500) {
-                        if !hits.is_empty() {
-                            prompt.push_str("\n\nRelevant code from the project:\n");
-                            for h in hits.iter().take(5) {
-                                prompt.push_str(&format!(
-                                    "- {} ({} at {}:{})\n",
-                                    h.name, h.kind, h.file, h.line
-                                ));
-                                if let Some(sig) = &h.signature {
-                                    prompt.push_str(&format!("    {}\n", sig));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Test runner hint.
-    let tr = get_test_runner_context(&session.cwd);
-    if !tr.is_empty() {
-        prompt.push_str(&tr);
-    }
-
-    // Tool skill cards — proactive guidance for error-prone tools.
-    // Selected based on recent errors, recently used tools, and intent keywords.
-    // Injected last so they're closest to the model's generation point.
-    let cards = select_tool_skill_cards(messages);
-    if !cards.is_empty() {
-        prompt.push_str(&cards);
-    }
-
-    // (Contract-mode prompts are handled at the top of this function
-    // as a complete short-circuit — when there's an active contract or
-    // we need to propose one, the rest of the layering is skipped.)
-
-    prompt
-}
-
-/// Contract-mode prompt for turn 1 (no contract yet). Short, focused,
-/// laser-targeted: the model's only job right now is to call
-/// `propose_contract`. The kitchen-sink prompt is intentionally
-/// absent here — small models latch onto whatever's loudest, and a
-/// 1.5k-char "you're a coding assistant who can also propose
-/// contracts" loses to a 300-char "you must propose a contract."
-fn contract_verification_guidance(cwd: &std::path::Path) -> String {
-    itsy::verification::discover(cwd)
-        .prompt_block()
-        .map(|s| format!("\n{s}\n"))
-        .unwrap_or_default()
-}
-
-fn build_contract_proposal_prompt(cwd_path: &std::path::Path, cwd: &str) -> String {
-    let model_name = itsy::settings::get().model_name.clone();
-    let model_line = if model_name.is_empty() {
-        String::new()
-    } else {
-        format!("\nModel: {model_name}")
-    };
-    let verification = contract_verification_guidance(cwd_path);
-    format!(
-        "You are itsy, working in CONTRACT mode. Working directory: {cwd}.{model_line}\n\
-        \n\
-        YOUR FIRST ACTION MUST BE `propose_contract`. No exceptions, no exploration first.\n\
-        \n\
-        A contract is the definition of done for the user's task. It is 2–6 short, testable assertions \
-        — each one a single thing you can later prove with a shell command:\n\
-        \n\
-          GOOD:  \"the file /app/regex.txt exists\"\n\
-          GOOD:  \"running `python3 /tmp/check.py` exits 0\"\n\
-          GOOD:  \"`pytest /tests/test_outputs.py -q` reports 3 passed\"\n\
-          BAD:   \"the code is correct\"          (not testable)\n\
-          BAD:   \"the implementation is complete\" (not testable)\n\
-          BAD:   \"all tests pass\"              (vague — which tests?)\n\
-        {verification}\
-        Until propose_contract returns, NO other tools are available. \
-        `write_file`, `patch`, mutating `bash`, etc. will refuse. \
-        Read-only tools (read_file, search) are available but you should not need them — \
-        you're not exploring, you're stating what 'done' means.\n\
-        \n\
-        Skip the planning preamble. Skip the analysis. Emit `propose_contract` now with:\n\
-        - title:       short human title for the task\n\
-        - brief:       1–2 sentences describing the work\n\
-        - assertions:  array of {{id, text}} — pick 2–6\n\
-        \n\
-        After it returns the toolkit opens up and you can do the work.\n",
-        cwd = cwd,
-        model_line = model_line,
-        verification = verification,
-    )
-}
-
-/// Contract-mode prompt for turn 2+ (contract is active). The
-/// assertions and their current states ARE the prompt — the model
-/// works through them one by one. We don't include the generic
-/// instructions/code-graph hints — the contract is enough.
-fn build_contract_active_prompt(
-    c: &itsy::session::contract::Contract,
-    cwd_path: &std::path::Path,
-    cwd: &str,
-) -> String {
-    let model_name = itsy::settings::get().model_name.clone();
-    let model_line = if model_name.is_empty() {
-        String::new()
-    } else {
-        format!("\nModel: {model_name}")
-    };
-    let body = itsy::session::contract::render_for_prompt(c);
-    let verification = contract_verification_guidance(cwd_path);
-    format!(
-        "You are itsy, working under an active contract. Working directory: {cwd}.{model_line}\n\
-        \n\
-        {body}\n\
-        {verification}\
-        \n\
-        How to work:\n\
-        - ONE tool call per response. Reason only about the immediate next step — not the full solution.\n\
-        - After each tool call, stop. Wait for the result. Then decide the next single action.\n\
-        - Focus on the FIRST pending assertion. Ignore the others for now.\n\
-        - Look at the most recent tool result. What is the single most direct action to move toward passing it?\n\
-        - Do the work for each pending assertion (write_file / patch / bash — all available now).\n\
-        - Prefer the repo's own tests / verifier scripts over ad-hoc samples whenever they exist.\n\
-        - When you've verified an assertion, call `mark_assertion` with:\n\
-            id          the assertion id (A.001, A.002, …)\n\
-            state       \"passed\" / \"failed\" / \"skipped\"\n\
-            evidence    one-sentence summary of how you verified\n\
-            command     (recommended for passed) the shell command you ran\n\
-            exit_code   the exit code\n\
-            observation the actual output you saw — NOT \"OK\" or \"passed\"\n\
-        - When every assertion is `passed`, call `close_contract completed` to finish.\n\
-        - `close_contract completed` is refused until every assertion is `passed`.\n\
-        - Assertions can only be `passed` or `failed` — there is no skip or abort.\n",
-        cwd = cwd,
-        model_line = model_line,
-        body = body,
-        verification = verification,
-    )
-}
-
-// ── Agent turn ───────────────────────────────────────────────────────────────
-
-/// Run one agent loop turn for the given user message. Mirrors the JS
-/// `runAgentLoop` function (~1100 lines).
 async fn handle_turn(prompt_in: &str, session: &AgentSession) {
     // Reset early-stop bookkeeping for a fresh turn.
     session.early_stop.lock().new_turn();
@@ -973,9 +249,9 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
     if clarifier_enabled
         && user_msg.len() < 80
         && !assistant_asked_question
-        && !looks_like_path(&user_msg)
-        && !looks_like_option_ref(&user_msg)
-        && !is_affirmation(&user_msg)
+        && !itsy::runtime::tool_router::looks_like_path(&user_msg)
+        && !itsy::runtime::tool_router::looks_like_option_ref(&user_msg)
+        && !itsy::runtime::tool_router::is_affirmation(&user_msg)
     {
         let needs = features_adapter::check_needs_clarification(&user_msg).await;
         if needs {
@@ -999,7 +275,10 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                 conversation: &snapshot.0,
                 tools: Vec::new(),
                 current_task_type: None,
-                system_prompt: build_full_system_prompt(&snapshot.1, "explanation", &snapshot.0, session),
+                system_prompt: itsy::model::prompts::build_full_system_prompt(
+                    &snapshot.1, "explanation", &snapshot.0,
+                    &session.memory, &session.skills, &session.plugins, &session.cwd,
+                ),
                 force_disable_thinking: false,
             };
             let response = chat_completion(&chat_ctx).await;
@@ -1100,12 +379,12 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
         let mut current = session.current_tool_category.lock();
         // Affirmation guard — keep the prior turn's tool set so "yes"/"ok"
         // after a proposed action lets the model proceed.
-        if is_affirmation(&user_msg)
+        if itsy::runtime::tool_router::is_affirmation(&user_msg)
             && current.as_deref().is_some()
             && current.as_deref() != Some("respond")
         {
             current.clone()
-        } else if is_affirmation(&user_msg) {
+        } else if itsy::runtime::tool_router::is_affirmation(&user_msg) {
             *current = Some("plan".into());
             Some("plan".into())
         } else {
@@ -1147,43 +426,15 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
     // 6) Maybe pre-compact the history before the first call.
     {
         let mut hist = session.history.lock();
-        if maybe_compact(&mut hist) {
+        if itsy::session::compaction::maybe_compact(&mut hist) {
             println!("{}", tui::compacted(hist.len() as u32));
         }
     }
 
-    let mut tool_calls_this_turn: u32 = 0;
-    let max_tool_calls_this_turn = max_tool_calls_per_turn();
-    let mut edited_files: Vec<String> = Vec::new();
-    let mut had_mutating_call = false;
-    let mut force_disable_thinking = false;
-    let mut empty_retry_injected = false;
-    let mut improvement_attempts: std::collections::HashMap<String, u32> = Default::default();
-    // Per-turn "you've already called this" counter, keyed by a hash of
-    // (tool_name, args). Catches identical mutating calls (like `rm -rf X`
-    // 4 times in a row) that the regular dedup doesn't because the tool
-    // is impure.
-    // `per_turn_repeats` is also used by other counters (empty-response
-    // retry, contract-gate refusals, contract-loop nudges, …). The
-    // identical-call repeat counter that used to live here was removed —
-    // see the "Spiral defense is upstream's" comment in the loop body.
-    let mut per_turn_repeats: std::collections::HashMap<String, u32> = Default::default();
-    // Tracks idempotent write tool calls seen this turn (tool_name + arg hash).
-    // memory_remember with the same args twice = nop; return early to break spirals.
-    let mut per_turn_write_seen: std::collections::HashSet<String> = Default::default();
-    // Tracks consecutive failures per tool name; cleared on success.
-    // When the same tool fails ≥2 times in a row, an actionable hint is injected.
-    let mut recent_tool_failures: std::collections::HashMap<String, u32> = Default::default();
-    // Last known prompt_tokens from the API response. Used to compute context_ratio
-    // for context-aware tool result capping. Updated after every chat_completion call.
-    let mut last_prompt_tokens: u64 = 0;
-    // Counts consecutive loop-blocked tool calls in the current turn batch.
-    // When this hits MAX_CONSECUTIVE_BLOCKS we break out of the inner loop
-    // early so the model doesn't receive a wall of N identical rejections,
-    // which would trigger a very long thinking chain on the next turn.
-    let mut consecutive_blocks: u32 = 0;
+    let mut state = itsy::runtime::agent_loop::TurnState::new(
+        user_msg.clone(), task_type, stage2_category, max_tool_calls_per_turn(),
+    );
     const MAX_CONSECUTIVE_BLOCKS: u32 = 2;
-    let mut current_category: Option<String> = stage2_category;
 
     // Reset any pending Ctrl+C presses from earlier turns; the user starts
     // each turn with a clean slate.
@@ -1191,7 +442,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
 
     // 7) Main while-loop.
     loop {
-        if tool_calls_this_turn >= max_tool_calls_this_turn {
+        if state.tool_calls_this_turn >= state.max_tool_calls {
             println!("\n  \x1b[33m⚠ Reached tool call limit\x1b[0m");
             break;
         }
@@ -1206,9 +457,9 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
         }
 
         // Mid-turn eviction every 3 tool calls.
-        if tool_calls_this_turn > 0 && tool_calls_this_turn % 3 == 0 {
+        if state.tool_calls_this_turn > 0 && state.tool_calls_this_turn % 3 == 0 {
             let mut hist = session.history.lock();
-            let evicted = mid_turn_evict(&mut hist);
+            let evicted = itsy::session::compaction::mid_turn_evict(&mut hist);
             if evicted > 0 {
                 session.token_monitor.lock().record_eviction();
             }
@@ -1225,7 +476,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     mcp_tools: Vec::new(),
                 }
             };
-            let mut tools = get_all_tools(&cfg, current_category.as_deref(), &deps);
+            let mut tools = get_all_tools(&cfg, state.current_category.as_deref(), &deps);
             // Contract-first: when the feature is on, the task is
             // action-y, and there's no active contract yet, strip the
             // mutating tools from what the model sees. Reasoning-layer
@@ -1258,7 +509,10 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             (cfg, hist, tools)
         };
 
-        let system_prompt = build_full_system_prompt(&cfg, task_type, &hist, session);
+        let system_prompt = itsy::model::prompts::build_full_system_prompt(
+            &cfg, task_type, &hist,
+            &session.memory, &session.skills, &session.plugins, &session.cwd,
+        );
         let chat_ctx = ChatContext {
             model_name: &cfg.model.name,
             base_url: &cfg.model.base_url,
@@ -1269,7 +523,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             tools,
             current_task_type: Some(task_type),
             system_prompt,
-            force_disable_thinking,
+            force_disable_thinking: state.force_disable_thinking,
         };
 
         // Forensic snapshot of the request body about to be sent. Lets a
@@ -1290,10 +544,10 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             break;
         };
         record_usage(&data, session, false);
-        last_prompt_tokens = data
+        state.last_prompt_tokens = data
             .pointer("/usage/prompt_tokens")
             .and_then(|v| v.as_u64())
-            .unwrap_or(last_prompt_tokens);
+            .unwrap_or(state.last_prompt_tokens);
 
         let Some(msg) = data.pointer("/choices/0/message").cloned() else {
             break;
@@ -1305,13 +559,13 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             .unwrap_or_default();
         let response_content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
         let response_has_content = !response_content.trim().is_empty();
-        if empty_retry_injected && (!tool_calls.is_empty() || response_has_content) {
+        if state.empty_retry_injected && (!tool_calls.is_empty() || response_has_content) {
             let mut hist = session.history.lock();
             if hist.len() >= 2 {
                 hist.pop();
                 hist.pop();
             }
-            empty_retry_injected = false;
+            state.empty_retry_injected = false;
         }
 
         // Record trace step.
@@ -1324,7 +578,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
 
         // 7a) Model emitted tool calls → execute them.
         if !tool_calls.is_empty() {
-            force_disable_thinking = false;
+            state.force_disable_thinking = false;
             let mut batch_had_mutating = false;
             // Contract-lifecycle calls (mark_assertion, close_contract, etc.)
             // count as meaningful forward progress — don't accumulate toward
@@ -1346,7 +600,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                 .unwrap_or("")
                 .to_string();
             if first_tool_name != "select_category" {
-                current_category = Some("plan".into());
+                state.current_category = Some("plan".into());
                 *session.current_tool_category.lock() = Some("plan".into());
             }
 
@@ -1381,7 +635,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     .collect();
 
                 if !bad.is_empty() {
-                    let n = *per_turn_repeats
+                    let n = *state.per_turn_repeats
                         .entry("__quality_correction".into())
                         .and_modify(|n| *n += 1)
                         .or_insert(1);
@@ -1422,7 +676,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             }
 
             for tc in &tool_calls {
-                tool_calls_this_turn += 1;
+                state.tool_calls_this_turn += 1;
                 let name = tc
                     .pointer("/function/name")
                     .and_then(|v| v.as_str())
@@ -1497,7 +751,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     && !is_contract_tool
                     && is_mutating
                 {
-                    let refused = per_turn_repeats
+                    let refused = state.per_turn_repeats
                         .entry("__contract_gate".into())
                         .and_modify(|n| *n += 1)
                         .or_insert(1);
@@ -1604,8 +858,8 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                                 )
                             }));
                         }
-                        consecutive_blocks += 1;
-                        if consecutive_blocks >= MAX_CONSECUTIVE_BLOCKS {
+                        state.consecutive_blocks += 1;
+                        if state.consecutive_blocks >= MAX_CONSECUTIVE_BLOCKS {
                             break;
                         }
                         continue;
@@ -1626,8 +880,8 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                                     "result": signal.injection
                                 })).unwrap_or_default()
                             }));
-                            consecutive_blocks += 1;
-                            if consecutive_blocks >= MAX_CONSECUTIVE_BLOCKS {
+                            state.consecutive_blocks += 1;
+                            if state.consecutive_blocks >= MAX_CONSECUTIVE_BLOCKS {
                                 break;
                             }
                             continue;
@@ -1635,7 +889,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     }
                 }
 
-                // Pure-tool dedup catches read-only spirals; improvement_attempts
+                // Pure-tool dedup catches read-only spirals; state.improvement_attempts
                 // catches failed mutating calls; the per-turn tool-call cap is
                 // the final backstop.
 
@@ -1647,7 +901,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                 const IDEMPOTENT_WRITE_TOOLS: &[&str] = &["memory_remember", "memory_forget", "mark_assertion"];
                 if IDEMPOTENT_WRITE_TOOLS.contains(&name.as_str()) {
                     let write_key = itsy::tools_impl::dedup::idempotent_write_key(&name, &args);
-                    if !per_turn_write_seen.insert(write_key) {
+                    if !state.per_turn_write_seen.insert(write_key) {
                         let skip_msg = if name == "mark_assertion" {
                             let id_str = args.get("id").and_then(|v| v.as_str()).unwrap_or("?");
                             let state_str = args.get("state").and_then(|v| v.as_str()).unwrap_or("?");
@@ -1692,7 +946,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                 // select_category: update the active stage-2 category.
                 if name == "select_category" {
                     if let Some(cat) = result.get("category").and_then(|v| v.as_str()) {
-                        current_category = Some(cat.to_string());
+                        state.current_category = Some(cat.to_string());
                         *session.current_tool_category.lock() = Some(cat.to_string());
                     }
                 }
@@ -1711,11 +965,11 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     "move_file", "delete_file", "append_file",
                 ];
                 if MUTATING_TOOLS.contains(&name.as_str()) && result.get("error").is_none() {
-                    had_mutating_call = true;
+                    state.had_mutating_call = true;
                     batch_had_mutating = true;
                     *session.total_mutating_calls.lock() += 1;
                     if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
-                        edited_files.push(p.to_string());
+                        state.edited_files.push(p.to_string());
                         // Signal that a subsequent read_file on this path is
                         // legitimate — reset its loop counter so the agent can
                         // re-read after patching.
@@ -1753,7 +1007,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
 
                 // A successful (non-blocked) tool execution resets the
                 // consecutive-block counter — the model has done something real.
-                consecutive_blocks = 0;
+                state.consecutive_blocks = 0;
 
                 // Successful read_file unblocks the file for patching.
                 // Also track whether the content was fresh or stale: the
@@ -1836,9 +1090,9 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     .unwrap_or_default();
                 let context_ratio = {
                     let window = itsy::settings::get().detected_window as f32;
-                    if window > 0.0 { last_prompt_tokens as f32 / window } else { 0.0 }
+                    if window > 0.0 { state.last_prompt_tokens as f32 / window } else { 0.0 }
                 };
-                let capped = cap_tool_result(&tool_content, context_ratio);
+                let capped = itsy::executor::cap_tool_result(&tool_content, context_ratio);
                 session.history.lock().push(json!({
                     "role": "tool",
                     "tool_call_id": id,
@@ -1861,7 +1115,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                         }
                     }).unwrap_or(false);
                     if had_error {
-                        let n = recent_tool_failures
+                        let n = state.recent_tool_failures
                             .entry(name.clone())
                             .and_modify(|c| *c += 1)
                             .or_insert(1);
@@ -1875,7 +1129,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                             }));
                         }
                     } else {
-                        recent_tool_failures.remove(&name);
+                        state.recent_tool_failures.remove(&name);
                     }
                 }
 
@@ -1895,7 +1149,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                         .check_and_enforce(&file_path);
                     match action {
                         HardFailAction::Accept { .. } => {
-                            if improvement_attempts
+                            if state.improvement_attempts
                                 .get(&file_path)
                                 .copied()
                                 .unwrap_or(0)
@@ -1905,10 +1159,10 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                                     "{}",
                                     tui::improvement_fixed(
                                         &file_path,
-                                        improvement_attempts[&file_path]
+                                        state.improvement_attempts[&file_path]
                                     )
                                 );
-                                improvement_attempts.insert(file_path.clone(), 0);
+                                state.improvement_attempts.insert(file_path.clone(), 0);
                             }
                             // LLM self-critique: ask "does this still do
                             // what the user wanted?" Cheap to wire, costs
@@ -1941,11 +1195,11 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                             attempt,
                             escalate,
                         } => {
-                            improvement_attempts
+                            state.improvement_attempts
                                 .entry(file_path.clone())
                                 .and_modify(|n| *n += 1)
                                 .or_insert(1);
-                            let attempt_n = improvement_attempts[&file_path];
+                            let attempt_n = state.improvement_attempts[&file_path];
                             println!(
                                 "{}",
                                 tui::improvement_loop(
@@ -1955,7 +1209,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                                 )
                             );
                             session.token_monitor.lock().record_compaction();
-                            let test_hint = if !get_test_runner_context(&session.cwd).is_empty()
+                            let test_hint = if !itsy::model::prompts::get_test_runner_context(&session.cwd).is_empty()
                             {
                                 "\n\nAfter fixing, run the project test command to verify."
                                     .to_string()
@@ -2001,7 +1255,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                             };
                             println!("  \x1b[33m◇ DECOMPOSE: {reason}\x1b[0m");
                             println!("  \x1b[90m  Strategy: {kind}\x1b[0m");
-                            improvement_attempts.insert(file_path.clone(), 0);
+                            state.improvement_attempts.insert(file_path.clone(), 0);
                             session.history.lock().push(json!({
                                 "role": "user",
                                 "content": format!("[DECOMPOSE] After {MAX_IMPROVE_ITERATIONS} failed fix attempts, changing strategy.\n\n{instruction}\n\nFile length: {lines} lines."),
@@ -2031,7 +1285,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                 if (name == "bash" || name == "run" || name == "create_and_run")
                     && result.get("error").is_some()
                 {
-                    let counter = improvement_attempts
+                    let counter = state.improvement_attempts
                         .entry("__bash".into())
                         .and_modify(|n| *n += 1)
                         .or_insert(1);
@@ -2085,12 +1339,12 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                             "role": "user",
                             "content": format!("[DECOMPOSE] The command has failed 3 times. STOP retrying the same approach.\n\n{}", strategy.2),
                         }));
-                        improvement_attempts.insert("__bash".into(), 0);
+                        state.improvement_attempts.insert("__bash".into(), 0);
                     }
                 } else if (name == "bash" || name == "run")
                     && result.get("error").is_none()
                 {
-                    improvement_attempts.insert("__bash".into(), 0);
+                    state.improvement_attempts.insert("__bash".into(), 0);
                 }
 
                 // Early-stop on bash failure loops (8 consecutive non-zero exits).
@@ -2115,7 +1369,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                 }
             }
             // Reset the text-only streak counter whenever a tool-call batch fires.
-            per_turn_repeats.insert("__text_only_streak".into(), 0);
+            state.per_turn_repeats.insert("__text_only_streak".into(), 0);
 
             // No-progress nudge within a single handle_turn: fires when the
             // model has made N consecutive tool-call batches with no mutating
@@ -2164,15 +1418,15 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
         // empty assistant turn (so the model sees its own no-op) and ask
         // it to try again. Bounded by `MAX_EMPTY_RETRIES` to prevent
         // spinning on a model that keeps refusing.
-        if tool_calls_this_turn == 0
-            && current_category.as_deref() != Some("respond")
+        if state.tool_calls_this_turn == 0
+            && state.current_category.as_deref() != Some("respond")
             && content_trimmed_len == 0
         {
             const MAX_EMPTY_RETRIES: u32 = 2;
-            let n = *per_turn_repeats.entry("__empty_response".into()).and_modify(|n| *n += 1).or_insert(1);
+            let n = *state.per_turn_repeats.entry("__empty_response".into()).and_modify(|n| *n += 1).or_insert(1);
             if n <= MAX_EMPTY_RETRIES {
-                force_disable_thinking = true;
-                empty_retry_injected = true;
+                state.force_disable_thinking = true;
+                state.empty_retry_injected = true;
                 println!("  \x1b[33m⚠ Model returned empty response — retrying ({n}/{MAX_EMPTY_RETRIES}) with thinking disabled\x1b[0m");
                 session.history.lock().push(json!({
                     "role": "assistant",
@@ -2193,13 +1447,13 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             }));
             break;
         }
-        force_disable_thinking = false;
+        state.force_disable_thinking = false;
 
         // Badger: action-task gave no-tool short response. Skip when the
         // router pinned us to `respond` (no tools available — badgering
         // would spin the loop), and only fire when there's actual content.
-        if tool_calls_this_turn == 0
-            && current_category.as_deref() != Some("respond")
+        if state.tool_calls_this_turn == 0
+            && state.current_category.as_deref() != Some("respond")
             && matches!(task_type, "coding" | "editing" | "backend")
             && content_opt
                 .as_deref()
@@ -2219,16 +1473,16 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
 
         // Text-only streak guard: if the model generates 3+ consecutive
         // text-only responses without calling any tool, it is stuck.
-        // This fires regardless of tool_calls_this_turn so it catches
+        // This fires regardless of state.tool_calls_this_turn so it catches
         // the "text flood after tool calls" pattern that bypasses the
         // badger and empty-response guards (both gated on == 0).
         {
-            let n = *per_turn_repeats
+            let n = *state.per_turn_repeats
                 .entry("__text_only_streak".into())
                 .and_modify(|n| *n += 1)
                 .or_insert(1);
             const MAX_TEXT_ONLY_STREAK: u32 = 3;
-            if n >= MAX_TEXT_ONLY_STREAK && current_category.as_deref() != Some("respond") {
+            if n >= MAX_TEXT_ONLY_STREAK && state.current_category.as_deref() != Some("respond") {
                 println!(
                     "  \x1b[33m⚠ text-only streak: {} consecutive responses without tools — forcing tool use ({n})\x1b[0m",
                     n
@@ -2281,7 +1535,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     counts.pending > 0 || counts.failed > 0 || (all_passed && contract_still_open);
                 if needs_more_work {
                     const MAX_CONTRACT_LOOP: u32 = 12;
-                    let n = *per_turn_repeats
+                    let n = *state.per_turn_repeats
                         .entry("__contract_loop".into())
                         .and_modify(|n| *n += 1)
                         .or_insert(1);
@@ -2388,12 +1642,12 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
         }
 
         // Greeting guard: detect lost-context greeting after failures.
-        if tool_calls_this_turn > 0 {
+        if state.tool_calls_this_turn > 0 {
             if let Some(content) = &content_opt {
                 if let Some(signal) = session
                     .early_stop
                     .lock()
-                    .check_greeting(content, tool_calls_this_turn > 0)
+                    .check_greeting(content, state.tool_calls_this_turn > 0)
                 {
                     let mut hist = session.history.lock();
                     hist.push(json!({"role": "assistant", "content": content}));
@@ -2416,7 +1670,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             } else {
                 println!("{}", tui::render_markdown(content));
             }
-        } else if tool_calls_this_turn == 0 {
+        } else if state.tool_calls_this_turn == 0 {
             // No content + no tool calls + nothing tried — try streaming.
             let cfg = session.config.lock().clone();
             let hist = session.history.lock().clone();
@@ -2470,20 +1724,20 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
     // increments otherwise so the next turn's nudge threshold check is current.
     {
         let mut count = session.readonly_turn_count.lock();
-        if had_mutating_call {
+        if state.had_mutating_call {
             *count = 0;
         } else {
             *count += 1;
         }
     }
 
-    if tool_calls_this_turn > 0 {
-        println!("{}", tui::turn_summary(tool_calls_this_turn));
+    if state.tool_calls_this_turn > 0 {
+        println!("{}", tui::turn_summary(state.tool_calls_this_turn));
 
         // Auto-commit (Feature: git.auto_commit).
         let auto_commit = itsy::settings::get().auto_commit;
         if auto_commit {
-            try_auto_commit(&session.cwd, &user_msg, &edited_files).await;
+            try_auto_commit(&session.cwd, &user_msg, &state.edited_files).await;
         }
     }
 
@@ -2534,7 +1788,7 @@ fn print_tool_result(name: &str, result: &Value, elapsed_ms: u64, verbose: bool)
             println!("{out}");
         } else {
             let summary = out.lines().next().unwrap_or(out).trim_end_matches(':');
-            println!("  {}", tui::tool_success(&truncate_short(summary, 80), elapsed_ms));
+            println!("  {}", tui::tool_success(&itsy::executor::truncate_short(summary, 80), elapsed_ms));
         }
     } else {
         println!("  {}", tui::tool_success("", elapsed_ms));
@@ -2563,7 +1817,7 @@ async fn try_auto_commit(cwd: &Path, task: &str, edited: &[String]) {
         .map(|s| s.success())
         .unwrap_or(false)
     {
-        println!("  \x1b[32m✓ git commit: {}\x1b[0m", truncate_short(&msg, 60));
+        println!("  \x1b[32m✓ git commit: {}\x1b[0m", itsy::executor::truncate_short(&msg, 60));
     }
 }
 

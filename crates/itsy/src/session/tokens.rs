@@ -67,6 +67,44 @@ pub fn estimate_tokens(text: &str) -> u64 {
     ((text.chars().count() as f64) / 4.0).ceil() as u64
 }
 
+/// Estimate tokens in a single message (mirrors JS estimateMessageTokens).
+pub fn estimate_message_tokens(m: &Value) -> u64 {
+    let content_chars = match m.get("content") {
+        Some(Value::String(s)) => s.len(),
+        Some(other) if !other.is_null() => serde_json::to_string(other)
+            .map(|s| s.len())
+            .unwrap_or(0),
+        _ => 0,
+    };
+    let tc_chars = m
+        .get("tool_calls")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .map(|tc| {
+                    let name_len = tc
+                        .pointer("/function/name")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.len())
+                        .unwrap_or(0);
+                    let args_len = tc
+                        .pointer("/function/arguments")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.len())
+                        .unwrap_or(0);
+                    name_len + args_len + 20
+                })
+                .sum::<usize>()
+        })
+        .unwrap_or(0);
+    ((content_chars + tc_chars) as f64 / 4.0).ceil() as u64
+}
+
+/// Sum estimate_message_tokens across all messages.
+pub fn estimate_history_tokens(history: &[Value]) -> u64 {
+    history.iter().map(estimate_message_tokens).sum()
+}
+
 /// Cost in USD given a usage + pricing pair.
 pub fn calculate_cost(usage: Usage, pricing: Pricing) -> f64 {
     let input = (usage.input_tokens as f64) * pricing.input / 1_000_000.0;

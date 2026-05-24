@@ -256,6 +256,38 @@ pub fn min_confidence_for(category: &str) -> Option<f64> {
     CATEGORIES.iter().find(|(n, _)| *n == category).map(|(_, c)| c.min_confidence)
 }
 
+// ── Input classification helpers ──
+
+/// Detect a short affirmation like "yes" / "ok" / "go ahead".
+pub fn is_affirmation(s: &str) -> bool {
+    let trimmed = s.trim().trim_end_matches('.').to_lowercase();
+    matches!(
+        trimmed.as_str(),
+        "yes" | "y" | "yep" | "yeah" | "sure"
+            | "ok" | "okay" | "go" | "proceed"
+            | "do it" | "continue" | "please" | "please do" | "alright"
+    )
+}
+
+/// Detect quoted absolute paths or paths with a slash/extension.
+pub fn looks_like_path(s: &str) -> bool {
+    static RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+        regex::Regex::new(r#"[\\/]|\.\w{1,5}\s*$|^["'].*["']$"#).unwrap()
+    });
+    RE.is_match(s.trim())
+}
+
+/// Detect option-references like "option 2", "do 3", "first", "second".
+pub fn looks_like_option_ref(s: &str) -> bool {
+    static RE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+        regex::Regex::new(
+            r"(?i)^(option\s+\d|work\s+on\s+\d|do\s+\d|start\s+with\s+\d|\d+\.?\s*$|first|second|third|fourth)\b",
+        )
+        .unwrap()
+    });
+    RE.is_match(s.trim())
+}
+
 #[cfg(test)]
 mod classify_user_examples {
     use super::*;

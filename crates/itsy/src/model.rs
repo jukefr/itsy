@@ -6,3 +6,4 @@ pub mod adaptive_router;
 pub mod adaptive_temp;
 pub mod thinking_budget;
 pub mod chat_log;
+pub mod prompts;

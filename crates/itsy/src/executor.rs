@@ -38,6 +38,70 @@ pub struct ExecCtx<'a> {
 
 const MAX_CONTENT_CHARS: usize = 8000;
 
+/// Return the first `n` newline-terminated lines of `s`, or all of `s` if
+/// it has fewer lines. Result is always a valid str slice of the input.
+pub fn first_n_lines(s: &str, n: usize) -> &str {
+    let mut count = 0;
+    for (i, c) in s.char_indices() {
+        if c == '\n' {
+            count += 1;
+            if count >= n {
+                return &s[..i];
+            }
+        }
+    }
+    s
+}
+
+/// Cap a tool result to a context-aware character limit.
+///
+/// `context_ratio` is `last_prompt_tokens / detected_window` (0.0 = empty,
+/// 1.0 = full). When truncating, return the first 30 lines plus an explicit
+/// grep/offset directive.
+pub fn cap_tool_result(content: &str, context_ratio: f32) -> String {
+    let char_cap: usize = if context_ratio < 0.40 {
+        16_000
+    } else if context_ratio < 0.65 {
+        8_000
+    } else {
+        4000usize
+    };
+
+    if content.len() <= char_cap {
+        return content.to_string();
+    }
+
+    let head = first_n_lines(content, 30);
+    let head = if head.len() > char_cap {
+        let mut end = char_cap;
+        while end > 0 && !content.is_char_boundary(end) {
+            end -= 1;
+        }
+        &content[..end]
+    } else {
+        head
+    };
+    format!(
+        "{head}\n\n\
+         [Output truncated — {} chars total. \
+         Use bash+grep or read_file with offset/limit to target a specific range. \
+         Do not re-read the full result.]",
+        content.len()
+    )
+}
+
+/// Truncate a string to `n` chars, preserving char boundary.
+pub fn truncate_short(s: &str, n: usize) -> String {
+    if s.len() <= n {
+        return s.to_string();
+    }
+    let mut end = n;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
+}
+
 pub async fn execute_tool(name: &str, mut args: Value, ctx: &ExecCtx<'_>) -> Value {
     sanitize_args(&mut args);
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
