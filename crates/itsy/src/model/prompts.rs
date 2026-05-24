@@ -205,9 +205,9 @@ pub fn build_full_system_prompt(
     config: &Config,
     task_type: &str,
     messages: &[Value],
-    memory: &parking_lot::Mutex<MemoryStore>,
-    skills: &parking_lot::Mutex<SkillManager>,
-    plugins: &parking_lot::Mutex<PluginLoader>,
+    memory: &MemoryStore,
+    skills: &SkillManager,
+    plugins: &PluginLoader,
     cwd: &Path,
 ) -> String {
     // Contract-mode short-circuit: return a focused contract prompt instead
@@ -225,17 +225,11 @@ pub fn build_full_system_prompt(
         return build_contract_proposal_prompt(&cwd_path, &cwd);
     }
 
-    let mem_guard = memory.lock();
-    let mem_ctx = get_memory_context(messages, &mem_guard);
-    drop(mem_guard);
+    let mem_ctx = get_memory_context(messages, memory);
 
-    let skills_guard = skills.lock();
-    let skill_ctx = get_skill_context(messages, &skills_guard);
-    drop(skills_guard);
+    let skill_ctx = get_skill_context(messages, skills);
 
-    let plugins_guard = plugins.lock();
-    let plugin_ctx = get_plugin_prompts(&plugins_guard, Some(task_type));
-    drop(plugins_guard);
+    let plugin_ctx = get_plugin_prompts(plugins, Some(task_type));
 
     let mut prompt = build_system_prompt(
         config,

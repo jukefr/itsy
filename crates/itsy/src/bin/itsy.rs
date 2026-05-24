@@ -168,49 +168,45 @@ struct Cli {
 
 // ── Agent session: shared per-process state ──────────────────────────────────
 
+/// Immutable after startup — no lock required.
+struct AgentSessionReadOnly {
+    pub flags: Flags,
+    pub cwd: PathBuf,
+    pub mcp_bridge: Arc<McpBridge>,
+}
+
+/// Read-mostly state behind an `RwLock`.
+struct AgentSessionShared {
+    pub config: Config,
+    pub memory: MemoryStore,
+    pub skills: SkillManager,
+    pub plugins: PluginLoader,
+    pub tokens: TokenTracker,
+    pub token_monitor: TokenMonitor,
+    pub sessions: SessionStore,
+}
+
+/// Frequently-written state behind a single `Mutex`.
+struct AgentSessionMutable {
+    pub history: Vec<Value>,
+    pub scorer: ToolScorer,
+    pub verification: VerificationHistory,
+    pub early_stop: EarlyStopDetector,
+    pub trace: TraceRecorder,
+    pub current_tool_category: Option<String>,
+    pub fullscreen: Option<Arc<itsy::fullscreen::Fullscreen>>,
+    pub tool_repeat_counts: std::collections::HashMap<String, u32>,
+    pub mutated_paths: std::collections::HashSet<String>,
+    pub bash_loop_keys: std::collections::HashSet<String>,
+    pub readonly_turn_count: u32,
+    pub total_mutating_calls: u32,
+}
+
 /// Bundle of state that lives across user turns within a single agent run.
 struct AgentSession {
-    config: Arc<Mutex<Config>>,
-    history: Arc<Mutex<Vec<Value>>>,
-    flags: Flags,
-    memory: Arc<Mutex<MemoryStore>>,
-    tokens: Arc<Mutex<TokenTracker>>,
-    token_monitor: Arc<Mutex<TokenMonitor>>,
-    sessions: Arc<Mutex<SessionStore>>,
-    scorer: Arc<Mutex<ToolScorer>>,
-    verification: Arc<Mutex<VerificationHistory>>,
-    early_stop: Arc<Mutex<EarlyStopDetector>>,
-    trace: Arc<Mutex<TraceRecorder>>,
-    skills: Arc<Mutex<SkillManager>>,
-    plugins: Arc<Mutex<PluginLoader>>,
-    mcp_bridge: Arc<McpBridge>,
-    cwd: PathBuf,
-    /// Persists across turns so affirmation guards can keep the prior category.
-    current_tool_category: Arc<Mutex<Option<String>>>,
-    /// Active fullscreen renderer (Some when running ratatui REPL).
-    fullscreen: Arc<Mutex<Option<Arc<itsy::fullscreen::Fullscreen>>>>,
-    /// Cross-turn identical-call loop detection counters.
-    /// Keyed by sha256(tool_name + args_json)[..16]. Never reset between
-    /// turns — that's the whole point: the model can't escape the guard by
-    /// spreading repeated calls across turns.
-    tool_repeat_counts: Arc<Mutex<std::collections::HashMap<String, u32>>>,
-    /// Paths mutated this session (write_file, patch, etc.). When a
-    /// read_file call is about to be loop-blocked, we check here first:
-    /// if the file was mutated since last read, reset the counter instead
-    /// of blocking. Cleared per-path on consumption.
-    mutated_paths: Arc<Mutex<std::collections::HashSet<String>>>,
-    /// Loop-counter keys (sha256 prefix) for bash calls seen this session.
-    /// After any successful mutating tool, all bash keys are cleared from
-    /// tool_repeat_counts so the model can re-verify after each edit.
-    bash_loop_keys: Arc<Mutex<std::collections::HashSet<String>>>,
-    /// Counts consecutive turns where no mutating tool (patch, write_file,
-    /// create_file, move_file, delete_file) was called. Resets on any mutating
-    /// call. When it reaches READONLY_TURN_THRESHOLD we inject a nudge.
-    readonly_turn_count: Arc<Mutex<u32>>,
-    /// Total mutating tool calls ever made this session. Used to pick the
-    /// right nudge threshold: tight (2) before first edit to prevent
-    /// overthinking, looser (6) after the model has started working.
-    total_mutating_calls: Arc<Mutex<u32>>,
+    pub ro: AgentSessionReadOnly,
+    pub shared: parking_lot::RwLock<AgentSessionShared>,
+    pub mutable: parking_lot::Mutex<AgentSessionMutable>,
 }
 
 // ── Helpers: estimation & history compaction ─────────────────────────────────
@@ -218,15 +214,15 @@ struct AgentSession {
 /// Cheap heuristic token estimator (~4 chars per token).
 async fn handle_turn(prompt_in: &str, session: &AgentSession) {
     // Reset early-stop bookkeeping for a fresh turn.
-    session.early_stop.lock().new_turn();
+    session.mutable.lock().early_stop.new_turn();
 
 
     // Trace recording: start a fresh trace for this turn.
     {
         let model_name = itsy::settings::get().model_name.clone();
-        session.trace.lock().start(prompt_in, &model_name);
+        session.mutable.lock().trace.start(prompt_in, &model_name);
     }
-    session.token_monitor.lock().mark_next_call_new_turn();
+    session.shared.read().token_monitor.mark_next_call_new_turn();
 
     let user_msg = prompt_in.to_string();
 
@@ -238,7 +234,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
     // with a question mark, the user's reply is an answer, not a new vague task.
     let clarifier_enabled = itsy::settings::get().clarifier;
     let assistant_asked_question = {
-        let hist = session.history.lock();
+        let hist = session.mutable.lock().history;
         hist.iter()
             .rev()
             .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("assistant"))
@@ -256,7 +252,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
         let needs = features_adapter::check_needs_clarification(&user_msg).await;
         if needs {
             let clarifier_idx = {
-                let mut hist = session.history.lock();
+                let mut hist = session.mutable.lock().history;
                 hist.push(json!({"role": "user", "content": user_msg.clone()}));
                 let idx = hist.len();
                 hist.push(json!({
@@ -265,7 +261,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                 }));
                 idx
             };
-            let snapshot = (session.history.lock().clone(), session.config.lock().clone());
+            let snapshot = (session.mutable.lock().history.clone(), session.shared.read().config.clone());
             let chat_ctx = ChatContext {
                 model_name: &snapshot.1.model.name,
                 base_url: &snapshot.1.model.base_url,
@@ -277,7 +273,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                 current_task_type: None,
                 system_prompt: itsy::model::prompts::build_full_system_prompt(
                     &snapshot.1, "explanation", &snapshot.0,
-                    &session.memory, &session.skills, &session.plugins, &session.cwd,
+                    &session.shared.read().memory, &session.shared.read().skills, &session.shared.read().plugins, &session.ro.cwd,
                 ),
                 force_disable_thinking: false,
             };
@@ -286,7 +282,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             // whether or not the model responded — otherwise it sticks
             // around and re-fires on every subsequent turn.
             {
-                let mut hist = session.history.lock();
+                let mut hist = session.mutable.lock().history;
                 if clarifier_idx < hist.len() {
                     let is_clarifier = hist[clarifier_idx]
                         .get("role")
@@ -306,9 +302,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                 record_usage(&data, session, false);
                 if let Some(msg) = data.pointer("/choices/0/message") {
                     if let Some(content) = msg.get("content").and_then(|c| c.as_str()) {
-                        session
-                            .history
-                            .lock()
+                        session.mutable.lock().history
                             .push(json!({"role": "assistant", "content": content}));
                         println!("{}", tui::render_markdown(content));
                     }
@@ -320,14 +314,14 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
     }
 
     // 2) Resolve `@file` references + auto-inject git diff when applicable.
-    let refs = resolve_references(&user_msg, &session.cwd);
+    let refs = resolve_references(&user_msg, &session.ro.cwd);
     let mut augmented = if refs.is_empty() {
         user_msg.clone()
     } else {
         format!("{}{}", user_msg, format_references_for_prompt(&refs))
     };
     if should_inject_git_context(&user_msg) {
-        if let Some(ctx) = get_git_diff_context(&session.cwd) {
+        if let Some(ctx) = get_git_diff_context(&session.ro.cwd) {
             augmented.push_str(&ctx);
         }
     }
@@ -360,9 +354,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
         }
     }
 
-    session
-        .history
-        .lock()
+    session.mutable.lock().history
         .push(json!({"role": "user", "content": augmented.clone()}));
 
     // 3) Task classification (regex now; compiled LLM-based when available).
@@ -376,7 +368,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
     //    tempted to write a file on a conversational message like
     //    "say hello". This applies to BOTH direct and two-stage routing.
     let stage2_category = {
-        let mut current = session.current_tool_category.lock();
+        let mut current = session.mutable.lock().current_tool_category;
         // Affirmation guard — keep the prior turn's tool set so "yes"/"ok"
         // after a proposed action lets the model proceed.
         if itsy::runtime::tool_router::is_affirmation(&user_msg)
@@ -385,7 +377,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
         {
             current.clone()
         } else if itsy::runtime::tool_router::is_affirmation(&user_msg) {
-            *current = Some("plan".into());
+            current = Some("plan".into());
             Some("plan".into())
         } else {
             // Run the deterministic classifier. If it picks `respond`
@@ -393,10 +385,10 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             // zero tools and must reply with plain text.
             let classification = itsy::runtime::tool_router::classify_tool_category(&user_msg);
             if classification.category == "respond" && classification.confidence > 0.0 {
-                *current = Some("respond".into());
+                current = Some("respond".into());
                 Some("respond".into())
             } else {
-                *current = None;
+                current = None;
                 None
             }
         }
@@ -417,7 +409,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
     // full context. We rerun the deterministic router here purely to
     // capture the confidence score for the trace.
     let cls_for_log = itsy::runtime::tool_router::classify_tool_category(&user_msg);
-    session.trace.lock().record_classification(
+    session.mutable.lock().trace.record_classification(
         task_type,
         stage2_category.as_deref(),
         cls_for_log.confidence,
@@ -425,7 +417,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
 
     // 6) Maybe pre-compact the history before the first call.
     {
-        let mut hist = session.history.lock();
+        let mut hist = session.mutable.lock().history;
         if itsy::session::compaction::maybe_compact(&mut hist) {
             println!("{}", tui::compacted(hist.len() as u32));
         }
@@ -458,19 +450,19 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
 
         // Mid-turn eviction every 3 tool calls.
         if state.tool_calls_this_turn > 0 && state.tool_calls_this_turn % 3 == 0 {
-            let mut hist = session.history.lock();
+            let mut hist = session.mutable.lock().history;
             let evicted = itsy::session::compaction::mid_turn_evict(&mut hist);
             if evicted > 0 {
-                session.token_monitor.lock().record_eviction();
+                session.shared.read().token_monitor.record_eviction();
             }
         }
 
         // Build the request snapshot.
         let (cfg, hist, tools) = {
-            let cfg = session.config.lock().clone();
-            let hist = session.history.lock().clone();
+            let cfg = session.shared.read().config.clone();
+            let hist = session.mutable.lock().history.clone();
             let deps = {
-                let plugins = session.plugins.lock();
+                let plugins = session.shared.read().plugins;
                 ToolDeps {
                     plugin_tools: plugins.get_tools(),
                     mcp_tools: Vec::new(),
@@ -511,7 +503,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
 
         let system_prompt = itsy::model::prompts::build_full_system_prompt(
             &cfg, task_type, &hist,
-            &session.memory, &session.skills, &session.plugins, &session.cwd,
+            &session.shared.read().memory, &session.shared.read().skills, &session.shared.read().plugins, &session.ro.cwd,
         );
         let chat_ctx = ChatContext {
             model_name: &cfg.model.name,
@@ -528,7 +520,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
 
         // Forensic snapshot of the request body about to be sent. Lets a
         // smarter model later replay the call from the trace JSON.
-        session.trace.lock().record_chat_request(
+        session.mutable.lock().trace.record_chat_request(
             &cfg.model.name,
             &chat_ctx.system_prompt,
             &json!(chat_ctx.conversation),
@@ -536,9 +528,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
         );
 
         let Some(data) = chat_completion(&chat_ctx).await else {
-            session
-                .trace
-                .lock()
+            session.mutable.lock().trace
                 .record_error("chat_completion", "no response from model");
             println!("  \x1b[31m✗ No response from model\x1b[0m");
             break;
@@ -560,7 +550,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
         let response_content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
         let response_has_content = !response_content.trim().is_empty();
         if state.empty_retry_injected && (!tool_calls.is_empty() || response_has_content) {
-            let mut hist = session.history.lock();
+            let mut hist = session.mutable.lock().history;
             if hist.len() >= 2 {
                 hist.pop();
                 hist.pop();
@@ -570,9 +560,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
 
         // Record trace step.
         {
-            session
-                .trace
-                .lock()
+            session.mutable.lock().trace
                 .record_model_response(Some(response_content), Some(&tool_calls));
         }
 
@@ -601,11 +589,11 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                 .to_string();
             if first_tool_name != "select_category" {
                 state.current_category = Some("plan".into());
-                *session.current_tool_category.lock() = Some("plan".into());
+                session.mutable.lock().current_tool_category = Some("plan".into());
             }
 
             // Push the assistant message verbatim.
-            session.history.lock().push(msg.clone());
+            session.mutable.lock().history.push(msg.clone());
 
             // Quality monitor: catch empty tool names and hallucinated tool names
             // before executing. Injects a targeted correction and retries.
@@ -652,13 +640,13 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                                      Available tools: {tool_list}."
                                 )
                             };
-                            session.history.lock().push(json!({
+                            session.mutable.lock().history.push(json!({
                                 "role": "tool",
                                 "tool_call_id": id,
                                 "content": err,
                             }));
                         }
-                        session.history.lock().push(json!({
+                        session.mutable.lock().history.push(json!({
                             "role": "user",
                             "content": format!(
                                 "[SYSTEM] One or more tool calls used an invalid tool name. \
@@ -760,7 +748,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                             "  \x1b[33m⚠ blocked `{name}` — define what 'done' means first ({}/{})\x1b[0m",
                             *refused, MAX_CONTRACT_GATE_REFUSALS
                         );
-                        session.history.lock().push(json!({
+                        session.mutable.lock().history.push(json!({
                             "role": "tool",
                             "tool_call_id": id,
                             "content": "[BLOCKED] No contract yet. Before any mutating action, call `propose_contract` \
@@ -773,7 +761,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     }
                     // Exhausted the gate budget — let the call through
                     // so the model isn't permanently blocked.
-                    session.trace.lock().record_error(
+                    session.mutable.lock().trace.record_error(
                         "contract_gate_exhausted",
                         "model never proposed a contract; letting tools through",
                     );
@@ -802,8 +790,8 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     // reset the loop counter so the agent can re-read it.
                     if name == "read_file" {
                         if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-                            if session.mutated_paths.lock().remove(path) {
-                                session.tool_repeat_counts.lock().remove(&repeat_key);
+                            if session.mutable.lock().mutated_paths.remove(path) {
+                                session.mutable.lock().tool_repeat_counts.remove(&repeat_key);
                             }
                         }
                     }
@@ -813,10 +801,10 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     // repeated after each edit cycle — only count consecutive runs
                     // with no mutation in between.
                     if name == "bash" {
-                        session.bash_loop_keys.lock().insert(repeat_key.clone());
+                        session.mutable.lock().bash_loop_keys.insert(repeat_key.clone());
                     }
 
-                    let n = session.tool_repeat_counts.lock()
+                    let n = session.mutable.lock().tool_repeat_counts
                         .entry(repeat_key)
                         .and_modify(|n| *n += 1)
                         .or_insert(1)
@@ -829,7 +817,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                              or call a different tool.",
                             name, n
                         );
-                        session.history.lock().push(json!({
+                        session.mutable.lock().history.push(json!({
                             "role": "tool",
                             "tool_call_id": id,
                             "content": serde_json::to_string(&json!({
@@ -848,7 +836,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                             } else {
                                 ""
                             };
-                            session.history.lock().push(json!({
+                            session.mutable.lock().history.push(json!({
                                 "role": "user",
                                 "content": format!(
                                     "[SYSTEM] You are stuck in a loop calling `{name}`. \
@@ -871,9 +859,9 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                 // on it before execution.
                 if name == "patch" || name == "read_and_patch" {
                     if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-                        if let Some(signal) = session.early_stop.lock().check_patch_blocked(path) {
+                        if let Some(signal) = session.mutable.lock().early_stop.check_patch_blocked(path) {
                             println!("  \x1b[33m⚡ {}\x1b[0m", signal.message);
-                            session.history.lock().push(json!({
+                            session.mutable.lock().history.push(json!({
                                 "role": "tool",
                                 "tool_call_id": id,
                                 "content": serde_json::to_string(&json!({
@@ -912,7 +900,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                         } else {
                             "[already stored this turn — identical call skipped]".to_string()
                         };
-                        session.history.lock().push(json!({
+                        session.mutable.lock().history.push(json!({
                             "role": "tool",
                             "tool_call_id": id,
                             "content": serde_json::to_string(&json!({"result": skip_msg})).unwrap_or_default()
@@ -922,7 +910,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                 }
 
                 let started = Instant::now();
-                let fs_handle = session.fullscreen.lock().clone();
+                let fs_handle = session.mutable.lock().fullscreen.clone();
                 if let Some(fs) = &fs_handle {
                     fs.add_tool(&name, "running", "");
                 } else {
@@ -931,10 +919,10 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
 
                 let result = {
                     let ctx = ExecCtx {
-                        config: &session.config.lock().clone(),
-                        flags: &session.flags,
-                        memory: session.memory.clone(),
-                        mcp_bridge: Some(session.mcp_bridge.clone()),
+                        config: &session.shared.read().config.clone(),
+                        flags: &session.ro.flags,
+                        memory: Arc::new(parking_lot::Mutex::new(MemoryStore::new(&session.ro.cwd))),
+                        mcp_bridge: Some(session.ro.mcp_bridge.clone()),
                         mcp_client: None,
                         fullscreen: fs_handle.clone(),
                     };
@@ -947,12 +935,12 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                 if name == "select_category" {
                     if let Some(cat) = result.get("category").and_then(|v| v.as_str()) {
                         state.current_category = Some(cat.to_string());
-                        *session.current_tool_category.lock() = Some(cat.to_string());
+                        session.mutable.lock().current_tool_category = Some(cat.to_string());
                     }
                 }
 
                 // Trace step.
-                session.trace.lock().record_tool_call(
+                session.mutable.lock().trace.record_tool_call(
                     &name,
                     &args,
                     &result,
@@ -967,21 +955,21 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                 if MUTATING_TOOLS.contains(&name.as_str()) && result.get("error").is_none() {
                     state.had_mutating_call = true;
                     batch_had_mutating = true;
-                    *session.total_mutating_calls.lock() += 1;
+                    session.mutable.lock().total_mutating_calls += 1;
                     if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
                         state.edited_files.push(p.to_string());
                         // Signal that a subsequent read_file on this path is
                         // legitimate — reset its loop counter so the agent can
                         // re-read after patching.
-                        session.mutated_paths.lock().insert(p.to_string());
+                        session.mutable.lock().mutated_paths.insert(p.to_string());
                     }
                     // Reset all bash loop counters after any successful mutation.
                     // The model legitimately runs the same verify command after each
                     // edit cycle (patch → coqc → patch → coqc …); only consecutive
                     // bash calls with no mutation in between indicate a stuck loop.
                     {
-                        let keys: Vec<String> = session.bash_loop_keys.lock().drain().collect();
-                        let mut counts = session.tool_repeat_counts.lock();
+                        let keys: Vec<String> = session.mutable.lock().bash_loop_keys.drain().collect();
+                        let mut counts = session.mutable.lock().tool_repeat_counts;
                         for k in keys {
                             counts.remove(&k);
                         }
@@ -989,11 +977,11 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                 }
 
                 // Pretty-print outcome.
-                print_tool_result(&name, &result, elapsed_ms, session.flags.verbose);
+                print_tool_result(&name, &result, elapsed_ms, session.ro.flags.verbose);
 
                 // Record success/failure for tool scoring.
                 {
-                    let mut s = session.scorer.lock();
+                    let mut s = session.mutable.lock().scorer;
                     if result.get("error").is_none() {
                         s.record_success(&name, task_type, elapsed_ms);
                     } else {
@@ -1025,7 +1013,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                         batch_had_fresh_read = true;
                     }
                     if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-                        session.early_stop.lock().record_read(path);
+                        session.mutable.lock().early_stop.record_read(path);
                     }
                 }
 
@@ -1050,7 +1038,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     // When old_str isn't found, immediately tell the model to use
                     // read_and_patch which atomically reads then patches.
                     if is_not_found {
-                        session.history.lock().push(json!({
+                        session.mutable.lock().history.push(json!({
                             "role": "user",
                             "content": format!(
                                 "[SYSTEM] patch failed: old_str not found in {patch_file}. \
@@ -1060,16 +1048,14 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                             )
                         }));
                     }
-                    if let Some(signal) = session.early_stop.lock().record_patch_result(
+                    if let Some(signal) = session.mutable.lock().early_stop.record_patch_result(
                         &patch_file,
                         patch_success,
                         old_str,
                         new_str,
                     ) {
                         println!("  \x1b[33m⚡ {}\x1b[0m", signal.message);
-                        session
-                            .history
-                            .lock()
+                        session.mutable.lock().history
                             .push(json!({"role": "user", "content": signal.injection}));
                         // Force model to rewrite — break out of the inner tool loop.
                         break;
@@ -1093,7 +1079,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     if window > 0.0 { state.last_prompt_tokens as f32 / window } else { 0.0 }
                 };
                 let capped = itsy::executor::cap_tool_result(&tool_content, context_ratio);
-                session.history.lock().push(json!({
+                session.mutable.lock().history.push(json!({
                     "role": "tool",
                     "tool_call_id": id,
                     "content": capped,
@@ -1120,7 +1106,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                             .and_modify(|c| *c += 1)
                             .or_insert(1);
                         if *n == 2 {
-                            session.history.lock().push(json!({
+                            session.mutable.lock().history.push(json!({
                                 "role": "user",
                                 "content": format!(
                                     "[SYSTEM] `{name}` has failed {n} times in a row. {}",
@@ -1143,9 +1129,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     let file_path = file_path.to_string();
 
                     // Verification governor: routes to Accept / Retry / Decompose.
-                    let action = session
-                        .verification
-                        .lock()
+                    let action = session.mutable.lock().verification
                         .check_and_enforce(&file_path);
                     match action {
                         HardFailAction::Accept { .. } => {
@@ -1169,7 +1153,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                             // one LLM call per accepted edit when enabled.
                             if itsy::settings::get().validate_edits {
                                 if let Ok(content) = std::fs::read_to_string(&file_path) {
-                                    let cfg_snapshot = session.config.lock().clone();
+                                    let cfg_snapshot = session.shared.read().config.clone();
                                     let result = features_adapter::validate_edit_with_config(
                                         &file_path,
                                         &content,
@@ -1182,7 +1166,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                                         let msg = format!(
                                             "[SEMANTIC-REVIEW] The edit to {file_path} may need follow-up:\n  - {issues}"
                                         );
-                                        session.history.lock().push(json!({
+                                        session.mutable.lock().history.push(json!({
                                             "role": "user",
                                             "content": msg,
                                         }));
@@ -1208,8 +1192,8 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                                     MAX_IMPROVE_ITERATIONS
                                 )
                             );
-                            session.token_monitor.lock().record_compaction();
-                            let test_hint = if !itsy::model::prompts::get_test_runner_context(&session.cwd).is_empty()
+                            session.shared.read().token_monitor.record_compaction();
+                            let test_hint = if !itsy::model::prompts::get_test_runner_context(&session.ro.cwd).is_empty()
                             {
                                 "\n\nAfter fixing, run the project test command to verify."
                                     .to_string()
@@ -1220,7 +1204,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                                 "[AUTO-VALIDATE] Errors in {file_path} (attempt {attempt_n}/{MAX_IMPROVE_ITERATIONS}):\n{}{test_hint}\n\nFix these errors. Do NOT repeat the same approach that failed before.",
                                 errors.join("\n"),
                             );
-                            session.history.lock().push(json!({
+                            session.mutable.lock().history.push(json!({
                                 "role": "user",
                                 "content": fix_prompt,
                             }));
@@ -1236,7 +1220,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                         } => {
                             // Try LLM-based decompose first; fall back to the
                             // governor's regex strategy.
-                            let cfg_snap = session.config.lock().clone();
+                            let cfg_snap = session.shared.read().config.clone();
                             let strat = features_adapter::decompose_task(
                                 &user_msg,
                                 &errors.join("\n"),
@@ -1256,7 +1240,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                             println!("  \x1b[33m◇ DECOMPOSE: {reason}\x1b[0m");
                             println!("  \x1b[90m  Strategy: {kind}\x1b[0m");
                             state.improvement_attempts.insert(file_path.clone(), 0);
-                            session.history.lock().push(json!({
+                            session.mutable.lock().history.push(json!({
                                 "role": "user",
                                 "content": format!("[DECOMPOSE] After {MAX_IMPROVE_ITERATIONS} failed fix attempts, changing strategy.\n\n{instruction}\n\nFile length: {lines} lines."),
                             }));
@@ -1273,7 +1257,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     // Also run the inline runValidation (lint/compile/etc.)
                     // as a quick sanity check — surfaces in trace recorder.
                     if let Some(v) = run_validation(&file_path) {
-                        session.trace.lock().record_validation(
+                        session.mutable.lock().trace.record_validation(
                             &file_path,
                             v.passed,
                             &v.errors,
@@ -1298,12 +1282,12 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                             .chars()
                             .take(800)
                             .collect::<String>();
-                        session.history.lock().push(json!({
+                        session.mutable.lock().history.push(json!({
                             "role": "user",
                             "content": format!("[AUTO-FIX] The command FAILED (attempt {attempt_n}/2). Do NOT claim success. The error was:\n{err}\n\nRead the error, identify the bug, and fix it."),
                         }));
                     } else {
-                        let cfg_snap = session.config.lock().clone();
+                        let cfg_snap = session.shared.read().config.clone();
                         let strategy = features_adapter::decompose_task(
                             &user_msg,
                             result
@@ -1335,7 +1319,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                             "  \x1b[33m◇ DECOMPOSE bash: {}\x1b[0m",
                             strategy.1
                         );
-                        session.history.lock().push(json!({
+                        session.mutable.lock().history.push(json!({
                             "role": "user",
                             "content": format!("[DECOMPOSE] The command has failed 3 times. STOP retrying the same approach.\n\n{}", strategy.2),
                         }));
@@ -1358,11 +1342,9 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                         .filter(|&c| c != 1)   // exit 1 = informational, not a hard failure
                         .unwrap_or_else(|| if result.get("error").is_none() { 0 } else { 2 });
                     let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
-                    if let Some(signal) = session.early_stop.lock().record_bash_result(exit_code, command) {
+                    if let Some(signal) = session.mutable.lock().early_stop.record_bash_result(exit_code, command) {
                         println!("  \x1b[33m⚡ {}\x1b[0m", signal.message);
-                        session
-                            .history
-                            .lock()
+                        session.mutable.lock().history
                             .push(json!({"role": "user", "content": signal.injection}));
                         break;
                     }
@@ -1376,19 +1358,19 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             // calls. Tight threshold (2) before the first edit; looser (6) after.
             if !batch_had_mutating && !batch_had_contract_progress && !batch_had_active_bash && !batch_had_fresh_read {
                 let count = {
-                    let mut c = session.readonly_turn_count.lock();
+                    let c = &mut session.mutable.lock().readonly_turn_count;
                     *c += 1;
                     *c
                 };
-                let total_mutations = *session.total_mutating_calls.lock();
+                let total_mutations = session.mutable.lock().total_mutating_calls;
                 let threshold = if total_mutations == 0 { 3u32 } else { 6u32 };
                 if count >= threshold {
-                    *session.readonly_turn_count.lock() = 0;
+                    session.mutable.lock().readonly_turn_count = 0;
                     println!(
                         "  \x1b[33m⚠ no-progress nudge: {} read-only batches — pushing model to act\x1b[0m",
                         count
                     );
-                    session.history.lock().push(json!({
+                    session.mutable.lock().history.push(json!({
                         "role": "user",
                         "content": format!(
                             "[SYSTEM] You have spent {} consecutive rounds reading files \
@@ -1402,7 +1384,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     }));
                 }
             } else {
-                *session.readonly_turn_count.lock() = 0;
+                session.mutable.lock().readonly_turn_count = 0;
             }
 
             // Loop back to chat_completion — model may want to call more tools.
@@ -1428,11 +1410,11 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                 state.force_disable_thinking = true;
                 state.empty_retry_injected = true;
                 println!("  \x1b[33m⚠ Model returned empty response — retrying ({n}/{MAX_EMPTY_RETRIES}) with thinking disabled\x1b[0m");
-                session.history.lock().push(json!({
+                session.mutable.lock().history.push(json!({
                     "role": "assistant",
                     "content": content_opt.clone().unwrap_or_default(),
                 }));
-                session.history.lock().push(json!({
+                session.mutable.lock().history.push(json!({
                     "role": "user",
                     "content": "[SYSTEM] Your previous turn was empty. Thinking is disabled for the retry. Respond with exactly one concrete next step: either call a tool, or give a direct text answer. Do not return an empty turn.",
                 }));
@@ -1440,8 +1422,8 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             }
             // Exhausted retries: surface to user, stop spinning.
             println!("  \x1b[31m✗ Model returned empty responses {n} times — giving up on this turn.\x1b[0m");
-            session.trace.lock().record_error("empty_response", &format!("{n} consecutive empty responses"));
-            session.history.lock().push(json!({
+            session.mutable.lock().trace.record_error("empty_response", &format!("{n} consecutive empty responses"));
+            session.mutable.lock().history.push(json!({
                 "role": "assistant",
                 "content": "(no response from model after multiple retries)",
             }));
@@ -1461,7 +1443,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                 .unwrap_or(false)
         {
             if let Some(content) = &content_opt {
-                let mut hist = session.history.lock();
+                let mut hist = session.mutable.lock().history;
                 hist.push(json!({"role": "assistant", "content": content}));
                 hist.push(json!({
                     "role": "user",
@@ -1487,7 +1469,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     "  \x1b[33m⚠ text-only streak: {} consecutive responses without tools — forcing tool use ({n})\x1b[0m",
                     n
                 );
-                let mut hist = session.history.lock();
+                let mut hist = session.mutable.lock().history;
                 if let Some(content) = &content_opt {
                     hist.push(json!({"role": "assistant", "content": content}));
                 }
@@ -1559,7 +1541,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                                 == itsy::session::contract::AssertionState::Failed)
                             .map(|a| a.id.as_str())
                             .collect();
-                        let mut hist = session.history.lock();
+                        let mut hist = session.mutable.lock().history;
                         if let Some(content) = &content_opt {
                             hist.push(json!({"role": "assistant", "content": content}));
                         }
@@ -1630,7 +1612,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                         continue;
                     }
                     // Exhausted the retry budget — record + let turn end.
-                    session.trace.lock().record_error(
+                    session.mutable.lock().trace.record_error(
                         "contract_loop_exhausted",
                         &format!(
                             "model gave up; {} pending + {} failed at end of turn",
@@ -1644,12 +1626,10 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
         // Greeting guard: detect lost-context greeting after failures.
         if state.tool_calls_this_turn > 0 {
             if let Some(content) = &content_opt {
-                if let Some(signal) = session
-                    .early_stop
-                    .lock()
+                if let Some(signal) = session.mutable.lock().early_stop
                     .check_greeting(content, state.tool_calls_this_turn > 0)
                 {
-                    let mut hist = session.history.lock();
+                    let mut hist = session.mutable.lock().history;
                     hist.push(json!({"role": "assistant", "content": content}));
                     hist.push(json!({"role": "user", "content": signal.injection}));
                     continue;
@@ -1659,12 +1639,10 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
 
         // Stream/print the final response.
         if let Some(content) = &content_opt {
-            session
-                .history
-                .lock()
+            session.mutable.lock().history
                 .push(json!({"role": "assistant", "content": content}));
 
-            let fs_assist = session.fullscreen.lock().clone();
+            let fs_assist = session.mutable.lock().fullscreen.clone();
             if let Some(fs) = &fs_assist {
                 fs.add_chat(itsy::fullscreen::ChatRole::Assistant, content.clone());
             } else {
@@ -1672,10 +1650,10 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             }
         } else if state.tool_calls_this_turn == 0 {
             // No content + no tool calls + nothing tried — try streaming.
-            let cfg = session.config.lock().clone();
-            let hist = session.history.lock().clone();
-            let mut early = session.early_stop.lock();
-            let fs_handle = session.fullscreen.lock().clone();
+            let cfg = session.shared.read().config.clone();
+            let hist = session.mutable.lock().history.clone();
+            let mut early = session.mutable.lock().early_stop;
+            let fs_handle = session.mutable.lock().fullscreen.clone();
             if let Some(ref fs) = fs_handle {
                 fs.set_streaming(true);
             }
@@ -1698,9 +1676,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             .await
             {
                 drop(early);
-                session
-                    .history
-                    .lock()
+                session.mutable.lock().history
                     .push(json!({"role": "assistant", "content": out}));
             }
             if let Some(ref fs) = fs_handle {
@@ -1723,7 +1699,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
     // Update readonly-turn counter. Resets when any mutating call succeeded;
     // increments otherwise so the next turn's nudge threshold check is current.
     {
-        let mut count = session.readonly_turn_count.lock();
+        let count = &mut session.mutable.lock().readonly_turn_count;
         if state.had_mutating_call {
             *count = 0;
         } else {
@@ -1737,12 +1713,12 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
         // Auto-commit (Feature: git.auto_commit).
         let auto_commit = itsy::settings::get().auto_commit;
         if auto_commit {
-            try_auto_commit(&session.cwd, &user_msg, &state.edited_files).await;
+            try_auto_commit(&session.ro.cwd, &user_msg, &state.edited_files).await;
         }
     }
 
     // Stop the trace recorder for this turn.
-    let _ = session.trace.lock().stop();
+    let _ = session.mutable.lock().trace.stop();
 }
 
 fn record_usage(data: &Value, session: &AgentSession, is_tool_call: bool) {
@@ -1750,11 +1726,9 @@ fn record_usage(data: &Value, session: &AgentSession, is_tool_call: bool) {
         let pt = usage.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
         let ct = usage.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
         let model = itsy::settings::get().model_name.clone();
-        session
-            .tokens
-            .lock()
+        session.shared.write().tokens
             .record(&json!({"usage": usage}), &model);
-        session.token_monitor.lock().record_call(
+        session.shared.write().token_monitor.record_call(
             pt,
             ct,
             CallMetadata {
@@ -1762,7 +1736,7 @@ fn record_usage(data: &Value, session: &AgentSession, is_tool_call: bool) {
                 is_tool_call,
             },
         );
-        session.trace.lock().record_tokens(pt, ct);
+        session.mutable.lock().trace.record_tokens(pt, ct);
     }
 }
 
@@ -1933,8 +1907,8 @@ async fn run_evaluator_phase(
 ) {
     const MAX_TURNS: u32 = 50;
 
-    let cwd = session.cwd.to_string_lossy().to_string();
-    let mut config = session.config.lock().clone();
+    let cwd = session.ro.cwd.to_string_lossy().to_string();
+    let mut config = session.shared.read().config.clone();
     // Use second-opinion model/endpoint if configured.
     if let Some(m) = config.second_opinion.model.clone() {
         config.model.name = m;
@@ -2111,7 +2085,7 @@ fn evaluator_emit_result(passed: bool, findings: &[String], session: &AgentSessi
             println!("    · {f}");
         }
         let findings_text = findings.join("\n  · ");
-        session.history.lock().push(json!({
+        session.mutable.lock().history.push(json!({
             "role": "user",
             "content": format!(
                 "[EVALUATOR] Independent verification found issues:\n  · {findings_text}\n\n\
@@ -2198,7 +2172,7 @@ async fn handle_mcp_tool_call(id: Value, params: Option<Value>, session: &AgentS
         .unwrap_or("")
         .to_string();
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
-    let cwd = session.cwd.clone();
+    let cwd = session.ro.cwd.clone();
 
     let result_text = match name.as_str() {
         "itsy_read_file" => {
@@ -2273,7 +2247,7 @@ async fn handle_mcp_tool_call(id: Value, params: Option<Value>, session: &AgentS
         }
         "itsy_memory_load" => {
             let task = args.get("task").and_then(|v| v.as_str()).unwrap_or("");
-            let items = session.memory.lock().load_for_task(task);
+            let items = session.shared.read().memory.load_for_task(task);
             if items.is_empty() {
                 "No relevant memory found.".into()
             } else {
@@ -2288,9 +2262,7 @@ async fn handle_mcp_tool_call(id: Value, params: Option<Value>, session: &AgentS
             let kind = args.get("type").and_then(|v| v.as_str()).unwrap_or("context");
             let title = args.get("title").and_then(|v| v.as_str()).unwrap_or("");
             let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
-            let obj = session
-                .memory
-                .lock()
+            let obj = session.shared.write().memory
                 .remember(kind, title, content, Vec::new());
             format!("Remembered: [{}] {} ({})", obj.kind, obj.title, obj.id)
         }
@@ -2417,70 +2389,66 @@ async fn probe_context_window(base_url: &str) -> Option<u32> {
 }
 
 fn build_session(config: Config, flags: Flags, cwd: PathBuf, mcp_bridge: Arc<McpBridge>) -> AgentSession {
-    let memory = Arc::new(Mutex::new(MemoryStore::new(&cwd)));
-    let history = Arc::new(Mutex::new(Vec::new()));
-    let tokens = Arc::new(Mutex::new(TokenTracker::new()));
-    let token_monitor = Arc::new(Mutex::new(TokenMonitor::new()));
     let mut session_store = SessionStore::new(cwd.clone());
     session_store.create();
-    let sessions = Arc::new(Mutex::new(session_store));
-
-    let scorer = Arc::new(Mutex::new(ToolScorer::new()));
-    let verification = Arc::new(Mutex::new(VerificationHistory::default()));
-    let early_stop = Arc::new(Mutex::new(EarlyStopDetector::new()));
-    let trace = Arc::new(Mutex::new(TraceRecorder::new(cwd.clone())));
 
     let mut skills = SkillManager::with_project_dir(&cwd);
     skills.load_from(&cwd);
-    let skills = Arc::new(Mutex::new(skills));
 
     let mut plugins = PluginLoader::new();
     plugins.load_all(&cwd);
-    let plugins = Arc::new(Mutex::new(plugins));
-
-    let config_arc = Arc::new(Mutex::new(config));
 
     AgentSession {
-        config: config_arc,
-        history,
-        flags,
-        memory,
-        tokens,
-        token_monitor,
-        sessions,
-        scorer,
-        verification,
-        early_stop,
-        trace,
-        skills,
-        plugins,
-        mcp_bridge,
-        cwd,
-        current_tool_category: Arc::new(Mutex::new(None)),
-        fullscreen: Arc::new(Mutex::new(None)),
-        tool_repeat_counts: Arc::new(Mutex::new(std::collections::HashMap::new())),
-        mutated_paths: Arc::new(Mutex::new(std::collections::HashSet::new())),
-        bash_loop_keys: Arc::new(Mutex::new(std::collections::HashSet::new())),
-        readonly_turn_count: Arc::new(Mutex::new(0)),
-        total_mutating_calls: Arc::new(Mutex::new(0)),
+        ro: AgentSessionReadOnly {
+            flags,
+            cwd: cwd.clone(),
+            mcp_bridge,
+        },
+        shared: parking_lot::RwLock::new(AgentSessionShared {
+            config,
+            memory: MemoryStore::new(&cwd),
+            skills,
+            plugins,
+            tokens: TokenTracker::new(),
+            token_monitor: TokenMonitor::new(),
+            sessions: session_store,
+        }),
+        mutable: parking_lot::Mutex::new(AgentSessionMutable {
+            history: Vec::new(),
+            scorer: ToolScorer::new(),
+            verification: VerificationHistory::default(),
+            early_stop: EarlyStopDetector::new(),
+            trace: TraceRecorder::new(cwd.clone()),
+            current_tool_category: None,
+            fullscreen: None,
+            tool_repeat_counts: std::collections::HashMap::new(),
+            mutated_paths: std::collections::HashSet::new(),
+            bash_loop_keys: std::collections::HashSet::new(),
+            readonly_turn_count: 0,
+            total_mutating_calls: 0,
+        }),
     }
 }
 
 fn make_cmd_ctx(session: &AgentSession) -> CommandCtx {
+    let shared = session.shared.read();
     CommandCtx {
-        config: session.config.clone(),
-        history: session.history.clone(),
-        memory: session.memory.clone(),
-        tokens: session.tokens.clone(),
-        cwd: Some(session.cwd.clone()),
-        token_monitor: Some(session.token_monitor.clone()),
-        sessions: Some(session.sessions.clone()),
+        config: Arc::new(parking_lot::Mutex::new(shared.config.clone())), // snapshot; command writes go through settings::update()
+        history: {
+            let hist = session.mutable.lock().history.clone();
+            Arc::new(parking_lot::Mutex::new(hist))
+        },
+        memory: Arc::new(parking_lot::Mutex::new(MemoryStore::new(&session.ro.cwd))),
+        tokens: Arc::new(parking_lot::Mutex::new(shared.tokens.clone())),
+        cwd: Some(session.ro.cwd.clone()),
+        token_monitor: Some(Arc::new(parking_lot::Mutex::new(TokenMonitor::new()))),
+        sessions: { let mut s = SessionStore::new(session.ro.cwd.clone()); s.create(); Some(Arc::new(parking_lot::Mutex::new(s))) },
         multi: None,
         undo: None,
         snapshots: None,
-        trace: Some(session.trace.clone()),
-        skills: Some(session.skills.clone()),
-        plugins: Some(session.plugins.clone()),
+        trace: Some(Arc::new(parking_lot::Mutex::new(TraceRecorder::new(session.ro.cwd.clone())))),
+        skills: { let mut s = SkillManager::with_project_dir(&session.ro.cwd);
+        plugins: { let mut p = PluginLoader::new(); p.load_all(&session.ro.cwd); Some(Arc::new(parking_lot::Mutex::new(p))) },
         lsp: None,
     }
 }
@@ -2494,7 +2462,7 @@ async fn run_repl(session: &AgentSession) -> Result<()> {
     let mut input = String::new();
     loop {
         {
-            let hist = session.history.lock();
+            let hist = session.mutable.lock().history.clone();
             print!("{}\n> ", tui::render_status(hist.len()));
             stdout.lock().flush().ok();
         }
@@ -2546,10 +2514,10 @@ async fn run_fullscreen_repl(session: Arc<AgentSession>) -> Result<()> {
     {
         // Seed the status bar from the current config + cwd.
         fs.set_model(itsy::settings::get().model_name.clone());
-        fs.set_status(format!("cwd: {}", session.cwd.display()));
+        fs.set_status(format!("cwd: {}", session.ro.cwd.display()));
     }
 
-    *session.fullscreen.lock() = Some(fs.clone());
+    session.mutable.lock().fullscreen = Some(fs.clone());
 
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 
@@ -2584,7 +2552,7 @@ async fn run_fullscreen_repl(session: Arc<AgentSession>) -> Result<()> {
         // Periodic status refresh.
         {
             fs.set_model(itsy::settings::get().model_name.clone());
-            let totals = session.tokens.lock().stats();
+            let totals = session.shared.read().tokens.stats();
             fs.set_token_count(totals.prompt as u32, totals.completion as u32);
         }
         let payload = match recv {
@@ -2617,7 +2585,7 @@ async fn run_fullscreen_repl(session: Arc<AgentSession>) -> Result<()> {
     let _ = ui_handle.join();
     // Drop the renderer from the session so executor stops routing into a
     // dead handle if anything async fires later.
-    *session.fullscreen.lock() = None;
+    session.mutable.lock().fullscreen = None;
     Ok(())
 }
 
@@ -2777,8 +2745,8 @@ async fn main() -> Result<()> {
     let session = Arc::new(build_session(config, flags, cwd, mcp_bridge.clone()));
 
     if cli.resume {
-        if let Some(record) = session.sessions.lock().resume() {
-            session.history.lock().extend(record.messages.iter().cloned());
+        if let Some(record) = session.shared.write().sessions.resume() {
+            session.mutable.lock().history.extend(record.messages.iter().cloned());
         }
     }
 
