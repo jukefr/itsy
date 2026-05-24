@@ -87,8 +87,7 @@ enum TrialStatus {
 
 #[derive(Clone, Debug)]
 struct ContractAssertion {
-    #[allow(dead_code)]
-    id: String,
+    _id: String,
     text: String,
 }
 
@@ -122,7 +121,6 @@ struct App {
     list_state: ListState,
     log_scroll: usize,
     log_lines: Vec<LogLine>,
-    harbor_pid: Option<u32>,
     finished: bool,
     last_poll: Instant,
     // track last chat file count to avoid re-parsing unchanged logs
@@ -144,7 +142,6 @@ impl Default for App {
             list_state: ListState::default(),
             log_scroll: 0,
             log_lines: Vec::new(),
-            harbor_pid: None,
             finished: false,
             last_poll: Instant::now() - Duration::from_secs(60),
             last_log_trial: String::new(),
@@ -360,11 +357,11 @@ fn parse_contract(chats_dir: &Path) -> Vec<ContractAssertion> {
                 let Some(args_str) = tc.pointer("/function/arguments").and_then(|a| a.as_str()) else { continue };
                 let Ok(args) = serde_json::from_str::<serde_json::Value>(args_str) else { continue };
                 let Some(assertions) = args.get("assertions").and_then(|a| a.as_array()) else { continue };
-                return assertions.iter().filter_map(|a| {
-                    Some(ContractAssertion {
-                        id: a.get("id").and_then(|i| i.as_str()).unwrap_or("?").to_string(),
+                return assertions.iter().map(|a| {
+                    ContractAssertion {
+                        _id: a.get("id").and_then(|i| i.as_str()).unwrap_or("?").to_string(),
                         text: a.get("text").and_then(|t| t.as_str()).unwrap_or("?").to_string(),
-                    })
+                    }
                 }).collect();
             }
         }
@@ -712,7 +709,7 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
         .unwrap_or_else(|| "00:00:00".to_string());
 
     let status_icon = if app.finished { "✓ done" } else { "⏳ running" };
-    let model_short = app.model.split('/').last().unwrap_or(&app.model);
+    let model_short = app.model.rsplit_once('/').map(|(_, s)| s).unwrap_or(&app.model);
 
     let spans = vec![
         Span::styled("  itsy-bench  ", Style::default().fg(Color::Rgb(200, 200, 210)).add_modifier(Modifier::BOLD)),
@@ -1008,11 +1005,13 @@ fn main() -> Result<()> {
             let job_name = abs.file_name().and_then(|n| n.to_str()).unwrap_or("unknown").to_string();
             let model = detect_model(&abs);
 
-            let mut app = App::default();
-            app.job_dir = abs;
-            app.job_name = job_name;
-            app.model = model;
-            app.started_at = Some(Instant::now());
+            let mut app = App {
+                job_dir: abs,
+                job_name,
+                model,
+                started_at: Some(Instant::now()),
+                ..Default::default()
+            };
             poll_job_dir(&mut app);
 
             let mut terminal = setup_terminal()?;
@@ -1045,10 +1044,9 @@ fn main() -> Result<()> {
 
             eprintln!("Launching harbor — job: {}  dir: {}", name, job_dir.display());
 
-            let harbor_child = build_harbor_command(&tasks, &model, attempts, concurrent, &abs_jobs_dir, &name, &binary)
+            let _harbor = build_harbor_command(&tasks, &model, attempts, concurrent, &abs_jobs_dir, &name, &binary)
                 .spawn()
                 .context("failed to spawn harbor")?;
-            let harbor_pid = harbor_child.id();
 
             // Wait for harbor to create the job directory (up to 30s for image build)
             let wait_start = Instant::now();
@@ -1059,12 +1057,13 @@ fn main() -> Result<()> {
                 std::fs::create_dir_all(&job_dir)?;
             }
 
-            let mut app = App::default();
-            app.job_dir = job_dir;
-            app.job_name = name;
-            app.model = model;
-            app.started_at = Some(Instant::now());
-            app.harbor_pid = Some(harbor_pid);
+            let mut app = App {
+                job_dir,
+                job_name: name,
+                model,
+                started_at: Some(Instant::now()),
+                ..Default::default()
+            };
             poll_job_dir(&mut app);
 
             let mut terminal = setup_terminal()?;

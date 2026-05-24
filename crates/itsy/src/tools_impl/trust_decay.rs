@@ -204,6 +204,7 @@ fn with_tmp_suffix(p: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
+#[allow(clippy::field_reassign_with_default)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,7 +212,7 @@ mod tests {
     #[test]
     fn record_and_thresholds() {
         let mut st = TrustState::default();
-        st.disabled = false;
+        
         st.warn_threshold = 2;
         st.drop_threshold = 4;
         for _ in 0..2 { st.record("foo", false); }
@@ -225,7 +226,7 @@ mod tests {
     #[test]
     fn should_avoid_and_summary() {
         let mut st = TrustState::default();
-        st.disabled = false;
+        
         st.warn_threshold = 1;
         st.drop_threshold = 99;
         st.record("bar", false);
@@ -236,7 +237,7 @@ mod tests {
     #[test]
     fn combo_keys_are_independent() {
         let mut st = TrustState::default();
-        st.disabled = false;
+        
         st.warn_threshold = 1;
         st.drop_threshold = 2;
         st.record_combo("grep", Some("search"), false);
@@ -248,7 +249,7 @@ mod tests {
     #[test]
     fn filter_and_sort_demotes_and_drops() {
         let mut st = TrustState::default();
-        st.disabled = false;
+        
         st.warn_threshold = 1;
         st.drop_threshold = 3;
         st.record("bad", false);
@@ -261,7 +262,7 @@ mod tests {
     #[test]
     fn round_trip_persistence() {
         let mut st = TrustState::default();
-        st.disabled = false;
+        
         st.record("foo", false);
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("trust.json");

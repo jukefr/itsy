@@ -792,18 +792,19 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                         session.mutable.lock().bash_loop_keys.insert(repeat_key.clone());
                     }
 
-                    let n = session.mutable.lock().tool_repeat_counts
+                    let mut guard = session.mutable.lock();
+                    let n = guard.tool_repeat_counts
                         .entry(repeat_key)
                         .and_modify(|n| *n += 1)
                         .or_insert(1)
-                        .clone();
-                    if n > max_repeats {
+                        ;
+                    if *n > max_repeats {
                         let tool_result_msg = format!(
                             "[LOOP DETECTED] You have called `{}` with these exact \
                              arguments {} time(s). The result will not change. \
                              Stop repeating — try a completely different approach \
                              or call a different tool.",
-                            name, n
+                            name, *n
                         );
                         session.mutable.lock().history.push(json!({
                             "role": "tool",
@@ -816,7 +817,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                         // [SYSTEM] user message. Tool results have low steering
                         // weight at small quants; a user-role message breaks the
                         // generation pattern and names the exact tools to use.
-                        if n == max_repeats + 3 {
+                        if *n == max_repeats + 3 {
                             let contract_hint = if itsy::settings::get().contract {
                                 " You are under a contract — call `contract_status` \
                                   to see pending assertions, then `mark_assertion` \
@@ -918,9 +919,9 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                         mcp_bridge: Some(session.ro.mcp_bridge.clone()),
                         mcp_client: None,
                         fullscreen: fs_handle.clone(),
-                        read_tracker: &*read_tracker_arc,
-                        file_state: &*file_state_arc,
-                        snapshot_manager: &*snapshot_manager_arc,
+                        read_tracker: &read_tracker_arc,
+                        file_state: &file_state_arc,
+                        snapshot_manager: &snapshot_manager_arc,
                     };
                     execute_tool(&name, args.clone(), &ctx).await
                 };
@@ -1090,11 +1091,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     // failure if the exit code is > 1 or it's a non-exit-code error.
                     let had_error = result.get("error").map(|e| {
                         let msg = e.as_str().unwrap_or("");
-                        if (name == "bash" || name == "run") && msg == "Exit code 1" {
-                            false
-                        } else {
-                            true
-                        }
+                        !((name == "bash" || name == "run") && msg == "Exit code 1")
                     }).unwrap_or(false);
                     if had_error {
                         let n = state.recent_tool_failures
