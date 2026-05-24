@@ -1175,26 +1175,12 @@ async fn exec_mark_assertion(args: &Value, cwd: &Path, config: &Config) -> Value
         }
         _ => None,
     };
-    let verification_targets = crate::verification::discover(cwd);
-    // For `passed`, we want anchored evidence. If an external verifier exists,
-    // require a concrete command; otherwise allow a substantive evidence string
-    // as the fallback.
-    if state == AssertionState::Passed {
-        if check.is_none() {
-            if let Some(msg) = verification_targets.close_gate_message() {
-                return json!({
-                    "error": format!(
-                        "marking `passed` without a verification command is not allowed here. {msg}"
-                    )
-                });
-            }
-            if evidence.len() < 30 {
-                return json!({
-                    "error": "marking `passed` without a verification command requires substantive evidence (≥30 chars). \
-                             Re-run the check and include command + observation."
-                });
-            }
-        }
+    // For `passed`, require either a verification command or substantive evidence.
+    if state == AssertionState::Passed && check.is_none() && evidence.len() < 30 {
+        return json!({
+            "error": "marking `passed` without a verification command requires substantive evidence (≥30 chars). \
+                     Re-run the check and include command + observation."
+        });
     }
 
     // Second opinion: before accepting "passed", ask the second model to
@@ -1294,28 +1280,9 @@ async fn exec_close_contract(args: &Value, cwd: &Path, config: &Config) -> Value
         "aborted" => return json!({"error": "`aborted` is not available — fix failing assertions and close as `completed`"}),
         _ => return json!({"error": "`status` must be `completed`"}),
     };
-    let verification_targets = crate::verification::discover(cwd);
     // Second opinion: final gate — ask the second model to review all passed
     // assertions together before allowing the contract to close.
     if let Some(c) = contract::current() {
-        if verification_targets.has_external_authoritative_commands() {
-            let latest_check = c
-                .assertions
-                .iter()
-                .filter(|a| a.state == AssertionState::Passed)
-                .filter_map(|a| a.last_check.as_ref())
-                .max_by(|a, b| a.timestamp.cmp(&b.timestamp));
-            let latest_used_external_verifier = latest_check
-                .map(|check| verification_targets.matches_external_command(&check.command))
-                .unwrap_or(false);
-            if !latest_used_external_verifier {
-                return json!({
-                    "error": verification_targets.close_gate_message().unwrap_or_else(
-                        || "Run an external verifier command on the final state before closing the contract.".to_string()
-                    )
-                });
-            }
-        }
         let passed: Vec<(String, String, String)> = c
             .assertions
             .iter()

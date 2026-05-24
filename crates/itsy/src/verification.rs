@@ -3,7 +3,7 @@
 //! The agent should prefer the repository's own tests / verifier scripts over
 //! ad-hoc spot checks when certifying success. This module discovers a small,
 //! high-confidence set of verification assets and commands from the working
-//! tree plus common external verifier mounts.
+//! tree.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -20,16 +20,11 @@ pub struct VerificationTargets {
 struct VerificationCommand {
     display: String,
     prefixes: Vec<String>,
-    external: bool,
 }
 
 impl VerificationTargets {
     pub fn has_authoritative_commands(&self) -> bool {
         !self.commands.is_empty()
-    }
-
-    pub fn has_external_authoritative_commands(&self) -> bool {
-        self.commands.iter().any(|c| c.external)
     }
 
     pub fn recommended_commands(&self) -> Vec<String> {
@@ -40,20 +35,13 @@ impl VerificationTargets {
         matches_any_command(self.commands.iter(), command)
     }
 
-    pub fn matches_external_command(&self, command: &str) -> bool {
-        matches_any_command(self.commands.iter().filter(|c| c.external), command)
-    }
-
     pub fn prompt_block(&self) -> Option<String> {
         if self.assets.is_empty() && self.commands.is_empty() {
             return None;
         }
-        let mut parts = Vec::with_capacity(3);
+        let mut parts = Vec::with_capacity(2);
         if !self.assets.is_empty() {
-            parts.push(format!(
-                "verification assets: {}",
-                self.assets.join(", ")
-            ));
+            parts.push(format!("verification assets: {}", self.assets.join(", ")));
         }
         if !self.commands.is_empty() {
             parts.push(format!(
@@ -66,36 +54,11 @@ impl VerificationTargets {
             parts.join("; ")
         ))
     }
-
-    pub fn close_gate_message(&self) -> Option<String> {
-        if !self.has_external_authoritative_commands() {
-            return None;
-        }
-        let commands: Vec<String> = self
-            .commands
-            .iter()
-            .filter(|c| c.external)
-            .map(|c| c.display.clone())
-            .collect();
-        Some(format!(
-            "External verifier commands are available: {}. Run one of them on the final state and capture its exact output in `mark_assertion` before closing the contract.",
-            commands.join(" | ")
-        ))
-    }
 }
 
 pub fn discover(cwd: &Path) -> VerificationTargets {
     let mut out = Collector::default();
-    collect_root(cwd, false, &mut out);
-
-    // Some harnesses mount authoritative verifier assets outside the writable
-    // project tree. `/tests` is the most common convention; include it when
-    // present so the agent can align to the real oracle instead of a local copy.
-    let external_tests = Path::new("/tests");
-    if external_tests.is_dir() && normalize(external_tests) != normalize(cwd) {
-        collect_root(external_tests, true, &mut out);
-    }
-
+    collect_root(cwd, &mut out);
     out.finish()
 }
 
@@ -112,16 +75,12 @@ impl Collector {
         }
     }
 
-    fn add_command<S: Into<String>>(&mut self, display: S, prefixes: Vec<String>, external: bool) {
+    fn add_command<S: Into<String>>(&mut self, display: S, prefixes: Vec<String>) {
         let display = display.into();
         if self.commands.iter().any(|existing| existing.display == display) {
             return;
         }
-        self.commands.push(VerificationCommand {
-            display,
-            prefixes,
-            external,
-        });
+        self.commands.push(VerificationCommand { display, prefixes });
     }
 
     fn finish(mut self) -> VerificationTargets {
@@ -134,17 +93,17 @@ impl Collector {
     }
 }
 
-fn collect_root(root: &Path, external: bool, out: &mut Collector) {
+fn collect_root(root: &Path, out: &mut Collector) {
     let root = normalize(root);
 
     if root.join("Cargo.toml").is_file() {
         out.add_asset(display_path(&root.join("Cargo.toml")));
-        out.add_command("cargo test", vec![normalize_command("cargo test")], external);
+        out.add_command("cargo test", vec![normalize_command("cargo test")]);
     }
 
     if root.join("go.mod").is_file() {
         out.add_asset(display_path(&root.join("go.mod")));
-        out.add_command("go test ./...", vec![normalize_command("go test ./...")], external);
+        out.add_command("go test ./...", vec![normalize_command("go test ./...")]);
     }
 
     if let Some(package_json) = read_json(&root.join("package.json")) {
@@ -159,7 +118,7 @@ fn collect_root(root: &Path, external: bool, out: &mut Collector) {
             out.add_asset(display_path(&root.join("package.json")));
             let pm = detect_package_manager(&root);
             let prefixes = vec![normalize_command(&format!("{pm} test"))];
-            out.add_command(format!("{pm} test"), prefixes, external);
+            out.add_command(format!("{pm} test"), prefixes);
         }
     }
 
@@ -170,17 +129,17 @@ fn collect_root(root: &Path, external: bool, out: &mut Collector) {
     ]) {
         if file_contains_target(&makefile, "test") {
             out.add_asset(display_path(&makefile));
-            out.add_command("make test", vec![normalize_command("make test")], external);
+            out.add_command("make test", vec![normalize_command("make test")]);
         } else if file_contains_target(&makefile, "check") {
             out.add_asset(display_path(&makefile));
-            out.add_command("make check", vec![normalize_command("make check")], external);
+            out.add_command("make check", vec![normalize_command("make check")]);
         }
     }
 
     if let Some(justfile) = first_existing(&[root.join("justfile"), root.join("Justfile")]) {
         if file_contains_recipe(&justfile, "test") {
             out.add_asset(display_path(&justfile));
-            out.add_command("just test", vec![normalize_command("just test")], external);
+            out.add_command("just test", vec![normalize_command("just test")]);
         }
     }
 
@@ -206,7 +165,6 @@ fn collect_root(root: &Path, external: bool, out: &mut Collector) {
                 normalize_command("python3 -m pytest"),
                 normalize_command("uv run pytest"),
             ],
-            external,
         );
     }
 
@@ -223,7 +181,6 @@ fn collect_root(root: &Path, external: bool, out: &mut Collector) {
                     normalize_command(&format!("pytest {shown}")),
                     normalize_command(&format!("pytest -q {shown}")),
                 ],
-                external,
             );
         }
     }

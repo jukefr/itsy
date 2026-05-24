@@ -116,8 +116,8 @@ pub static TOOLS: Lazy<Vec<Value>> = Lazy::new(|| vec![
         })),
     func_tool("mark_assertion",
         "Mark a contract assertion `passed` or `failed` with evidence. \
-        `passed` requires evidence + a concrete verification command. If an external verifier script exists, \
-        plan to use that project-native check before the final `close_contract` — do not rely only on ad-hoc spot checks. \
+        `passed` requires evidence + a concrete verification command. If a project-native verifier exists \
+        (e.g. `python3 /app/test_outputs.py`), run it before the final `close_contract` — do not rely only on ad-hoc spot checks. \
         Lazy observations like \"OK\" or \"tests passed\" are rejected — write what you actually saw.",
         json!({
             "type": "object",
@@ -145,7 +145,7 @@ pub static TOOLS: Lazy<Vec<Value>> = Lazy::new(|| vec![
         "Read the current contract state — which assertions are passed / failed / pending.",
         json!({"type": "object", "properties": {}})),
     func_tool("close_contract",
-        "Finalize the active contract as `completed`. Refused unless every assertion is `passed`, and when an external verifier command exists you must have run it on the final state before closing.",
+        "Finalize the active contract as `completed`. Refused unless every assertion is `passed`.",
         json!({
             "type": "object",
             "properties": {
