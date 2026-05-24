@@ -378,7 +378,7 @@ mod tests {
         // Build a minimal Config the same way config::load would, but without
         // touching the filesystem or env. We just need model.name + base_url.
         use crate::config::{
-            ContextConfig, EscalationConfig, GitConfig, ModelConfig, ToolsConfig, TuiConfig,
+            ContextConfig, GitConfig, ModelConfig, ToolsConfig, TuiConfig,
         };
         Config {
             model: ModelConfig {
@@ -403,14 +403,6 @@ mod tests {
                 rtk: true,
             },
             tui: TuiConfig { show_token_usage: false, auto_approve: false, theme: "dark".into(), classic: false },
-            escalation: EscalationConfig {
-                enabled: false,
-                max_per_session: 5,
-                confirm: true,
-                provider: None,
-                api_key: None,
-                model: None,
-            },
             git: GitConfig { auto_commit: false },
             features: crate::config::FeaturesConfig::default(),
             models: None,

@@ -86,10 +86,6 @@ fn default_true() -> bool {
 /// layer was removed in schema v2.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeaturesConfig {
-    /// Auto-detect multi-step tasks and ask the model to commit to a plan
-    /// before executing.
-    #[serde(default = "default_true")]
-    pub plan: bool,
     /// Wrap each turn in a checkpoint so failures can roll back.
     #[serde(default = "default_true")]
     pub snapshot: bool,
@@ -136,14 +132,6 @@ pub struct FeaturesConfig {
     /// user messages.
     #[serde(default = "default_true")]
     pub context_retrieval: bool,
-    /// Post-hoc reviewer that asks the model "does this look right?" at
-    /// the end of each turn. Costs an extra LLM call per turn.
-    #[serde(default)]
-    pub reviewer: bool,
-    /// Run the user prompt through a planner→executor chain before the
-    /// main agent loop. Costs an extra LLM call.
-    #[serde(default)]
-    pub chain: bool,
     /// Enable the on-disk contract feature: model commits to a list of
     /// testable assertions up front, marks each passed/failed with
     /// command evidence, and can't close the contract as `completed`
@@ -160,7 +148,6 @@ fn default_bootstrap_max() -> usize {
 impl Default for FeaturesConfig {
     fn default() -> Self {
         Self {
-            plan: true,
             snapshot: true,
             snapshot_auto_rollback: true,
             write_guard: true,
@@ -174,8 +161,6 @@ impl Default for FeaturesConfig {
             error_diagnosis: true,
             validate_edits: false,
             context_retrieval: true,
-            reviewer: false,
-            chain: false,
             contract: true,
         }
     }
@@ -190,15 +175,6 @@ pub struct TuiConfig {
     pub classic: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EscalationConfig {
-    pub enabled: bool,
-    pub max_per_session: u32,
-    pub confirm: bool,
-    pub provider: Option<String>,
-    pub api_key: Option<String>,
-    pub model: Option<String>,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitConfig {
@@ -215,8 +191,6 @@ pub struct MultiModels {
 /// Per-run hard limits.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LimitsConfig {
-    #[serde(default = "default_max_tool_calls")]
-    pub max_tool_calls: u32,
     #[serde(default = "default_max_tool_calls_per_turn")]
     pub max_tool_calls_per_turn: u32,
     /// 0 = auto (`thinking_budget + 4096`).
@@ -229,7 +203,6 @@ pub struct LimitsConfig {
 impl Default for LimitsConfig {
     fn default() -> Self {
         Self {
-            max_tool_calls: 50,
             max_tool_calls_per_turn: 250,
             max_output_tokens: 0,
             request_timeout_ms: 120_000,
@@ -237,7 +210,6 @@ impl Default for LimitsConfig {
     }
 }
 
-fn default_max_tool_calls() -> u32 { 50 }
 fn default_max_tool_calls_per_turn() -> u32 { 250 }
 fn default_request_timeout_ms() -> u64 { 120_000 }
 
@@ -423,6 +395,32 @@ impl Default for PluginsConfig {
 
 fn default_plugin_timeout() -> u64 { 30 }
 
+/// A secondary model used for independent second-opinion calls:
+/// adversarial evaluator and any other place where a fresh perspective
+/// on the main model's output is useful.
+/// Defaults to the main model when not set.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SecondOpinionConfig {
+    /// Model name override. `None` → use main model.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Endpoint URL override. `None` → use main endpoint.
+    #[serde(default)]
+    pub endpoint: Option<String>,
+}
+
+impl SecondOpinionConfig {
+    /// Resolve the effective model name, falling back to the main config.
+    pub fn resolved_model<'a>(&'a self, main: &'a Config) -> &'a str {
+        self.model.as_deref().unwrap_or(&main.model.name)
+    }
+
+    /// Resolve the effective endpoint, falling back to the main config.
+    pub fn resolved_endpoint<'a>(&'a self, main: &'a Config) -> &'a str {
+        self.endpoint.as_deref().unwrap_or(&main.model.base_url)
+    }
+}
+
 /// Diagnostic / dev knobs that aren't worth a wizard prompt.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DiagConfig {
@@ -443,7 +441,6 @@ pub struct Config {
     pub context: ContextConfig,
     pub tools: ToolsConfig,
     pub tui: TuiConfig,
-    pub escalation: EscalationConfig,
     pub git: GitConfig,
     #[serde(default)]
     pub features: FeaturesConfig,
@@ -473,6 +470,8 @@ pub struct Config {
     pub plugins: PluginsConfig,
     #[serde(default)]
     pub diag: DiagConfig,
+    #[serde(default)]
+    pub second_opinion: SecondOpinionConfig,
 }
 
 /// Schema version currently understood. Bump when a breaking change is
@@ -494,8 +493,6 @@ pub struct ConfigFile {
     pub tools: Option<ToolsConfig>,
     #[serde(default)]
     pub tui: Option<TuiConfig>,
-    #[serde(default)]
-    pub escalation: Option<EscalationConfig>,
     #[serde(default)]
     pub git: Option<GitConfig>,
     #[serde(default)]
@@ -526,6 +523,8 @@ pub struct ConfigFile {
     pub plugins: Option<PluginsConfig>,
     #[serde(default)]
     pub diag: Option<DiagConfig>,
+    #[serde(default)]
+    pub second_opinion: Option<SecondOpinionConfig>,
 }
 
 fn default_version() -> String {
@@ -655,9 +654,6 @@ impl ConfigFile {
         if let Some(t) = self.tui.clone() {
             config.tui = t;
         }
-        if let Some(e) = self.escalation.clone() {
-            config.escalation = e;
-        }
         if let Some(g) = self.git.clone() {
             config.git = g;
         }
@@ -703,6 +699,9 @@ impl ConfigFile {
         if let Some(v) = self.diag.clone() {
             config.diag = v;
         }
+        if let Some(v) = self.second_opinion.clone() {
+            config.second_opinion = v;
+        }
     }
 }
 
@@ -714,7 +713,6 @@ impl From<&Config> for ConfigFile {
             context: Some(c.context.clone()),
             tools: Some(c.tools.clone()),
             tui: Some(c.tui.clone()),
-            escalation: Some(c.escalation.clone()),
             git: Some(c.git.clone()),
             features: Some(c.features.clone()),
             models: c.models.clone(),
@@ -730,6 +728,11 @@ impl From<&Config> for ConfigFile {
             evidence: Some(c.evidence.clone()),
             plugins: Some(c.plugins.clone()),
             diag: Some(c.diag.clone()),
+            second_opinion: if c.second_opinion.model.is_some() || c.second_opinion.endpoint.is_some() {
+                Some(c.second_opinion.clone())
+            } else {
+                None
+            },
         }
     }
 }
@@ -783,14 +786,6 @@ pub fn load_config(flags: &Flags) -> Config {
             theme: "dark".into(),
             classic: false,
         },
-        escalation: EscalationConfig {
-            enabled: true,
-            max_per_session: 5,
-            confirm: true,
-            provider: None,
-            api_key: None,
-            model: None,
-        },
         git: GitConfig { auto_commit: false },
         features: FeaturesConfig::default(),
         models: None,
@@ -806,6 +801,7 @@ pub fn load_config(flags: &Flags) -> Config {
         evidence: EvidenceConfig::default(),
         plugins: PluginsConfig::default(),
         diag: DiagConfig::default(),
+        second_opinion: SecondOpinionConfig::default(),
     };
 
     // Merge the persisted TOML file on top of defaults. If the file is

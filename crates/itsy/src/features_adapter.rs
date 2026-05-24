@@ -5,7 +5,7 @@
 
 use serde_json::{json, Value};
 
-use crate::runtime::features::prompts::call_prompt;
+use crate::runtime::features::prompts::{call_prompt, call_prompt_with_endpoint};
 
 // ─── Feature 1: Repair a malformed tool call ─────────────────────────────────
 
@@ -85,21 +85,6 @@ pub async fn await_checkpoint_decision(flow_run_id: &str, checkpoint_name: &str)
     fut.await
 }
 
-// ─── Feature 6: Plan extraction ──────────────────────────────────────────────
-
-/// Extract structured plan steps from prose. Returns `None` if no clear plan
-/// can be extracted — caller should fall back to regex parser.
-pub async fn extract_plan_steps(response: &str) -> Option<Vec<String>> {
-    let r = call_prompt("extract_plan", json!({ "response": response })).await.ok()?;
-    let cleaned = strip_fences(&r);
-    let parsed: Vec<String> = serde_json::from_str::<Value>(&cleaned).ok()?.as_array()?.iter()
-        .filter_map(|v| v.as_str().map(|s| truncate(s, 200)))
-        .collect();
-    if parsed.len() < 2 {
-        return None;
-    }
-    Some(parsed.into_iter().take(8).collect())
-}
 
 // ─── Feature 2 (auto-commit): generate commit message ───────────────────────
 
@@ -171,6 +156,39 @@ pub async fn validate_edit_compiled(file_path: &str, content: &str, original_tas
     )
     .await
     {
+        Ok(s) => s,
+        Err(_) => return ValidateEditResult { ok: true, issues: Vec::new() },
+    };
+    let lc = r.to_lowercase();
+    let passed = lc.contains("ok")
+        || lc.contains("correct")
+        || lc.contains("looks good")
+        || lc.contains("valid")
+        || lc.contains("pass")
+        || !lc.contains("error");
+    ValidateEditResult {
+        ok: passed,
+        issues: if passed { Vec::new() } else { vec![truncate(&r, 200)] },
+    }
+}
+
+/// Like `validate_edit_compiled` but routes the call through the second-opinion
+/// model/endpoint when configured, falling back to the main model otherwise.
+pub async fn validate_edit_with_config(
+    file_path: &str,
+    content: &str,
+    original_task: &str,
+    config: &crate::config::Config,
+) -> ValidateEditResult {
+    let truncated = truncate(content, 4000);
+    let input = json!({
+        "file_path": file_path,
+        "content": truncated,
+        "original_task": truncate(original_task, 500),
+    });
+    let model = config.second_opinion.resolved_model(config);
+    let base_url = config.second_opinion.resolved_endpoint(config);
+    let r = match call_prompt_with_endpoint("validate_edit", input, model, base_url).await {
         Ok(s) => s,
         Err(_) => return ValidateEditResult { ok: true, issues: Vec::new() },
     };

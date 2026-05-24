@@ -12,7 +12,7 @@ use regex::Regex;
 use serde::Deserialize;
 
 use crate::config::{
-    ConfigFile, ContextConfig, EscalationConfig, GitConfig, ModelConfig, ToolsConfig, TuiConfig,
+    ConfigFile, ContextConfig, GitConfig, ModelConfig, ToolsConfig, TuiConfig,
     CURRENT_CONFIG_VERSION,
 };
 use crate::paths;
@@ -429,22 +429,12 @@ pub fn run() -> Result<ConfigFile> {
         _ => "direct".into(),
     };
 
-    let escalation_default = is_tiny;
-    let escalation_enabled = if is_tiny {
-        ask_bool(
-            "Enable automatic escalation to a stronger model on hard turns?",
-            escalation_default,
-        )
-    } else {
-        ask_bool("Enable escalation?", true)
-    };
-
     // Small-model safeguards — bulk-on for tiny quants, otherwise ask
     // whether to enable. All are individually overridable via `ITSY_*`
     // env vars or by editing the TOML later.
     let safeguards_default = matches!(hints.quant_tier, "tiny" | "low" | "balanced" | "unknown");
     let safeguards_all = ask_bool(
-        "Enable small-model safeguards (plan/snapshot/write-guard/trust-decay/bootstrap)?",
+        "Enable small-model safeguards (snapshot/write-guard/trust-decay/bootstrap)?",
         safeguards_default,
     );
 
@@ -483,17 +473,7 @@ pub fn run() -> Result<ConfigFile> {
         "LLM self-critique after every successful write/patch? (extra LLM call per edit)",
         false,
     );
-    let reviewer = ask_bool(
-        "Run a post-hoc LLM reviewer on the final assistant response? (extra LLM call per turn)",
-        false,
-    );
-    let chain = ask_bool(
-        "Use a planner→executor chain (extra LLM call up front)?",
-        false,
-    );
-
     let features = crate::config::FeaturesConfig {
-        plan: safeguards_all,
         snapshot: safeguards_all,
         snapshot_auto_rollback: safeguards_all,
         write_guard: safeguards_all,
@@ -507,8 +487,6 @@ pub fn run() -> Result<ConfigFile> {
         error_diagnosis,
         validate_edits,
         context_retrieval,
-        reviewer,
-        chain,
         contract: true,
     };
 
@@ -548,14 +526,6 @@ pub fn run() -> Result<ConfigFile> {
             theme,
             classic: false,
         }),
-        escalation: Some(EscalationConfig {
-            enabled: escalation_enabled,
-            max_per_session: 5,
-            confirm: true,
-            provider: None,
-            api_key: None,
-            model: None,
-        }),
         git: Some(GitConfig { auto_commit }),
         features: Some(features),
         models: None,
@@ -574,6 +544,7 @@ pub fn run() -> Result<ConfigFile> {
         evidence: Some(crate::config::EvidenceConfig::default()),
         plugins: Some(crate::config::PluginsConfig::default()),
         diag: Some(crate::config::DiagConfig::default()),
+        second_opinion: None,
     };
 
     paths::ensure_config_dirs()?;
@@ -618,14 +589,6 @@ pub fn write_default() -> Result<ConfigFile> {
             theme: "dark".into(),
             classic: false,
         }),
-        escalation: Some(EscalationConfig {
-            enabled: true,
-            max_per_session: 5,
-            confirm: true,
-            provider: None,
-            api_key: None,
-            model: None,
-        }),
         git: Some(GitConfig { auto_commit: false }),
         features: Some(crate::config::FeaturesConfig::default()),
         models: None,
@@ -641,6 +604,7 @@ pub fn write_default() -> Result<ConfigFile> {
         evidence: Some(crate::config::EvidenceConfig::default()),
         plugins: Some(crate::config::PluginsConfig::default()),
         diag: Some(crate::config::DiagConfig::default()),
+        second_opinion: None,
     };
     paths::ensure_config_dirs()?;
     file.save_to_path(&paths::config_file())?;

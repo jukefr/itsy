@@ -7,7 +7,6 @@ pub mod undo;
 pub mod snapshot;
 pub mod references;
 pub mod file_state;
-pub mod plan_tracker;
 pub mod git_context;
 pub mod bootstrap;
 pub mod multi;

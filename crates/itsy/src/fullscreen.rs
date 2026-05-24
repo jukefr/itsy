@@ -196,7 +196,6 @@ const COMMANDS: &[CommandSpec] = &[
     CommandSpec { cmd: "/memory", alias: None, desc: "View project memory" },
     CommandSpec { cmd: "/trace", alias: None, desc: "View execution traces" },
     CommandSpec { cmd: "/eval", alias: None, desc: "Run prompt evaluation" },
-    CommandSpec { cmd: "/escalation", alias: None, desc: "Model escalation status" },
     CommandSpec { cmd: "/profile", alias: None, desc: "Model profile + routing" },
     CommandSpec { cmd: "/cognition", alias: None, desc: "Cognition status" },
     CommandSpec { cmd: "/mcp", alias: None, desc: "Connected MCP servers" },

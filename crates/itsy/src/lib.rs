@@ -7,7 +7,6 @@
 //! * [`executor`]     — built-in tool execution
 //! * [`model_client`] — OpenAI-compatible chat client (sync + streaming)
 //! * [`governor`]     — tool scoring, verification, hard-fail, classifier
-//! * [`escalation`]   — cloud-model fallback (Claude / OpenAI / DeepSeek)
 //! * [`memory`]       — typed project memory store
 //! * [`mcp_bridge`]   — built-in code-graph MCP server lifecycle
 //! * [`code_graph`]   — native (tree-sitter + SQLite) code graph
@@ -15,7 +14,7 @@
 //! * [`fullscreen`]   — ratatui alternate-screen renderer
 //! * [`commands`]     — slash-command dispatch
 //! * [`security`]     — redaction, ANSI stripping, path safety, shell escape
-//! * [`session`]      — persistence, undo, snapshots, references, plan
+//! * [`session`]      — persistence, undo, snapshots, references
 //! * [`tools_impl`]   — persistent shell, read tracker, MCP client, web browse
 //! * [`model`]        — profiles, routing, adaptive temperature
 //! * [`runtime`]      — deterministic tool router + provider adapters
@@ -29,7 +28,6 @@ pub mod code_graph;
 pub mod cognition_adapter;
 pub mod commands;
 pub mod config;
-pub mod escalation;
 pub mod eval_runner;
 pub mod executor;
 pub mod features_adapter;

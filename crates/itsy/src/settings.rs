@@ -49,10 +49,7 @@ pub struct Settings {
     pub model_strong: Option<String>,
 
     // ── tool budgets ─────────────────────────────────────────────
-    /// Hard cap on tool calls per `run()` (was `ITSY_MAX_TOOL_CALLS`).
-    pub max_tool_calls: u32,
-    /// Hard cap on tool calls per single turn (was
-    /// `ITSY_MAX_TOOL_CALLS_PER_TURN`).
+    /// Hard cap on tool calls per single turn.
     pub max_tool_calls_per_turn: u32,
     /// Per-request chat-completion timeout in ms (was `ITSY_TIMEOUT_MS`).
     pub request_timeout_ms: u64,
@@ -76,7 +73,6 @@ pub struct Settings {
     pub thinking_budget: u32,
 
     // ── features (mirrors config.features) ───────────────────────
-    pub plan: bool,
     pub snapshot: bool,
     pub snapshot_auto_rollback: bool,
     pub write_guard: bool,
@@ -89,8 +85,6 @@ pub struct Settings {
     pub error_diagnosis: bool,
     pub validate_edits: bool,
     pub context_retrieval: bool,
-    pub reviewer: bool,
-    pub chain: bool,
     pub contract: bool,
 
     // ── tui ──────────────────────────────────────────────────────
@@ -170,7 +164,6 @@ impl Settings {
             base_url: "http://localhost:1234/v1".into(),
             model_strong: None,
 
-            max_tool_calls: 50,
             max_tool_calls_per_turn: 250,
             request_timeout_ms: 120_000,
             bash_timeout: 30,
@@ -182,7 +175,6 @@ impl Settings {
             max_output_tokens: 0,
             thinking_budget: 0,
 
-            plan: true,
             snapshot: true,
             snapshot_auto_rollback: true,
             write_guard: true,
@@ -195,8 +187,6 @@ impl Settings {
             error_diagnosis: true,
             validate_edits: false,
             context_retrieval: true,
-            reviewer: false,
-            chain: false,
             contract: true,
 
             auto_approve: false,
@@ -257,7 +247,6 @@ impl Settings {
         s.auto_approve = cfg.tui.auto_approve;
         s.tui_classic = cfg.tui.classic;
         s.auto_commit = cfg.git.auto_commit;
-        s.plan = cfg.features.plan;
         s.snapshot = cfg.features.snapshot;
         s.snapshot_auto_rollback = cfg.features.snapshot_auto_rollback;
         s.write_guard = cfg.features.write_guard;
@@ -270,8 +259,6 @@ impl Settings {
         s.error_diagnosis = cfg.features.error_diagnosis;
         s.validate_edits = cfg.features.validate_edits;
         s.context_retrieval = cfg.features.context_retrieval;
-        s.reviewer = cfg.features.reviewer;
-        s.chain = cfg.features.chain;
         s.contract = cfg.features.contract;
         s
     }
@@ -311,7 +298,6 @@ impl Settings {
             "debug_sigtstp" => self.debug_sigtstp = parse_bool(value)?,
 
             // tool budgets
-            "max_tool_calls" => self.max_tool_calls = parse_u32(value)?,
             "max_tool_calls_per_turn" => self.max_tool_calls_per_turn = parse_u32(value)?,
             "request_timeout_ms" => self.request_timeout_ms = parse_u64(value)?,
             "bash_timeout" => self.bash_timeout = parse_u32(value)?,
@@ -325,7 +311,6 @@ impl Settings {
             "thinking_budget" => self.thinking_budget = parse_u32(value)?,
 
             // features
-            "features.plan" | "plan" => self.plan = parse_bool(value)?,
             "features.snapshot" | "snapshot" => self.snapshot = parse_bool(value)?,
             "features.snapshot_auto_rollback" => self.snapshot_auto_rollback = parse_bool(value)?,
             "features.write_guard" => self.write_guard = parse_bool(value)?,
@@ -338,8 +323,6 @@ impl Settings {
             "features.error_diagnosis" => self.error_diagnosis = parse_bool(value)?,
             "features.validate_edits" => self.validate_edits = parse_bool(value)?,
             "features.context_retrieval" => self.context_retrieval = parse_bool(value)?,
-            "features.reviewer" => self.reviewer = parse_bool(value)?,
-            "features.chain" => self.chain = parse_bool(value)?,
             "features.contract" | "contract" => self.contract = parse_bool(value)?,
 
             // tui
@@ -458,7 +441,6 @@ pub fn update<F: FnOnce(&mut Settings)>(f: F) {
 pub fn from_full_config(cfg: &Config) -> Settings {
     let mut s = Settings::from_config(cfg);
     // limits
-    s.max_tool_calls = cfg.limits.max_tool_calls;
     s.max_tool_calls_per_turn = cfg.limits.max_tool_calls_per_turn;
     s.max_output_tokens = cfg.limits.max_output_tokens;
     s.request_timeout_ms = cfg.limits.request_timeout_ms;

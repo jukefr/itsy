@@ -20,7 +20,6 @@ use tokio::io::{AsyncBufReadExt, BufReader as TokioBufReader};
 use itsy::commands::{handle_command, CommandCtx, CommandResult};
 use itsy::config::{check_endpoint, load_config, load_dotenv, Config, Flags};
 use itsy::cognition_adapter::classify_task_compiled;
-use itsy::escalation::{EscalationEngine, EscalationOptions};
 use itsy::eval_runner::{format_results, known_suite, EvalRunner};
 use itsy::executor::{execute_tool, ExecCtx};
 use itsy::features_adapter;
@@ -40,7 +39,6 @@ use itsy::plugins::loader::PluginLoader;
 use itsy::plugins::skills::SkillManager;
 use itsy::session::git_context::{get_git_diff_context, should_inject_git_context};
 use itsy::session::persistence::SessionStore;
-use itsy::session::plan_tracker::{should_plan, PlanTracker};
 use itsy::session::references::{format_references_for_prompt, resolve_references};
 use itsy::session::tokens::TokenTracker;
 use itsy::token_monitor::{CallMetadata, TokenMonitor};
@@ -121,9 +119,6 @@ struct Cli {
     /// Auto-approve every tool call (skip the y/n prompt).
     #[arg(long)]
     auto_approve: bool,
-    /// Hard cap on tool calls per `run()`. Default 50.
-    #[arg(long, value_name = "N")]
-    max_tool_calls: Option<u32>,
     /// Hard cap on tool calls in a single turn. Default 250.
     #[arg(long, value_name = "N")]
     max_tool_calls_per_turn: Option<u32>,
@@ -162,6 +157,13 @@ struct Cli {
     #[arg(long = "set", value_name = "KEY=VALUE")]
     set_overrides: Vec<String>,
 
+    /// Model name for second-opinion calls (evaluator, future analysis). Defaults to main model.
+    #[arg(long, value_name = "MODEL")]
+    second_opinion_model: Option<String>,
+    /// Endpoint URL for second-opinion calls. Defaults to main endpoint.
+    #[arg(long, value_name = "URL")]
+    second_opinion_endpoint: Option<String>,
+
     /// Positional prompt (anything not consumed by --prompt/-p)
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     positional: Vec<String>,
@@ -177,9 +179,7 @@ struct AgentSession {
     memory: Arc<Mutex<MemoryStore>>,
     tokens: Arc<Mutex<TokenTracker>>,
     token_monitor: Arc<Mutex<TokenMonitor>>,
-    escalation: Arc<Mutex<EscalationEngine>>,
     sessions: Arc<Mutex<SessionStore>>,
-    plan_tracker: Arc<Mutex<PlanTracker>>,
     scorer: Arc<Mutex<ToolScorer>>,
     verification: Arc<Mutex<VerificationHistory>>,
     early_stop: Arc<Mutex<EarlyStopDetector>>,
@@ -574,11 +574,6 @@ fn get_knowledge_context(messages: &[Value], config: &Config) -> String {
     loader.format_for_prompt(query, &SelectOptions { max_tokens: Some(max_tokens) })
 }
 
-/// JS `getActivePlanContext`.
-fn get_active_plan_context(plan: &PlanTracker) -> String {
-    plan.format_for_prompt()
-}
-
 /// JS `getTestRunnerContext`.
 fn get_test_runner_context(cwd: &Path) -> String {
     test_runner::format_for_prompt(cwd)
@@ -817,14 +812,6 @@ fn build_full_system_prompt(
         }
     }
 
-    // Active plan re-anchor.
-    let plan = session.plan_tracker.lock();
-    let plan_ctx = get_active_plan_context(&plan);
-    drop(plan);
-    if !plan_ctx.is_empty() {
-        prompt.push_str(&plan_ctx);
-    }
-
     // Test runner hint.
     let tr = get_test_runner_context(&session.cwd);
     if !tr.is_empty() {
@@ -1030,28 +1017,6 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
         }
     }
 
-    // 1.5) Optional planner→executor chain. Runs a separate LLM call
-    // up front to break the task into steps, then injects the plan as a
-    // system message before the main agent loop. Off by default
-    // (`features.chain`); when on, only fires once per turn at the top.
-    let planner_injection: Option<String> = if session.config.lock().features.chain {
-        let cfg = session.config.lock().clone();
-        let plan = itsy::model::chain::call_planner(&user_msg, &cfg).await;
-        let injection = itsy::model::chain::format_planner_injection(plan.as_deref());
-        if injection.is_empty() {
-            None
-        } else {
-            session.history.lock().push(json!({
-                "role": "system",
-                "content": injection.clone(),
-            }));
-            Some(injection)
-        }
-    } else {
-        None
-    };
-    let _ = planner_injection;
-
     // 2) Resolve `@file` references + auto-inject git diff when applicable.
     let refs = resolve_references(&user_msg, &session.cwd);
     let mut augmented = if refs.is_empty() {
@@ -1098,25 +1063,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
         .lock()
         .push(json!({"role": "user", "content": augmented.clone()}));
 
-    // 3) Plan-then-execute: ask the model for a numbered plan up front and
-    // remove the one-shot instruction once the plan is captured.
-    let mut plan_instruction_idx: i32 = -1;
-    {
-        let mut plan = session.plan_tracker.lock();
-        plan.reset();
-        if should_plan(&user_msg) {
-            plan.activate();
-            drop(plan);
-            let mut hist = session.history.lock();
-            plan_instruction_idx = hist.len() as i32;
-            hist.push(json!({
-                "role": "system",
-                "content": PlanTracker::plan_request_instruction(),
-            }));
-        }
-    }
-
-    // 4) Task classification (regex now; compiled LLM-based when available).
+    // 3) Task classification (regex now; compiled LLM-based when available).
     //    `classify_task` defaults to "coding" for anything it doesn't match,
     //    which is wrong for conversational messages. We override below if
     //    the tool router also routes the message to `respond`.
@@ -1360,44 +1307,6 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
 
             // Push the assistant message verbatim.
             session.history.lock().push(msg.clone());
-
-            // Plan extraction from textual content. Try the LLM extractor
-            // first when the plan toggle is on; fall back to the regex
-            // parser inside ingest_response.
-            if let Some(content) = msg.get("content").and_then(|c| c.as_str()) {
-                let needs = { session.plan_tracker.lock().needs_plan() };
-                let llm_steps = if needs && session.config.lock().features.plan {
-                    features_adapter::extract_plan_steps(content).await
-                } else {
-                    None
-                };
-                let mut plan = session.plan_tracker.lock();
-                let ingested = if let Some(steps) = llm_steps {
-                    plan.set_plan(steps);
-                    true
-                } else {
-                    plan.needs_plan() && plan.ingest_response(content)
-                };
-                if ingested {
-                    drop(plan);
-                    // Strip the one-shot plan request instruction we injected.
-                    if plan_instruction_idx >= 0 {
-                        let mut hist = session.history.lock();
-                        let idx = plan_instruction_idx as usize;
-                        if idx < hist.len() {
-                            if hist[idx]
-                                .get("content")
-                                .and_then(|c| c.as_str())
-                                .map(|s| s.contains("numbered plan"))
-                                .unwrap_or(false)
-                            {
-                                hist.remove(idx);
-                            }
-                        }
-                        plan_instruction_idx = -1;
-                    }
-                }
-            }
 
             // Quality monitor: catch empty tool names and hallucinated tool names
             // before executing. Injects a targeted correction and retries.
@@ -1925,10 +1834,12 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                             // one LLM call per accepted edit when enabled.
                             if session.config.lock().features.validate_edits {
                                 if let Ok(content) = std::fs::read_to_string(&file_path) {
-                                    let result = features_adapter::validate_edit_compiled(
+                                    let cfg_snapshot = session.config.lock().clone();
+                                    let result = features_adapter::validate_edit_with_config(
                                         &file_path,
                                         &content,
                                         &user_msg,
+                                        &cfg_snapshot,
                                     )
                                     .await;
                                     if !result.ok && !result.issues.is_empty() {
@@ -2007,74 +1918,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                             };
                             println!("  \x1b[33m◇ DECOMPOSE: {reason}\x1b[0m");
                             println!("  \x1b[90m  Strategy: {kind}\x1b[0m");
-                            // Mirrors upstream __decompose:${filePath} counter:
-                            // only escalate to the stronger model on the 2nd decompose
-                            // attempt for this file. The first attempt uses the
-                            // local model with a new strategy.
-                            let decompose_key = format!("__decompose:{file_path}");
-                            let decompose_n = improvement_attempts
-                                .entry(decompose_key.clone())
-                                .and_modify(|n| *n += 1)
-                                .or_insert(1);
-                            let should_escalate = *decompose_n >= 2
-                                && session.escalation.lock().can_escalate();
-                            if should_escalate {
-                                println!(
-                                    "  \x1b[35m⬆ Escalating to {} (decompose attempt {})\x1b[0m",
-                                    session.escalation.lock().status(),
-                                    decompose_n,
-                                );
-                                improvement_attempts.insert(file_path.clone(), 0);
-                                improvement_attempts.insert(decompose_key, 0);
-                                let recent = {
-                                    let h = session.history.lock();
-                                    h.iter()
-                                        .rev()
-                                        .take(6)
-                                        .cloned()
-                                        .collect::<Vec<_>>()
-                                        .into_iter()
-                                        .rev()
-                                        .collect::<Vec<_>>()
-                                };
-                                let prompt = format!(
-                                    "Fix these errors in {file_path}. The code:\n```\n{}\n```\n\nErrors:\n{}\n\nPrevious attempts failed. Fix it correctly.",
-                                    file_content.chars().take(12000).collect::<String>(),
-                                    errors.join("\n"),
-                                );
-                                let mut messages: Vec<Value> = recent;
-                                messages.push(json!({"role": "user", "content": prompt}));
-                                let tools_snapshot = {
-                                    let cfg = session.config.lock();
-                                    let plugins = session.plugins.lock();
-                                    get_all_tools(
-                                        &cfg,
-                                        None,
-                                        &ToolDeps {
-                                            plugin_tools: plugins.get_tools(),
-                                            mcp_tools: Vec::new(),
-                                        },
-                                    )
-                                };
-                                let mut esc = session.escalation.lock();
-                                match esc.escalate(messages, tools_snapshot, "").await {
-                                    Ok(Some(resp)) if resp.get("error").is_none() => {
-                                        session.history.lock().push(resp);
-                                    }
-                                    _ => {
-                                        eprintln!("  \x1b[31m✗ Escalation failed\x1b[0m");
-                                        session.history.lock().push(json!({
-                                            "role": "user",
-                                            "content": "[ESCALATION FAILED] Even the stronger model couldn't fix this. Deliver the best version you have and explain what's still broken.",
-                                        }));
-                                    }
-                                }
-                            } else {
-                                // First decompose for this file — try local model with
-                                // a new strategy. Matches JS: only reset the file counter,
-                                // not the decompose counter.
-                                improvement_attempts.insert(file_path.clone(), 0);
-                            }
+                            improvement_attempts.insert(file_path.clone(), 0);
                             session.history.lock().push(json!({
                                 "role": "user",
                                 "content": format!("[DECOMPOSE] After {MAX_IMPROVE_ITERATIONS} failed fix attempts, changing strategy.\n\n{instruction}\n\nFile length: {lines} lines."),
@@ -2122,108 +1966,41 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                             "content": format!("[AUTO-FIX] The command FAILED (attempt {attempt_n}/2). Do NOT claim success. The error was:\n{err}\n\nRead the error, identify the bug, and fix it."),
                         }));
                     } else {
-                        // Mirrors upstream __decompose:bash counter:
-                        // only escalate on the 2nd decompose attempt.
-                        let decompose_bash_n = improvement_attempts
-                            .entry("__decompose:bash".into())
-                            .and_modify(|n| *n += 1)
-                            .or_insert(1);
-                        let should_escalate_bash = *decompose_bash_n >= 2
-                            && session.escalation.lock().can_escalate();
-                        if should_escalate_bash {
-                            println!(
-                                "  \x1b[35m⬆ Escalating to {} (bash decompose attempt {})\x1b[0m",
-                                session.escalation.lock().status(),
-                                decompose_bash_n,
-                            );
-                            improvement_attempts.insert("__bash".into(), 0);
-                            improvement_attempts.insert("__decompose:bash".into(), 0);
-                            let recent = {
-                                let h = session.history.lock();
-                                h.iter()
-                                    .rev()
-                                    .take(8)
-                                    .cloned()
-                                    .collect::<Vec<_>>()
-                                    .into_iter()
-                                    .rev()
-                                    .collect::<Vec<_>>()
-                            };
-                            let bash_err = result
+                        let strategy = features_adapter::decompose_task(
+                            &user_msg,
+                            result
                                 .get("result")
                                 .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .chars()
-                                .take(1500)
-                                .collect::<String>();
-                            let mut messages: Vec<Value> = recent;
-                            messages.push(json!({
-                                "role": "user",
-                                "content": format!("The command keeps failing. Fix the underlying issue. Error: {bash_err}"),
-                            }));
-                            let tools_snapshot = {
-                                let cfg = session.config.lock();
-                                let plugins = session.plugins.lock();
-                                get_all_tools(
-                                    &cfg,
-                                    None,
-                                    &ToolDeps {
-                                        plugin_tools: plugins.get_tools(),
-                                        mcp_tools: Vec::new(),
-                                    },
-                                )
-                            };
-                            let mut esc = session.escalation.lock();
-                            match esc.escalate(messages, tools_snapshot, "").await {
-                                Ok(Some(resp)) if resp.get("error").is_none() => {
-                                    session.history.lock().push(resp);
-                                }
-                                _ => {
-                                    eprintln!("  \x1b[31m✗ Escalation failed\x1b[0m");
-                                    session.history.lock().push(json!({
-                                        "role": "user",
-                                        "content": "[ESCALATION FAILED] Move on. Explain what you tried and what's still broken.",
-                                    }));
-                                }
-                            }
-                        } else {
-                            // First bash decompose — try local model with new strategy.
-                            let strategy = features_adapter::decompose_task(
-                                &user_msg,
-                                result
+                                .unwrap_or(""),
+                            args.get("command")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or(""),
+                        )
+                        .await
+                        .map(|s| (s.strategy, s.reason, s.instruction))
+                        .unwrap_or_else(|| {
+                            let g = pick_decompose_strategy(
+                                "",
+                                &[result
                                     .get("result")
                                     .and_then(|v| v.as_str())
-                                    .unwrap_or(""),
-                                args.get("command")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or(""),
-                            )
-                            .await
-                            .map(|s| (s.strategy, s.reason, s.instruction))
-                            .unwrap_or_else(|| {
-                                let g = pick_decompose_strategy(
-                                    "",
-                                    &[result
-                                        .get("result")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("")
-                                        .chars()
-                                        .take(300)
-                                        .collect::<String>()],
-                                    args.get("command").and_then(|v| v.as_str()).unwrap_or(""),
-                                );
-                                (g.kind, g.reason, g.instruction)
-                            });
-                            println!(
-                                "  \x1b[33m◇ DECOMPOSE bash: {}\x1b[0m",
-                                strategy.1
+                                    .unwrap_or("")
+                                    .chars()
+                                    .take(300)
+                                    .collect::<String>()],
+                                args.get("command").and_then(|v| v.as_str()).unwrap_or(""),
                             );
-                            session.history.lock().push(json!({
-                                "role": "user",
-                                "content": format!("[DECOMPOSE] The command has failed 3 times. STOP retrying the same approach.\n\n{}", strategy.2),
-                            }));
-                            improvement_attempts.insert("__bash".into(), 0);
-                        }
+                            (g.kind, g.reason, g.instruction)
+                        });
+                        println!(
+                            "  \x1b[33m◇ DECOMPOSE bash: {}\x1b[0m",
+                            strategy.1
+                        );
+                        session.history.lock().push(json!({
+                            "role": "user",
+                            "content": format!("[DECOMPOSE] The command has failed 3 times. STOP retrying the same approach.\n\n{}", strategy.2),
+                        }));
+                        improvement_attempts.insert("__bash".into(), 0);
                     }
                 } else if (name == "bash" || name == "run")
                     && result.get("error").is_none()
@@ -2480,54 +2257,11 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                 .lock()
                 .push(json!({"role": "assistant", "content": content}));
 
-            // Detect "step N done" markers to advance the plan tracker.
-            let mut plan = session.plan_tracker.lock();
-            for cap in regex::Regex::new(r"(?i)\bstep\s*(\d{1,2})[\s:.\-]+(?:done|complete|completed|finished|✓)\b")
-                .unwrap()
-                .captures_iter(content)
-            {
-                if let Some(num) = cap.get(1).and_then(|m| m.as_str().parse::<usize>().ok())
-                {
-                    plan.complete_step(num.saturating_sub(1));
-                }
-            }
-            drop(plan);
-
             let fs_assist = session.fullscreen.lock().clone();
             if let Some(fs) = &fs_assist {
                 fs.add_chat(itsy::fullscreen::ChatRole::Assistant, content.clone());
             } else {
                 println!("{}", tui::render_markdown(content));
-            }
-            // Post-hoc reviewer — costs one extra LLM call per turn so
-            // it's off by default. When enabled, surfaces an "LGTM" or
-            // a short list of issues. Only fires when files were edited
-            // this turn and the response is non-trivial (> 50 chars) —
-            // mirrors JS: `_editedFilesThisTurn.length > 0 && message.content.length > 50`.
-            if session.config.lock().features.reviewer
-                && !edited_files.is_empty()
-                && content.len() > 50
-            {
-                let cfg = session.config.lock().clone();
-                let review = itsy::model::reviewer::review_response(
-                    &user_msg,
-                    content,
-                    &edited_files,
-                    &cfg,
-                )
-                .await;
-                let notice = itsy::model::reviewer::format_reviewer_injection(review.as_ref());
-                if !notice.is_empty() {
-                    if let Some(fs) = &fs_assist {
-                        fs.add_chat(itsy::fullscreen::ChatRole::System, notice.clone());
-                    } else {
-                        println!("{}", tui::paint("\x1b[33m", &notice));
-                    }
-                    session.history.lock().push(json!({
-                        "role": "user",
-                        "content": notice,
-                    }));
-                }
             }
         } else if tool_calls_this_turn == 0 {
             // No content + no tool calls + nothing tried — try streaming.
@@ -2791,7 +2525,14 @@ async fn run_evaluator_phase(
     const MAX_TURNS: u32 = 10;
 
     let cwd = session.cwd.to_string_lossy().to_string();
-    let config = session.config.lock().clone();
+    let mut config = session.config.lock().clone();
+    // Use second-opinion model/endpoint if configured.
+    if let Some(m) = config.second_opinion.model.clone() {
+        config.model.name = m;
+    }
+    if let Some(e) = config.second_opinion.endpoint.clone() {
+        config.model.base_url = e;
+    }
 
     let system_prompt = format!(
         "You are an adversarial evaluator. A code generator claimed to have completed the \
@@ -3228,25 +2969,38 @@ async fn run_eval(config: &Config, suite_name: &str) -> i32 {
 
 // ── Boot helpers ─────────────────────────────────────────────────────────────
 
+/// Probe the llama-server /props endpoint for the configured context window.
+/// Returns `None` when the server doesn't expose /props (non-llama backends).
+async fn probe_context_window(base_url: &str) -> Option<u32> {
+    // Strip /v1 suffix — /props lives at the root of the llama.cpp HTTP server.
+    let root = base_url
+        .trim_end_matches('/')
+        .strip_suffix("/v1")
+        .unwrap_or(base_url.trim_end_matches('/'));
+    let url = format!("{root}/props");
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .ok()?;
+    let resp = client.get(&url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let data: serde_json::Value = resp.json().await.ok()?;
+    data.pointer("/default_generation_settings/n_ctx")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32)
+}
+
 fn build_session(config: Config, flags: Flags, cwd: PathBuf, mcp_bridge: Arc<McpBridge>) -> AgentSession {
     let memory = Arc::new(Mutex::new(MemoryStore::new(&cwd)));
     let history = Arc::new(Mutex::new(Vec::new()));
     let tokens = Arc::new(Mutex::new(TokenTracker::new()));
     let token_monitor = Arc::new(Mutex::new(TokenMonitor::new()));
-    let escalation_opts = EscalationOptions {
-        provider: config.escalation.provider.clone(),
-        api_key: config.escalation.api_key.clone(),
-        model: config.escalation.model.clone(),
-        max_per_session: config.escalation.max_per_session,
-        confirm: config.escalation.confirm,
-        base_url: None,
-    };
-    let escalation = Arc::new(Mutex::new(EscalationEngine::new(escalation_opts)));
     let mut session_store = SessionStore::new(cwd.clone());
     session_store.create();
     let sessions = Arc::new(Mutex::new(session_store));
 
-    let plan_tracker = Arc::new(Mutex::new(PlanTracker::new()));
     let scorer = Arc::new(Mutex::new(ToolScorer::new()));
     let verification = Arc::new(Mutex::new(VerificationHistory::default()));
     let early_stop = Arc::new(Mutex::new(EarlyStopDetector::new()));
@@ -3269,9 +3023,7 @@ fn build_session(config: Config, flags: Flags, cwd: PathBuf, mcp_bridge: Arc<Mcp
         memory,
         tokens,
         token_monitor,
-        escalation,
         sessions,
-        plan_tracker,
         scorer,
         verification,
         early_stop,
@@ -3296,7 +3048,6 @@ fn make_cmd_ctx(session: &AgentSession) -> CommandCtx {
         history: session.history.clone(),
         memory: session.memory.clone(),
         tokens: session.tokens.clone(),
-        escalation: session.escalation.clone(),
         cwd: Some(session.cwd.clone()),
         token_monitor: Some(session.token_monitor.clone()),
         sessions: Some(session.sessions.clone()),
@@ -3306,7 +3057,6 @@ fn make_cmd_ctx(session: &AgentSession) -> CommandCtx {
         trace: Some(session.trace.clone()),
         skills: Some(session.skills.clone()),
         plugins: Some(session.plugins.clone()),
-        plan: Some(session.plan_tracker.clone()),
         lsp: None,
     }
 }
@@ -3497,6 +3247,13 @@ async fn main() -> Result<()> {
     };
     let mut config = load_config(&flags);
 
+    if let Some(m) = cli.second_opinion_model.clone() {
+        config.second_opinion.model = Some(m);
+    }
+    if let Some(e) = cli.second_opinion_endpoint.clone() {
+        config.second_opinion.endpoint = Some(e);
+    }
+
     if config.model.name.is_empty() {
         eprintln!("\n  ✗ No model configured.");
         eprintln!("  Edit {}", itsy::paths::config_file().display());
@@ -3512,9 +3269,6 @@ async fn main() -> Result<()> {
         // Named CLI flags.
         if cli.auto_approve {
             s.auto_approve = true;
-        }
-        if let Some(v) = cli.max_tool_calls {
-            s.max_tool_calls = v;
         }
         if let Some(v) = cli.max_tool_calls_per_turn {
             s.max_tool_calls_per_turn = v;
@@ -3563,7 +3317,6 @@ async fn main() -> Result<()> {
         // Mirror CLI overrides back into `config` so downstream code that
         // still threads `&Config` (rather than calling settings::get())
         // sees the same values during the deprecation window.
-        config.limits.max_tool_calls = s.max_tool_calls;
         config.limits.max_tool_calls_per_turn = s.max_tool_calls_per_turn;
         config.limits.max_output_tokens = s.max_output_tokens;
         config.limits.request_timeout_ms = s.request_timeout_ms;
@@ -3589,6 +3342,12 @@ async fn main() -> Result<()> {
     }
 
     let _reachable = check_endpoint(&mut config).await;
+
+    // Auto-detect context window from llama-server /props endpoint.
+    // Falls back to the configured value when the server doesn't expose /props.
+    if let Some(n_ctx) = probe_context_window(&config.model.base_url).await {
+        config.context.detected_window = n_ctx;
+    }
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 

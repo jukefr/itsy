@@ -14,7 +14,6 @@ use parking_lot::Mutex;
 use serde_json::{json, Value};
 
 use crate::config::Config;
-use crate::escalation::EscalationEngine;
 use crate::eval_runner::{format_results, known_suite, EvalRunner};
 use crate::lsp::LspClient;
 use crate::memory::MemoryStore;
@@ -24,7 +23,6 @@ use crate::plugins::skills::{SkillManager, Trigger};
 use crate::session::git_context::get_git_diff_context_full;
 use crate::session::multi::MultiSession;
 use crate::session::persistence::SessionStore;
-use crate::session::plan_tracker::PlanTracker;
 use crate::session::share::{export, export_to_file, export_to_gist, ShareFormat};
 use crate::session::snapshot::SnapshotManager;
 use crate::session::tokens::TokenTracker;
@@ -39,7 +37,6 @@ pub struct CommandCtx {
     pub history: Arc<Mutex<Vec<Value>>>,
     pub memory: Arc<Mutex<MemoryStore>>,
     pub tokens: Arc<Mutex<TokenTracker>>,
-    pub escalation: Arc<Mutex<EscalationEngine>>,
 
     pub cwd: Option<PathBuf>,
     pub token_monitor: Option<Arc<Mutex<TokenMonitor>>>,
@@ -50,7 +47,6 @@ pub struct CommandCtx {
     pub trace: Option<Arc<Mutex<TraceRecorder>>>,
     pub skills: Option<Arc<Mutex<SkillManager>>>,
     pub plugins: Option<Arc<Mutex<PluginLoader>>>,
-    pub plan: Option<Arc<Mutex<PlanTracker>>>,
     pub lsp: Option<Arc<LspClient>>,
 }
 
@@ -90,7 +86,6 @@ pub async fn handle_command(cmd: &str, ctx: &CommandCtx) -> Result<CommandResult
         "/budget" => Ok(CommandResult::Print(cmd_budget(ctx))),
         "/memory" => Ok(CommandResult::Print(cmd_memory(ctx, &rest))),
         "/compact" => Ok(CommandResult::Print(cmd_compact(ctx))),
-        "/escalation" => Ok(CommandResult::Print(cmd_escalation(ctx, &rest))),
         "/profile" => Ok(CommandResult::Print(cmd_profile(ctx))),
         "/trace" => Ok(CommandResult::Print(cmd_trace(ctx, &rest))),
         "/eval" => Ok(CommandResult::Print(cmd_eval(ctx, &rest).await)),
@@ -104,7 +99,6 @@ pub async fn handle_command(cmd: &str, ctx: &CommandCtx) -> Result<CommandResult
         "/multi" => Ok(CommandResult::Print(cmd_session(ctx, &rest))),
         "/skill" | "/skills" => Ok(CommandResult::Print(cmd_skill(ctx, &rest))),
         "/plugin" | "/plugins" => Ok(CommandResult::Print(cmd_plugin(ctx, &rest))),
-        "/plan" => Ok(CommandResult::Print(cmd_plan(ctx))),
         "/lsp" => Ok(CommandResult::Print(cmd_lsp(ctx, &rest).await)),
         "/web" => Ok(CommandResult::Print(cmd_web(&rest))),
         "/auto-approve" => Ok(CommandResult::Print(cmd_auto_approve(&rest))),
@@ -342,36 +336,6 @@ fn cmd_compact(ctx: &CommandCtx) -> String {
             "  Short history ({} msgs), nothing to compact.\n\n",
             hist.len()
         )
-    }
-}
-
-fn cmd_escalation(ctx: &CommandCtx, rest: &[&str]) -> String {
-    match rest.first().copied() {
-        Some("on") | Some("enable") => {
-            let mut esc = ctx.escalation.lock();
-            esc.enabled = true;
-            format!("  ✓ Escalation enabled. {}\n\n", esc.status())
-        }
-        Some("off") | Some("disable") => {
-            let mut esc = ctx.escalation.lock();
-            esc.enabled = false;
-            "  ✓ Escalation disabled.\n\n".into()
-        }
-        _ => {
-            let esc = ctx.escalation.lock();
-            if !esc.enabled {
-                let mut out = String::from("  Escalation: disabled\n");
-                out.push_str("  Enable: set ANTHROPIC_API_KEY or OPENAI_API_KEY (or /escalation on)\n");
-                out.push_str("  Or add [escalation] section to itsy.toml\n\n");
-                out
-            } else {
-                format!(
-                    "  ⬆ Escalation: enabled\n  {}\n  Confirm: {}\n\n",
-                    esc.status(),
-                    if esc.confirm { "yes (will ask)" } else { "no (auto)" }
-                )
-            }
-        }
     }
 }
 
@@ -1020,19 +984,6 @@ fn cmd_plugin(ctx: &CommandCtx, rest: &[&str]) -> String {
     }
 }
 
-fn cmd_plan(ctx: &CommandCtx) -> String {
-    let plan = match &ctx.plan {
-        Some(p) => p.clone(),
-        None => return "  No active plan.\n\n".into(),
-    };
-    let body = plan.lock().pretty();
-    if body.is_empty() {
-        "  No active plan.\n\n".into()
-    } else {
-        format!("  Plan:\n{}\n\n", indent(&body, "    "))
-    }
-}
-
 async fn cmd_lsp(ctx: &CommandCtx, rest: &[&str]) -> String {
     let lsp = match &ctx.lsp {
         Some(l) => l.clone(),
@@ -1135,10 +1086,6 @@ fn cmd_rollback(ctx: &CommandCtx, rest: &[&str]) -> String {
     out
 }
 
-fn indent(s: &str, prefix: &str) -> String {
-    s.lines().map(|l| format!("{prefix}{l}")).collect::<Vec<_>>().join("\n")
-}
-
 fn help_text() -> String {
     "
   Commands
@@ -1152,7 +1099,6 @@ fn help_text() -> String {
   /memory remember <type> <title> <content>
   /memory forget <id>
   /compact             Trim conversation history
-  /escalation [on|off] Show / toggle cloud-model fallback
   /profile             Show resolved model profile
   /trace [list|start|stop|replay <id>|test <id>]
   /eval <suite>        Run an evaluation suite (offline: classify_accuracy)
@@ -1165,7 +1111,6 @@ fn help_text() -> String {
   /session [list|new <task>|switch <id>|kill <id>]
   /skill / /skills [list|enable <name>|disable <name>|add <name>|remove <name>]
   /plugin / /plugins [list]
-  /plan                Show active plan
   /lsp [start|stop|status]
   /web [on|off]        Toggle ITSY_WEB_BROWSE
   /auto-approve [on|off]   Toggle ITSY_AUTO_APPROVE

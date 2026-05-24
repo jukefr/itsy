@@ -103,6 +103,9 @@ class ItsyAgent(BaseInstalledAgent):
         # construction. Every other knob is a CLI flag.
         env: dict[str, str] = {"ITSY_HOME": "/tmp/itsy-home"}
 
+        evaluator_model = os.environ.get("ITSY_SECOND_OPINION_MODEL", "")
+        evaluator_endpoint = os.environ.get("ITSY_SECOND_OPINION_ENDPOINT", "")
+
         escaped = shlex.quote(instruction)
         # CLI flags supplant the old ITSY_* env-var bridge. Order matters:
         # named flags first, then --set key=value for the long tail.
@@ -121,12 +124,14 @@ class ItsyAgent(BaseInstalledAgent):
             # thinking unless max_output_tokens > thinking_budget.
             "--thinking-budget=1024",
             # Safeguards on by default — cheap and catch patch/bash/
-            # write_guard pitfalls. Disable extras that have no upstream
-            # equivalent (reviewer, chain, clarifier, contract).
-            "--set=features.reviewer=false",
-            "--set=features.chain=false",
+            # write_guard pitfalls. Disable clarifier (bench tasks have
+            # specific prompts, not vague user input).
             "--set=features.clarifier=false",
         ]
+        if evaluator_model:
+            flags.append(f"--second-opinion-model={shlex.quote(evaluator_model)}")
+        if evaluator_endpoint:
+            flags.append(f"--second-opinion-endpoint={shlex.quote(evaluator_endpoint)}")
         cmd = (
             f"mkdir -p /tmp/itsy-home /logs/agent && "
             f"{self._BINARY_TARGET} {' '.join(flags)} -p {escaped} "

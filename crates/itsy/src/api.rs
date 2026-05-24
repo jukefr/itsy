@@ -42,8 +42,6 @@ use crate::Config;
 /// runtime behaviour without rebuilding the whole config tree.
 #[derive(Debug, Clone)]
 pub struct RunOptions {
-    /// Hard cap on the number of tool calls the agent may make per `run`.
-    pub max_tool_calls: u32,
     /// Per-request timeout for the chat completion call.
     pub timeout: Duration,
     /// Optional whitelist of tool names. `None` = all tools allowed.
@@ -59,7 +57,6 @@ impl Default for RunOptions {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let s = crate::settings::get();
         Self {
-            max_tool_calls: s.max_tool_calls,
             timeout: Duration::from_millis(s.request_timeout_ms),
             tools: None,
             verbose: s.verbose,
@@ -181,7 +178,7 @@ impl ItsyApi {
         };
 
         let mut tool_call_count: u32 = 0;
-        'outer: while tool_call_count < self.options.max_tool_calls {
+        'outer: while tool_call_count < self.config.limits.max_tool_calls_per_turn {
             let mut tools = get_all_tools(&self.config, None, &ToolDeps::default());
             if let Some(whitelist) = &self.options.tools {
                 tools.retain(|t| {
@@ -231,7 +228,7 @@ impl ItsyApi {
             if let Some(calls) = tool_calls {
                 if !calls.is_empty() {
                     for tc in calls {
-                        if tool_call_count >= self.options.max_tool_calls {
+                        if tool_call_count >= self.config.limits.max_tool_calls_per_turn {
                             break 'outer;
                         }
                         tool_call_count += 1;

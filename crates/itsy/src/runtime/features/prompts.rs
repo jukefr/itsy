@@ -107,12 +107,6 @@ fn render(name: &str, input: &Value) -> Result<String> {
                 "Is this coding task request clear enough to act on, or is it too vague?\n\nA request is VAGUE if it lacks a specific target (e.g. \"fix it\", \"make it better\", \"do the thing\").\nA request is CLEAR if it specifies what to do, even if brief (e.g. \"run tests\", \"fix the null check in auth.js\", \"add logging\").\n\nReply with ONLY one word: \"clear\" or \"vague\"\n\nRequest: \"{msg}\""
             )
         }
-        "extract_plan" => {
-            let resp: String = s("response").chars().take(2000).collect();
-            format!(
-                "Extract the numbered steps from this text. The text may contain a plan, todo list, or step-by-step instructions in any format.\n\nRules:\n- Return ONLY a JSON array of strings, one per step\n- Maximum 8 steps, minimum 2\n- Each step should be a short action phrase (under 100 chars)\n- If no clear plan exists, return: []\n\nText:\n{resp}\n\nJSON array of steps:"
-            )
-        }
         "commit_message" => {
             let task: String = s("task").chars().take(200).collect();
             let files: String = s("changed_files").chars().take(300).collect();
@@ -152,7 +146,6 @@ fn ttl_for(name: &str) -> Duration {
         "summarize_file" => Duration::from_secs(3600),
         "intent_clarifier" => Duration::from_secs(1800),
         "commit_message" => Duration::from_secs(3600),
-        "extract_plan" => Duration::from_secs(600),
         "error_diagnosis" => Duration::from_secs(300),
         "decompose_task" => Duration::from_secs(300),
         "semantic_merge" => Duration::from_secs(60),
@@ -208,6 +201,45 @@ pub async fn call_prompt(name: &str, input: Value) -> Result<String> {
     Ok(value)
 }
 
+/// Like `call_prompt` but uses an explicit model name and base URL instead of
+/// reading from env vars. Used by validate_edits when a second-opinion model
+/// is configured.
+pub async fn call_prompt_with_endpoint(
+    name: &str,
+    input: Value,
+    model: &str,
+    base_url: &str,
+) -> Result<String> {
+    let rendered = render(name, &input)?;
+    let cache_key = derive_key(&format!("{name}:{model}:{base_url}"), &rendered);
+    if let Some(hit) = cache_get(&cache_key) {
+        return Ok(hit);
+    }
+    let client = reqwest::Client::builder().timeout(timeout_for(name)).build()?;
+    let body = json!({
+        "model": model,
+        "messages": [{"role": "user", "content": rendered}],
+        "temperature": 0.1,
+        "max_tokens": 512,
+    });
+    let url = format!("{base_url}/chat/completions");
+    let res = client.post(&url).headers(build_headers()).json(&body).send().await
+        .with_context(|| format!("POST {url}"))?;
+    if !res.status().is_success() {
+        let status = res.status().as_u16();
+        let text = res.text().await.unwrap_or_default();
+        return Err(anyhow!("API {status}: {}", &text[..text.len().min(200)]));
+    }
+    let data: Value = res.json().await?;
+    let content = data
+        .pointer("/choices/0/message/content")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("Empty response from model"))?
+        .to_string();
+    cache_put(cache_key, content.clone(), ttl_for(name));
+    Ok(content)
+}
+
 pub fn known_prompts() -> &'static [&'static str] {
     &[
         "repair_tool_call",
@@ -215,7 +247,6 @@ pub fn known_prompts() -> &'static [&'static str] {
         "validate_edit",
         "intent_clarifier",
         "commit_message",
-        "extract_plan",
         "error_diagnosis",
         "decompose_task",
         "semantic_merge",
