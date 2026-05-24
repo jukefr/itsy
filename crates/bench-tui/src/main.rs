@@ -426,8 +426,8 @@ fn load_rich_log(chats_dir: &Path) -> Vec<LogLine> {
                             .filter(|l| !l.is_empty())
                             .collect::<Vec<_>>()
                             .join(" ");
-                        let truncated = if preview.len() > 120 {
-                            format!("{}…", &preview[..120])
+                        let truncated = if preview.chars().count() > 120 {
+                            format!("{}…", preview.chars().take(120).collect::<String>())
                         } else {
                             preview
                         };

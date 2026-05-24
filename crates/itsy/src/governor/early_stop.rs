@@ -110,7 +110,7 @@ impl EarlyStopDetector {
         let fails = self.patch_failures.entry(file_path.to_string()).or_insert(0);
         *fails += 1;
         let fail_count = *fails;
-        if fail_count >= self.max_patch_failures || total_attempts >= 6 {
+        if fail_count >= self.max_patch_failures {
             self.patch_failures.remove(file_path);
             self.patch_attempts.remove(file_path);
             self.patch_blocked_files.insert(file_path.to_string());

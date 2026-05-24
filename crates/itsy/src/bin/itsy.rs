@@ -1524,7 +1524,28 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                         .to_string();
                     let old_str = args.get("old_str").and_then(|v| v.as_str()).unwrap_or("");
                     let new_str = args.get("new_str").and_then(|v| v.as_str()).unwrap_or("");
-                    let patch_success = result.get("error").is_none();
+                    // Read-tracker rejections ("call read_file first") are not
+                    // patch-content failures — don't count them toward the spiral limit.
+                    let err_str = result
+                        .get("error")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let is_read_guard = err_str.contains("call read_file");
+                    let is_not_found = err_str.contains("not found") && name == "patch";
+                    let patch_success = result.get("error").is_none() || is_read_guard;
+                    // When old_str isn't found, immediately tell the model to use
+                    // read_and_patch which atomically reads then patches.
+                    if is_not_found {
+                        session.history.lock().push(json!({
+                            "role": "user",
+                            "content": format!(
+                                "[SYSTEM] patch failed: old_str not found in {patch_file}. \
+                                 The file content has changed since you last read it. \
+                                 Use read_and_patch instead — it reads the current content \
+                                 first, then applies the patch atomically."
+                            )
+                        }));
+                    }
                     if let Some(signal) = session.early_stop.lock().record_patch_result(
                         &patch_file,
                         patch_success,
@@ -1932,7 +1953,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                         )
                     }));
                 }
-            } else if batch_had_contract_progress {
+            } else {
                 *session.readonly_turn_count.lock() = 0;
             }
 

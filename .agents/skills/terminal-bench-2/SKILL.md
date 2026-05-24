@@ -40,7 +40,11 @@ uv run --with harbor harbor run \
   --n-attempts 3 \
   --n-concurrent 1 \
   --jobs-dir $PWD/jobs \
-  --job-name fix-git-3x
+  --job-name fix-git-3x \
+  2>&1 &
+
+# Attach the live dashboard immediately after:
+cargo run --bin itsy-bench -- watch $PWD/jobs/fix-git-3x
 ```
 
 The five things you'll change between runs:
@@ -219,6 +223,8 @@ it's recorded in the run's git state.
 
 ## Launching
 
+Always launch in the background and immediately give the user the TUI watch command.
+
 ```bash
 ITSY_BINARY=/workspace/itsy/target/x86_64-unknown-linux-musl/release/itsy \
 PYTHONPATH=/workspace/itsy/.agents/skills/terminal-bench-2 \
@@ -229,17 +235,27 @@ uv run --with harbor harbor run \
   --n-attempts <N> --n-concurrent <C> \
   --jobs-dir /workspace/itsy/jobs \
   --job-name <job-name> \
-  -i <task1> -i <task2> ...
+  -i <task1> -i <task2> ... \
+  2>&1 &
 ```
+
+**Immediately after launching**, give the user this command to attach the live dashboard:
+
+```bash
+cargo run --bin itsy-bench -- watch /workspace/itsy/jobs/<job-name>
+```
+
+The TUI shows live agent logs, per-task pass/fail, reward as it lands, and
+token spend. It reads directly from the jobs directory — no side-effects,
+safe to run at any time.
 
 The `PYTHONPATH` line is mandatory because the skill directory contains a
 hyphen, which isn't a valid Python module name segment — pointing
 `PYTHONPATH` at the skill dir makes `itsy_agent` importable as a flat
 module.
 
-For long runs (10+ task-attempts) launch via `run_in_background: true` and
-arm a Monitor on `<jobs-dir>/<job-name>/result.json` so you can see
-progress without polling.
+For long runs arm a Monitor on `<jobs-dir>/<job-name>/result.json` so you
+get notified when the run completes.
 
 ## Tracking failures
 

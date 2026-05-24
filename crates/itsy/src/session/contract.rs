@@ -455,7 +455,8 @@ pub fn render_for_prompt(c: &Contract) -> String {
             if !ev.is_empty() && a.state != AssertionState::Pending {
                 // One indented line of evidence. Truncate so the prompt
                 // doesn't explode if the model dumped a verbose log.
-                let trim = if ev.len() > 140 { &ev[..140] } else { ev };
+                let trim: String = ev.chars().take(140).collect();
+                let trim = if ev.chars().count() > 140 { trim.as_str() } else { ev };
                 out.push_str(&format!("        evidence: {trim}\n"));
             }
         }
