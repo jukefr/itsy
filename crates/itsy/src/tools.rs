@@ -13,6 +13,23 @@ use crate::runtime::two_stage_router::{
 use crate::runtime::tool_router::{category_needs_tools, get_tools_for_category as compiled_for_category};
 use crate::Config;
 
+/// Typed tool metadata. Convert to JSON schema via [`into_tool_json`].
+pub struct ToolDef {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub parameters: Value,
+}
+
+impl ToolDef {
+    pub const fn new(name: &'static str, description: &'static str, parameters: Value) -> Self {
+        Self { name, description, parameters }
+    }
+
+    pub fn into_tool_json(self) -> Value {
+        json!({"type":"function","function":{"name":self.name,"description":self.description,"parameters":self.parameters}})
+    }
+}
+
 pub static TOOLS: Lazy<Vec<Value>> = Lazy::new(|| vec![
     func_tool("list_projects",
         "List all indexed projects/repos in the workspace with stats: file count, symbol count, lines of code, languages. Use this FIRST when asked about \"the projects\", \"the codebase\", or \"what's in this workspace\".",
@@ -235,4 +252,34 @@ pub fn get_all_tools(config: &Config, stage2_category: Option<&str>, deps: &Tool
         }
     }
     all_tools
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_tools_have_names() {
+        let tools = TOOLS.iter().chain(COMPOUND_TOOLS.iter());
+        for t in tools {
+            let name = t.pointer("/function/name").and_then(|v| v.as_str());
+            assert!(name.is_some(), "each tool must have a /function/name");
+            assert!(!name.unwrap().is_empty(), "tool name must not be empty");
+        }
+    }
+
+    #[test]
+    fn no_duplicate_tool_names() {
+        let mut names: Vec<&str> = TOOLS
+            .iter()
+            .filter_map(|t| t.pointer("/function/name").and_then(|v| v.as_str()))
+            .collect();
+        let mut compound: Vec<&str> = COMPOUND_TOOLS
+            .iter()
+            .filter_map(|t| t.pointer("/function/name").and_then(|v| v.as_str()))
+            .collect();
+        names.append(&mut compound);
+        let deduped: std::collections::HashSet<&&str> = names.iter().collect();
+        assert_eq!(names.len(), deduped.len(), "duplicate tool names found");
+    }
 }

@@ -14,7 +14,6 @@ use std::time::Instant;
 
 use anyhow::Result;
 use clap::Parser;
-use parking_lot::Mutex;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader as TokioBufReader};
 
@@ -184,6 +183,9 @@ struct AgentSessionShared {
     pub tokens: TokenTracker,
     pub token_monitor: TokenMonitor,
     pub sessions: SessionStore,
+    pub read_tracker: Arc<itsy::tools_impl::read_tracker::ReadTracker>,
+    pub file_state: Arc<itsy::session::file_state::FileStateTracker>,
+    pub knowledge_loader: Arc<itsy::knowledge::KnowledgeLoader>,
 }
 
 /// Frequently-written state behind a single `Mutex`.
@@ -200,6 +202,7 @@ struct AgentSessionMutable {
     pub bash_loop_keys: std::collections::HashSet<String>,
     pub readonly_turn_count: u32,
     pub total_mutating_calls: u32,
+    pub snapshot_manager: Arc<itsy::session::snapshot::SnapshotManager>,
 }
 
 /// Bundle of state that lives across user turns within a single agent run.
@@ -222,7 +225,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
         let model_name = itsy::settings::get().model_name.clone();
         session.mutable.lock().trace.start(prompt_in, &model_name);
     }
-    session.shared.read().token_monitor.mark_next_call_new_turn();
+    session.shared.write().token_monitor.mark_next_call_new_turn();
 
     let user_msg = prompt_in.to_string();
 
@@ -234,7 +237,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
     // with a question mark, the user's reply is an answer, not a new vague task.
     let clarifier_enabled = itsy::settings::get().clarifier;
     let assistant_asked_question = {
-        let hist = session.mutable.lock().history;
+        let hist = session.mutable.lock().history.clone();
         hist.iter()
             .rev()
             .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("assistant"))
@@ -252,7 +255,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
         let needs = features_adapter::check_needs_clarification(&user_msg).await;
         if needs {
             let clarifier_idx = {
-                let mut hist = session.mutable.lock().history;
+                let mut hist = session.mutable.lock().history.clone();
                 hist.push(json!({"role": "user", "content": user_msg.clone()}));
                 let idx = hist.len();
                 hist.push(json!({
@@ -282,7 +285,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             // whether or not the model responded — otherwise it sticks
             // around and re-fires on every subsequent turn.
             {
-                let mut hist = session.mutable.lock().history;
+                let mut hist = session.mutable.lock().history.clone();
                 if clarifier_idx < hist.len() {
                     let is_clarifier = hist[clarifier_idx]
                         .get("role")
@@ -367,31 +370,19 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
     //    `respond` category strips tools entirely so the model can't be
     //    tempted to write a file on a conversational message like
     //    "say hello". This applies to BOTH direct and two-stage routing.
-    let stage2_category = {
-        let mut current = session.mutable.lock().current_tool_category;
-        // Affirmation guard — keep the prior turn's tool set so "yes"/"ok"
-        // after a proposed action lets the model proceed.
-        if itsy::runtime::tool_router::is_affirmation(&user_msg)
-            && current.as_deref().is_some()
-            && current.as_deref() != Some("respond")
-        {
-            current.clone()
-        } else if itsy::runtime::tool_router::is_affirmation(&user_msg) {
-            current = Some("plan".into());
-            Some("plan".into())
-        } else {
-            // Run the deterministic classifier. If it picks `respond`
-            // with positive confidence, pin to that — the model gets
-            // zero tools and must reply with plain text.
-            let classification = itsy::runtime::tool_router::classify_tool_category(&user_msg);
-            if classification.category == "respond" && classification.confidence > 0.0 {
-                current = Some("respond".into());
-                Some("respond".into())
-            } else {
-                current = None;
-                None
-            }
-        }
+    let route = itsy::runtime::tool_router::classify_and_filter(
+        &user_msg,
+        session.mutable.lock().current_tool_category.as_deref(),
+    );
+    session.mutable.lock().current_tool_category = if route.category == "respond" {
+        Some("respond".into())
+    } else {
+        None
+    };
+    let stage2_category: Option<String> = if route.category == "respond" {
+        Some("respond".into())
+    } else {
+        None
     };
 
 
@@ -405,19 +396,15 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
         task_type_initial
     };
 
-    // Record the routing decision so failures can be replayed with
-    // full context. We rerun the deterministic router here purely to
-    // capture the confidence score for the trace.
-    let cls_for_log = itsy::runtime::tool_router::classify_tool_category(&user_msg);
     session.mutable.lock().trace.record_classification(
         task_type,
         stage2_category.as_deref(),
-        cls_for_log.confidence,
+        0.0,
     );
 
     // 6) Maybe pre-compact the history before the first call.
     {
-        let mut hist = session.mutable.lock().history;
+        let mut hist = session.mutable.lock().history.clone();
         if itsy::session::compaction::maybe_compact(&mut hist) {
             println!("{}", tui::compacted(hist.len() as u32));
         }
@@ -450,10 +437,10 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
 
         // Mid-turn eviction every 3 tool calls.
         if state.tool_calls_this_turn > 0 && state.tool_calls_this_turn % 3 == 0 {
-            let mut hist = session.mutable.lock().history;
+            let mut hist = session.mutable.lock().history.clone();
             let evicted = itsy::session::compaction::mid_turn_evict(&mut hist);
             if evicted > 0 {
-                session.shared.read().token_monitor.record_eviction();
+                session.shared.write().token_monitor.record_eviction();
             }
         }
 
@@ -462,7 +449,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             let cfg = session.shared.read().config.clone();
             let hist = session.mutable.lock().history.clone();
             let deps = {
-                let plugins = session.shared.read().plugins;
+                let plugins = &session.shared.read().plugins;
                 ToolDeps {
                     plugin_tools: plugins.get_tools(),
                     mcp_tools: Vec::new(),
@@ -550,7 +537,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
         let response_content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
         let response_has_content = !response_content.trim().is_empty();
         if state.empty_retry_injected && (!tool_calls.is_empty() || response_has_content) {
-            let mut hist = session.mutable.lock().history;
+            let mut hist = session.mutable.lock().history.clone();
             if hist.len() >= 2 {
                 hist.pop();
                 hist.pop();
@@ -925,6 +912,9 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                         mcp_bridge: Some(session.ro.mcp_bridge.clone()),
                         mcp_client: None,
                         fullscreen: fs_handle.clone(),
+                        read_tracker: &session.shared.read().read_tracker,
+                        file_state: &session.shared.read().file_state,
+                        snapshot_manager: &session.mutable.lock().snapshot_manager,
                     };
                     execute_tool(&name, args.clone(), &ctx).await
                 };
@@ -969,7 +959,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     // bash calls with no mutation in between indicate a stuck loop.
                     {
                         let keys: Vec<String> = session.mutable.lock().bash_loop_keys.drain().collect();
-                        let mut counts = session.mutable.lock().tool_repeat_counts;
+                        let mut counts = session.mutable.lock().tool_repeat_counts.clone();
                         for k in keys {
                             counts.remove(&k);
                         }
@@ -981,7 +971,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
 
                 // Record success/failure for tool scoring.
                 {
-                    let mut s = session.mutable.lock().scorer;
+                    let s = &mut session.mutable.lock().scorer;
                     if result.get("error").is_none() {
                         s.record_success(&name, task_type, elapsed_ms);
                     } else {
@@ -1192,7 +1182,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                                     MAX_IMPROVE_ITERATIONS
                                 )
                             );
-                            session.shared.read().token_monitor.record_compaction();
+                            session.shared.write().token_monitor.record_compaction();
                             let test_hint = if !itsy::model::prompts::get_test_runner_context(&session.ro.cwd).is_empty()
                             {
                                 "\n\nAfter fixing, run the project test command to verify."
@@ -1443,7 +1433,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                 .unwrap_or(false)
         {
             if let Some(content) = &content_opt {
-                let mut hist = session.mutable.lock().history;
+                let mut hist = session.mutable.lock().history.clone();
                 hist.push(json!({"role": "assistant", "content": content}));
                 hist.push(json!({
                     "role": "user",
@@ -1469,7 +1459,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     "  \x1b[33m⚠ text-only streak: {} consecutive responses without tools — forcing tool use ({n})\x1b[0m",
                     n
                 );
-                let mut hist = session.mutable.lock().history;
+                let mut hist = session.mutable.lock().history.clone();
                 if let Some(content) = &content_opt {
                     hist.push(json!({"role": "assistant", "content": content}));
                 }
@@ -1541,7 +1531,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                                 == itsy::session::contract::AssertionState::Failed)
                             .map(|a| a.id.as_str())
                             .collect();
-                        let mut hist = session.mutable.lock().history;
+                        let mut hist = session.mutable.lock().history.clone();
                         if let Some(content) = &content_opt {
                             hist.push(json!({"role": "assistant", "content": content}));
                         }
@@ -1629,7 +1619,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                 if let Some(signal) = session.mutable.lock().early_stop
                     .check_greeting(content, state.tool_calls_this_turn > 0)
                 {
-                    let mut hist = session.mutable.lock().history;
+                    let mut hist = session.mutable.lock().history.clone();
                     hist.push(json!({"role": "assistant", "content": content}));
                     hist.push(json!({"role": "user", "content": signal.injection}));
                     continue;
@@ -1652,7 +1642,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             // No content + no tool calls + nothing tried — try streaming.
             let cfg = session.shared.read().config.clone();
             let hist = session.mutable.lock().history.clone();
-            let mut early = session.mutable.lock().early_stop;
+            let mut early = &mut session.mutable.lock().early_stop;
             let fs_handle = session.mutable.lock().fullscreen.clone();
             if let Some(ref fs) = fs_handle {
                 fs.set_streaming(true);
@@ -1675,7 +1665,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             )
             .await
             {
-                drop(early);
+                let _ = early;
                 session.mutable.lock().history
                     .push(json!({"role": "assistant", "content": out}));
             }
@@ -1849,32 +1839,73 @@ fn evaluator_tools() -> Vec<Value> {
 
 /// Run a bash command for the evaluator (read-only intent, 15s timeout).
 fn evaluator_run_bash(command: &str, cwd: &str) -> String {
+    let result = run_bash_with_timeout(command, cwd, std::time::Duration::from_secs(15));
+    let mut s = format!("exit_code={}", result.exit_code);
+    if !result.stdout.is_empty() {
+        s.push_str(&format!("\nstdout:\n{}", result.stdout.trim_end()));
+    }
+    if !result.stderr.is_empty() {
+        s.push_str(&format!("\nstderr:\n{}", result.stderr.trim_end()));
+    }
+    if s.len() > 2000 {
+        s.truncate(2000);
+        s.push_str("\n[output truncated]");
+    }
+    s
+}
+
+struct BashOutput {
+    exit_code: i32,
+    stdout: String,
+    stderr: String,
+}
+
+fn run_bash_with_timeout(command: &str, cwd: &str, timeout: std::time::Duration) -> BashOutput {
     use std::process::Command;
-    let result = Command::new("bash")
+    use std::io::Read;
+    let mut child = match Command::new("bash")
         .arg("-c")
         .arg(command)
         .current_dir(cwd)
-        .output();
-    match result {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            let code = out.status.code().unwrap_or(-1);
-            let mut s = format!("exit_code={code}");
-            if !stdout.is_empty() {
-                s.push_str(&format!("\nstdout:\n{}", stdout.trim_end()));
-            }
-            if !stderr.is_empty() {
-                s.push_str(&format!("\nstderr:\n{}", stderr.trim_end()));
-            }
-            // Cap output so evaluator history doesn't explode.
-            if s.len() > 2000 {
-                s.truncate(2000);
-                s.push_str("\n[output truncated]");
-            }
-            s
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => return BashOutput { exit_code: -1, stdout: String::new(), stderr: format!("error: {e}") },
+    };
+
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut child_stdout = child.stdout.take().expect("piped stdout");
+    let mut child_stderr = child.stderr.take().expect("piped stderr");
+    let start = std::time::Instant::now();
+
+    // Wait for the child to finish, with a timeout.
+    loop {
+        if start.elapsed() >= timeout {
+            let _ = child.kill();
+            return BashOutput { exit_code: -1, stdout: String::new(), stderr: "timed out".into() };
         }
-        Err(e) => format!("error: {e}"),
+
+        // Read available data from stdout/stderr.
+        let _ = child_stdout.read_to_end(&mut stdout);
+        let _ = child_stderr.read_to_end(&mut stderr);
+
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                // Child exited — read any remaining output.
+                let _ = child_stdout.read_to_end(&mut stdout);
+                let _ = child_stderr.read_to_end(&mut stderr);
+                return BashOutput {
+                    exit_code: status.code().unwrap_or(-1),
+                    stdout: String::from_utf8_lossy(&stdout).to_string(),
+                    stderr: String::from_utf8_lossy(&stderr).to_string(),
+                };
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Err(e) => return BashOutput { exit_code: -1, stdout: String::new(), stderr: format!("error: {e}") },
+        }
     }
 }
 
@@ -2412,6 +2443,8 @@ fn build_session(config: Config, flags: Flags, cwd: PathBuf, mcp_bridge: Arc<Mcp
             tokens: TokenTracker::new(),
             token_monitor: TokenMonitor::new(),
             sessions: session_store,
+            read_tracker: Arc::new(itsy::tools_impl::read_tracker::ReadTracker::new()),
+            file_state: Arc::new(itsy::session::file_state::FileStateTracker::new()),
         }),
         mutable: parking_lot::Mutex::new(AgentSessionMutable {
             history: Vec::new(),
@@ -2426,6 +2459,7 @@ fn build_session(config: Config, flags: Flags, cwd: PathBuf, mcp_bridge: Arc<Mcp
             bash_loop_keys: std::collections::HashSet::new(),
             readonly_turn_count: 0,
             total_mutating_calls: 0,
+            snapshot_manager: Arc::new(itsy::session::snapshot::SnapshotManager::new(cwd.clone())),
         }),
     }
 }
@@ -2447,7 +2481,7 @@ fn make_cmd_ctx(session: &AgentSession) -> CommandCtx {
         undo: None,
         snapshots: None,
         trace: Some(Arc::new(parking_lot::Mutex::new(TraceRecorder::new(session.ro.cwd.clone())))),
-        skills: { let mut s = SkillManager::with_project_dir(&session.ro.cwd);
+        skills: { let mut s = SkillManager::with_project_dir(&session.ro.cwd); s.load_from(&session.ro.cwd); Some(Arc::new(parking_lot::Mutex::new(s))) },
         plugins: { let mut p = PluginLoader::new(); p.load_all(&session.ro.cwd); Some(Arc::new(parking_lot::Mutex::new(p))) },
         lsp: None,
     }

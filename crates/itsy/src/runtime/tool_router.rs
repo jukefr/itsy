@@ -288,6 +288,36 @@ pub fn looks_like_option_ref(s: &str) -> bool {
     RE.is_match(s.trim())
 }
 
+/// Single entry point for tool routing. Consolidates affirmation guard,
+/// respond override, and normal classification into one call.
+/// Returns the category name and whether the task needs tools.
+pub fn classify_and_filter(
+    message: &str,
+    prior_category: Option<&str>,
+) -> RoutingDecision {
+    // 1. Affirmation guard — keep the prior turn's tool set.
+    if is_affirmation(message) {
+        if let Some(cat) = prior_category {
+            if cat != "respond" {
+                return RoutingDecision { category: cat.into(), needs_tools: true };
+            }
+        }
+        return RoutingDecision { category: "plan".into(), needs_tools: true };
+    }
+    // 2. Respond override — deterministic classifier with positive confidence.
+    let cls = classify_tool_category(message);
+    if cls.category == "respond" && cls.confidence > 0.0 {
+        return RoutingDecision { category: "respond".into(), needs_tools: false };
+    }
+    // 3. Normal classification.
+    RoutingDecision { category: cls.category.clone(), needs_tools: category_needs_tools(&cls.category) }
+}
+
+pub struct RoutingDecision {
+    pub category: String,
+    pub needs_tools: bool,
+}
+
 #[cfg(test)]
 mod classify_user_examples {
     use super::*;

@@ -19,8 +19,11 @@ use crate::security::{
 };
 use crate::session::file_state::get_file_state_tracker;
 use crate::session::snapshot::get_snapshot_manager;
+use crate::session::file_state::FileStateTracker;
+use crate::session::snapshot::SnapshotManager;
 use crate::tools_impl::file_tree::format_smart_listing;
 use crate::tools_impl::mcp_client::McpClient;
+use crate::tools_impl::read_tracker::ReadTracker;
 use crate::tools_impl::read_tracker::get_read_tracker;
 use crate::tools_impl::shell_session::{get_shell, ShellOptions};
 use crate::tools_impl::web_browse::{web_fetch, web_search};
@@ -34,6 +37,9 @@ pub struct ExecCtx<'a> {
     pub mcp_bridge: Option<Arc<McpBridge>>,
     pub mcp_client: Option<Arc<McpClient>>,
     pub fullscreen: Option<Arc<crate::fullscreen::Fullscreen>>,
+    pub read_tracker: &'a ReadTracker,
+    pub file_state: &'a FileStateTracker,
+    pub snapshot_manager: &'a SnapshotManager,
 }
 
 const MAX_CONTENT_CHARS: usize = 8000;

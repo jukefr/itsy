@@ -134,6 +134,20 @@ pub fn verify_code(file_path: &str) -> VerifyResult {
             errors: vec!["File not found".into()],
         };
     }
+    // Run verification in a temp sandbox to isolate from project files.
+    let sandbox = tempfile::tempdir().ok();
+    let workdir = sandbox.as_ref().map(|s| s.path().to_path_buf()).unwrap_or_else(|| cwd.clone());
+    let sandbox_file = if sandbox.is_some() {
+        let dest = workdir.join(file_path);
+        if let Some(parent) = dest.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::copy(&full, &dest);
+        dest
+    } else {
+        full.clone()
+    };
+
     let ext = Path::new(file_path).extension().and_then(|s| s.to_str()).unwrap_or("");
     let mut result = VerifyResult {
         passed: false,
@@ -144,10 +158,10 @@ pub fn verify_code(file_path: &str) -> VerifyResult {
     };
 
     let compile_exec: Option<(&str, Vec<String>)> = match ext {
-        "py" => Some(("python", vec!["-m".into(), "py_compile".into(), full.to_string_lossy().into()])),
-        "js" | "mjs" => Some(("node", vec!["--check".into(), full.to_string_lossy().into()])),
-        "ts" | "tsx" => Some(("npx", vec!["tsc".into(), "--noEmit".into(), full.to_string_lossy().into()])),
-        "go" => Some(("go", vec!["build".into(), full.to_string_lossy().into()])),
+        "py" => Some(("python", vec!["-m".into(), "py_compile".into(), sandbox_file.to_string_lossy().into()])),
+        "js" | "mjs" => Some(("node", vec!["--check".into(), sandbox_file.to_string_lossy().into()])),
+        "ts" | "tsx" => Some(("npx", vec!["tsc".into(), "--noEmit".into(), sandbox_file.to_string_lossy().into()])),
+        "go" => Some(("go", vec!["build".into(), sandbox_file.to_string_lossy().into()])),
         "json" => {
             match fs::read_to_string(&full) {
                 Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
@@ -167,22 +181,22 @@ pub fn verify_code(file_path: &str) -> VerifyResult {
     };
 
     if let Some((cmd, args)) = compile_exec {
-        match run_with_timeout(cmd, &args, &cwd, Duration::from_secs(15)) {
+        match run_with_timeout(cmd, &args, &workdir, Duration::from_secs(15)) {
             Ok(()) => result.compiled = true,
             Err(e) => result.errors.push(truncate(&e, 500)),
         }
     }
 
     if result.compiled && (ext == "py" || ext == "js") {
-        if let Ok(content) = fs::read_to_string(&full) {
+        if let Ok(content) = fs::read_to_string(&sandbox_file) {
             let has_main_guard = content.contains("__name__") || content.contains("main()") || content.contains("console.log");
             if has_main_guard {
                 let (cmd, args) = if ext == "py" {
-                    ("python", vec![full.to_string_lossy().to_string()])
+                    ("python", vec![sandbox_file.to_string_lossy().to_string()])
                 } else {
-                    ("node", vec![full.to_string_lossy().to_string()])
+                    ("node", vec![sandbox_file.to_string_lossy().to_string()])
                 };
-                match run_with_timeout(cmd, &args, &cwd, Duration::from_secs(10)) {
+                match run_with_timeout(cmd, &args, &workdir, Duration::from_secs(10)) {
                     Ok(()) => result.executed = true,
                     Err(e) => result.errors.push(format!("Runtime error: {}", truncate(&e, 300))),
                 }
@@ -201,18 +215,32 @@ pub fn verify_code(file_path: &str) -> VerifyResult {
     result
 }
 
-fn run_with_timeout(cmd: &str, args: &[String], cwd: &Path, _timeout: Duration) -> Result<(), String> {
-    let output = Command::new(cmd)
+fn run_with_timeout(cmd: &str, args: &[String], cwd: &Path, timeout: Duration) -> Result<(), String> {
+    let mut child = Command::new(cmd)
         .args(args)
         .current_dir(cwd)
-        .output()
+        .spawn()
         .map_err(|e| e.to_string())?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
-        combined.push_str(&String::from_utf8_lossy(&output.stderr));
-        Err(combined)
+
+    let start = std::time::Instant::now();
+    loop {
+        if start.elapsed() >= timeout {
+            let _ = child.kill();
+            return Err("timed out".into());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if status.success() {
+                    return Ok(());
+                } else {
+                    return Err(format!("exit code: {}", status.code().unwrap_or(-1)));
+                }
+            }
+            Ok(None) => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => return Err(e.to_string()),
+        }
     }
 }
 

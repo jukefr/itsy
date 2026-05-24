@@ -168,6 +168,7 @@ impl ItsyApi {
         };
 
         let flags = crate::config::Flags::default();
+        let snap_arc = crate::session::snapshot::get_snapshot_manager(self.options.cwd.clone());
         let ctx = ExecCtx {
             config: &self.config,
             flags: &flags,
@@ -175,6 +176,9 @@ impl ItsyApi {
             mcp_bridge: None,
             mcp_client: None,
             fullscreen: None,
+            read_tracker: crate::tools_impl::read_tracker::get_read_tracker(),
+            file_state: crate::session::file_state::get_file_state_tracker(),
+            snapshot_manager: snap_arc.as_ref(),
         };
 
         let mut tool_call_count: u32 = 0;

@@ -69,7 +69,7 @@ pub struct FileStateTracker {
 }
 
 impl FileStateTracker {
-    fn new() -> Self {
+    pub fn new() -> Self {
         let s = crate::settings::get();
         Self {
             known: Mutex::new(HashMap::new()),

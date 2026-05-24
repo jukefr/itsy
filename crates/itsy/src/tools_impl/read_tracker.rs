@@ -25,7 +25,7 @@ pub struct WriteCheck {
 }
 
 impl ReadTracker {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             clean_paths: Mutex::new(HashSet::new()),
             dirty_paths: Mutex::new(HashSet::new()),
@@ -138,6 +138,11 @@ fn pathdiff(target: &Path, base: &Path) -> Option<String> {
 }
 
 static INSTANCE: OnceLock<ReadTracker> = OnceLock::new();
+
+/// Override the global instance. Used by `AgentSession` at startup and by tests.
+pub fn set_read_tracker(tracker: ReadTracker) {
+    let _ = INSTANCE.set(tracker);
+}
 
 pub fn get_read_tracker() -> &'static ReadTracker {
     INSTANCE.get_or_init(ReadTracker::new)
