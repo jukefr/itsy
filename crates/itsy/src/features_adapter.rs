@@ -246,7 +246,12 @@ pub struct DecomposeStrategy {
     pub instruction: String,
 }
 
-pub async fn decompose_task(task: &str, errors: &str, file_context: &str) -> Option<DecomposeStrategy> {
+pub async fn decompose_task(
+    task: &str,
+    errors: &str,
+    file_context: &str,
+    config: &crate::config::Config,
+) -> Option<DecomposeStrategy> {
     let r = call_prompt(
         "decompose_task",
         json!({ "task": task, "errors": errors, "file_context": file_context }),
@@ -262,11 +267,44 @@ pub async fn decompose_task(task: &str, errors: &str, file_context: &str) -> Opt
         .filter(|s| valid_strategies.contains(s))
         .unwrap_or("rewrite_section")
         .to_string();
-    Some(DecomposeStrategy {
-        strategy,
-        reason: truncate(parsed.get("reason").and_then(|v| v.as_str()).unwrap_or(""), 300),
-        instruction: truncate(parsed.get("instruction").and_then(|v| v.as_str()).unwrap_or(""), 600),
-    })
+    let main_reason = truncate(parsed.get("reason").and_then(|v| v.as_str()).unwrap_or(""), 300);
+    let main_instruction = truncate(parsed.get("instruction").and_then(|v| v.as_str()).unwrap_or(""), 600);
+
+    // Second opinion: ask the second model for its diagnosis. If it disagrees on
+    // strategy, surface both perspectives in the instruction so the model gets
+    // a richer view of why it's stuck.
+    let instruction = if config.second_opinion.model.is_none() && config.second_opinion.endpoint.is_none() {
+        main_instruction
+    } else {
+        let second_model = config.second_opinion.resolved_model(config).to_string();
+        let second_url = config.second_opinion.resolved_endpoint(config).to_string();
+        let task_s: String = task.chars().take(300).collect();
+        let errors_s: String = errors.chars().take(500).collect();
+        let ctx_s: String = file_context.chars().take(1000).collect();
+        let prompt = format!(
+            "A coding task has failed after multiple attempts. Suggest a decomposition strategy.\n\n\
+             Task: {task_s}\nErrors: {errors_s}\nFile context: {ctx_s}\n\n\
+             Return JSON: {{\"strategy\":\"split_file|one_error_at_a_time|rewrite_section|extract_function\",\
+             \"reason\":\"<why>\",\"instruction\":\"<2-3 sentence instruction for the model>\"}}"
+        );
+        match direct_chat(&prompt, &second_model, &second_url, 120).await {
+            Ok(raw) => {
+                let v: Value = serde_json::from_str(&strip_fences(&raw)).unwrap_or(Value::Null);
+                let second_instr = truncate(v.get("instruction").and_then(|v| v.as_str()).unwrap_or(""), 400);
+                let second_strat = v.get("strategy").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                if !second_instr.is_empty() && second_strat != strategy {
+                    format!("{main_instruction}\n[Second opinion — {second_strat}]: {second_instr}")
+                } else if !second_instr.is_empty() {
+                    format!("{main_instruction} {second_instr}")
+                } else {
+                    main_instruction
+                }
+            }
+            Err(_) => main_instruction,
+        }
+    };
+
+    Some(DecomposeStrategy { strategy, reason: main_reason, instruction })
 }
 
 // ─── Semantic merge ─────────────────────────────────────────────────────────
@@ -286,6 +324,95 @@ pub async fn semantic_merge(file_path: &str, intended_change: &str, current_cont
     .ok()?;
     let stripped = strip_fences(&r);
     if stripped.is_empty() { None } else { Some(stripped) }
+}
+
+// ─── Second-opinion assertion verification ───────────────────────────────────
+
+/// Ask the second model whether a single assertion is genuinely passed.
+/// Returns `None` (verified OK) or `Some(reason)` (disputed).
+/// No-op when second opinion is not configured.
+pub async fn verify_assertion_passed(
+    assertion_text: &str,
+    evidence: &str,
+    command: Option<&str>,
+    exit_code: Option<i64>,
+    observation: Option<&str>,
+    config: &crate::config::Config,
+) -> Option<String> {
+    if config.second_opinion.model.is_none() && config.second_opinion.endpoint.is_none() {
+        return None;
+    }
+    let second_model = config.second_opinion.resolved_model(config).to_string();
+    let second_url = config.second_opinion.resolved_endpoint(config).to_string();
+
+    let mut ev_block = format!("Description: {evidence}");
+    if let (Some(cmd), Some(ec), Some(obs)) = (command, exit_code, observation) {
+        ev_block.push_str(&format!("\nCommand: {cmd}\nExit code: {ec}\nOutput: {obs}"));
+    }
+
+    let prompt = format!(
+        "You are an independent verifier checking whether a software task assertion was correctly verified.\n\n\
+         Assertion: {assertion_text}\n\nEvidence:\n{ev_block}\n\n\
+         Is this assertion ACTUALLY passed based on the evidence?\n\
+         - Return {{\"verified\":true}} if the evidence clearly and specifically confirms it.\n\
+         - Return {{\"verified\":false,\"reason\":\"...\"}} if the evidence is insufficient, vague, or contradicts the assertion.\n\n\
+         Return ONLY JSON."
+    );
+
+    let raw = direct_chat(&prompt, &second_model, &second_url, 120).await.ok()?;
+    let parsed: Value = serde_json::from_str(&strip_fences(&raw)).ok()?;
+    if parsed.get("verified").and_then(|v| v.as_bool()).unwrap_or(true) {
+        return None;
+    }
+    Some(
+        parsed
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("insufficient evidence")
+            .to_string(),
+    )
+}
+
+/// Ask the second model whether ALL passed assertions together represent a complete solution.
+/// Returns `None` (all good) or `Some(disputed_ids)`.
+/// No-op when second opinion is not configured.
+pub async fn verify_contract_complete(
+    brief: &str,
+    assertions: &[(String, String, String)], // (id, text, evidence)
+    config: &crate::config::Config,
+) -> Option<Vec<String>> {
+    if config.second_opinion.model.is_none() && config.second_opinion.endpoint.is_none() {
+        return None;
+    }
+    let second_model = config.second_opinion.resolved_model(config).to_string();
+    let second_url = config.second_opinion.resolved_endpoint(config).to_string();
+
+    let list = assertions
+        .iter()
+        .map(|(id, text, ev)| format!("[{id}] {text}\n       evidence: {ev}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let prompt = format!(
+        "You are doing a final review before a software task is marked complete.\n\n\
+         Task brief: {brief}\n\nAssertions marked passed:\n{list}\n\n\
+         Are you confident ALL assertions are genuinely satisfied and the solution is complete?\n\
+         - Return {{\"accept\":true}} if yes.\n\
+         - Return {{\"accept\":false,\"disputed\":[\"A1\"],\"reason\":\"...\"}} if you doubt any.\n\n\
+         Return ONLY JSON."
+    );
+
+    let raw = direct_chat(&prompt, &second_model, &second_url, 120).await.ok()?;
+    let parsed: Value = serde_json::from_str(&strip_fences(&raw)).ok()?;
+    if parsed.get("accept").and_then(|v| v.as_bool()).unwrap_or(true) {
+        return None;
+    }
+    let disputed = parsed
+        .get("disputed")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect::<Vec<_>>())
+        .unwrap_or_default();
+    if disputed.is_empty() { None } else { Some(disputed) }
 }
 
 // ─── Contract assertion negotiation ─────────────────────────────────────────

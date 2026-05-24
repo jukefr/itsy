@@ -127,6 +127,10 @@ class ItsyAgent(BaseInstalledAgent):
             # write_guard pitfalls. Disable clarifier (bench tasks have
             # specific prompts, not vague user input).
             "--set=features.clarifier=false",
+            # Cap total tool calls per bench trial — prevents stuck loops
+            # from exhausting the session. The bash-failure-loop detector
+            # (8 consecutive failures → break) handles spirals earlier.
+            "--max-tool-calls-per-turn=100",
         ]
         if evaluator_model:
             flags.append(f"--second-opinion-model={shlex.quote(evaluator_model)}")

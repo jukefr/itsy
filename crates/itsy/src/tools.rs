@@ -29,15 +29,17 @@ pub static TOOLS: Lazy<Vec<Value>> = Lazy::new(|| vec![
     func_tool("read_file",
         "Read a file. Returns content with line numbers.",
         json!({"type":"object","properties":{"path":{"type":"string","description":"File path relative to cwd"},"start_line":{"type":"integer","description":"Start line (optional)"},"end_line":{"type":"integer","description":"End line (optional)"}},"required":["path"]})),
+    func_tool("read_original",
+        "Read a file as it was when first read this session — before any edits. \
+        Use to check what you changed or to recover original content. \
+        Only works for files that were already read with read_file.",
+        json!({"type":"object","properties":{"path":{"type":"string","description":"File path relative to cwd"}},"required":["path"]})),
     func_tool("write_file",
-        "Create or overwrite a file. LIMIT: 60 lines / 8KB max. For larger files write a skeleton then use patch to add sections.",
-        json!({"type":"object","properties":{"path":{"type":"string","description":"File path"},"content":{"type":"string","description":"File content — keep under 60 lines"}},"required":["path","content"]})),
+        "Create a NEW file. Fails if the file already exists — use read_and_patch to edit existing files. LIMIT: 60 lines / 8KB max; use append_file for additional sections.",
+        json!({"type":"object","properties":{"path":{"type":"string","description":"File path (must not already exist)"},"content":{"type":"string","description":"File content — keep under 60 lines"}},"required":["path","content"]})),
     func_tool("append_file",
         "Append content to the end of an existing file. Use this to build large files in chunks — write_file for the first 50 lines, then append_file for each subsequent section.",
         json!({"type":"object","properties":{"path":{"type":"string","description":"File path to append to"},"content":{"type":"string","description":"Content to append — keep under 60 lines per call"}},"required":["path","content"]})),
-    func_tool("patch",
-        "Edit a file by replacing old_str with new_str. old_str must match exactly ONE location.",
-        json!({"type":"object","properties":{"path":{"type":"string","description":"File to edit"},"old_str":{"type":"string","description":"Exact text to find"},"new_str":{"type":"string","description":"Replacement text"}},"required":["path","old_str","new_str"]})),
     func_tool("bash",
         "Run a shell command. Returns stdout/stderr.",
         json!({"type":"object","properties":{"command":{"type":"string","description":"Shell command"}},"required":["command"]})),
@@ -66,7 +68,7 @@ pub static TOOLS: Lazy<Vec<Value>> = Lazy::new(|| vec![
     // ── contract: the agent's definition-of-done for the current task ──
     func_tool("propose_contract",
         "MUST be your first tool call on any action task. Records the definition-of-done as a list of \
-        testable assertions, each ≤120 chars. After this returns, `write_file` / `patch` / mutating \
+        testable assertions, each ≤120 chars. After this returns, `write_file` / `read_and_patch` / mutating \
         `bash` become available.\n\n\
         EXAMPLE — for the prompt \"write /app/foo.py that prints 42\":\n\
         {\n\
@@ -154,8 +156,8 @@ pub static TOOLS: Lazy<Vec<Value>> = Lazy::new(|| vec![
 
 pub static COMPOUND_TOOLS: Lazy<Vec<Value>> = Lazy::new(|| vec![
     func_tool("read_and_patch",
-        "Read a file, then apply a patch to it in one step. Equivalent to read_file + patch but in a single tool call.",
-        json!({"type":"object","properties":{"path":{"type":"string","description":"File path"},"old_str":{"type":"string","description":"Text to find"},"new_str":{"type":"string","description":"Replacement text"}},"required":["path","old_str","new_str"]})),
+        "Edit an existing file: reads its current content, then replaces old_str with new_str. old_str must match exactly ONE location. Chain multiple calls for sequential edits — no read_file needed between them.",
+        json!({"type":"object","properties":{"path":{"type":"string","description":"File path"},"old_str":{"type":"string","description":"Exact text to find and replace"},"new_str":{"type":"string","description":"Replacement text"}},"required":["path","old_str","new_str"]})),
     func_tool("create_and_run",
         "Create a file and then run a command (like running the file or running tests). Equivalent to write_file + bash in one call.",
         json!({"type":"object","properties":{"path":{"type":"string","description":"File to create"},"content":{"type":"string","description":"File content"},"command":{"type":"string","description":"Command to run after creating"}},"required":["path","content"]})),

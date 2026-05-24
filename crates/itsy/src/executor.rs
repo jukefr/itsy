@@ -43,9 +43,10 @@ pub async fn execute_tool(name: &str, mut args: Value, ctx: &ExecCtx<'_>) -> Val
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     match name {
         "read_file" => exec_read_file(&args, &cwd).await,
+        "read_original" => exec_read_original(&args, &cwd).await,
         "write_file" => exec_write_file(&args, &cwd, ctx).await,
         "append_file" => exec_append_file(&args, &cwd).await,
-        "patch" => exec_patch(&args, &cwd, ctx).await,
+        "patch" => exec_read_and_patch(&args, &cwd).await,
         "bash" => exec_bash(&args, &cwd, ctx).await,
         "search" => exec_search(&args, &cwd).await,
         "find_files" => exec_find_files(&args, &cwd).await,
@@ -63,10 +64,10 @@ pub async fn execute_tool(name: &str, mut args: Value, ctx: &ExecCtx<'_>) -> Val
         "web_search" => exec_web_search(&args).await,
         "web_fetch" => exec_web_fetch(&args).await,
         "propose_contract" => exec_propose_contract(&args, &cwd, ctx.config).await,
-        "mark_assertion" => exec_mark_assertion(&args, &cwd).await,
+        "mark_assertion" => exec_mark_assertion(&args, &cwd, ctx.config).await,
         "mark_feature" => exec_mark_feature(&args, &cwd).await,
         "contract_status" => exec_contract_status().await,
-        "close_contract" => exec_close_contract(&args, &cwd).await,
+        "close_contract" => exec_close_contract(&args, &cwd, ctx.config).await,
         "select_category" => {
             let cat = args.get("category").and_then(|v| v.as_str()).unwrap_or("read");
             json!({"result": format!("Category: {cat}. Proceed with your tool call."), "category": cat})
@@ -149,6 +150,34 @@ async fn exec_read_file(args: &Value, cwd: &Path) -> Value {
     json!({"result": format!("{path} ({total} lines):\n{numbered}")})
 }
 
+async fn exec_read_original(args: &Value, cwd: &Path) -> Value {
+    let Some(path) = args.get("path").and_then(|v| v.as_str()) else {
+        return json!({"error": "read_original rejected: path missing"});
+    };
+    let safe = match safe_resolve_path(path, cwd, PathOptions::default()) {
+        Ok(s) => s,
+        Err(e) => return json!({"error": format!("read_original rejected: {e}")}),
+    };
+    match get_file_state_tracker().get_original(&safe.full_path) {
+        Some(content) => {
+            let total = content.split('\n').count();
+            let numbered: String = content
+                .split('\n')
+                .enumerate()
+                .map(|(i, l)| format!("{:>4}│ {}", i + 1, sanitize_tool_output(l)))
+                .collect::<Vec<_>>()
+                .join("\n");
+            json!({"result": format!("{path} (original, {total} lines):\n{numbered}")})
+        }
+        None => {
+            json!({"error": format!(
+                "No original content recorded for {path}. \
+                read_original only works for files that were read with read_file earlier this session."
+            )})
+        }
+    }
+}
+
 async fn exec_write_file(args: &Value, cwd: &Path, ctx: &ExecCtx<'_>) -> Value {
     let Some(path) = args.get("path").and_then(|v| v.as_str()) else {
         return json!({"error": "write_file rejected: path missing"});
@@ -157,10 +186,16 @@ async fn exec_write_file(args: &Value, cwd: &Path, ctx: &ExecCtx<'_>) -> Value {
         Ok(s) => s,
         Err(e) => return json!({"error": format!("write_file rejected: {e}")}),
     };
-    let tracker = get_read_tracker();
-    let guard = tracker.check_write(&safe.full_path, cwd, "write_file");
-    if !guard.ok {
-        return json!({"error": guard.reason});
+    // write_file is for creating new files only. Edits to existing files must
+    // use read_and_patch so the model always works from current content.
+    if safe.full_path.exists() {
+        return json!({
+            "error": format!(
+                "write_file rejected: '{path}' already exists. \
+                 Use read_and_patch to edit existing files — it reads the current content \
+                 atomically so you never accidentally overwrite with stale data."
+            )
+        });
     }
     if let Some(dir) = safe.full_path.parent() {
         let _ = fs::create_dir_all(dir);
@@ -169,30 +204,21 @@ async fn exec_write_file(args: &Value, cwd: &Path, ctx: &ExecCtx<'_>) -> Value {
     if content.len() > MAX_CONTENT_CHARS {
         return json!({
             "error": format!(
-                "write_file: content too large ({} lines / {}KB). llama.cpp cannot parse tool calls larger than ~8KB. \
-                 Strategy: write a skeleton file first (imports + empty function stubs), \
-                 then use multiple patch calls to fill in each section. Keep each write_file under 60 lines.",
+                "write_file: content too large ({} lines / {}KB). \
+                 Keep each write_file under 60 lines; use append_file for additional sections.",
                 content.split('\n').count(),
                 content.len() / 1024,
             )
         });
     }
-    let existed = safe.full_path.exists();
-    let old_content = if existed { fs::read_to_string(&safe.full_path).ok() } else { None };
-    get_snapshot_manager(cwd.to_path_buf()).note(&safe.full_path, old_content.clone());
+    get_snapshot_manager(cwd.to_path_buf()).note(&safe.full_path, None);
     if let Err(e) = fs::write(&safe.full_path, content) {
         return json!({"error": e.to_string()});
     }
-    tracker.record_write(&safe.full_path, cwd);
+    get_read_tracker().record_write(&safe.full_path, cwd);
     get_file_state_tracker().record_write(&safe.full_path, content);
     let lines = content.split('\n').count();
-    let action = if existed { "Updated" } else { "Created" };
-    if let (Some(old), Some(fs_ref)) = (old_content, &ctx.fullscreen) {
-        let old_preview = old.split('\n').take(5).collect::<Vec<_>>().join("\n");
-        let new_preview = content.split('\n').take(5).collect::<Vec<_>>().join("\n");
-        fs_ref.add_diff(path, &(old_preview + "\n..."), &(new_preview + "\n..."), 1);
-    }
-    json!({"result": format!("{action} {path} ({lines} lines)"), "action": action, "path": path, "lines": lines})
+    json!({"result": format!("Created {path} ({lines} lines)"), "action": "Created", "path": path, "lines": lines})
 }
 
 async fn exec_append_file(args: &Value, cwd: &Path) -> Value {
@@ -352,6 +378,10 @@ async fn exec_bash(args: &Value, cwd: &Path, ctx: &ExecCtx<'_>) -> Value {
             return json!({"result": trimmed, "error": err, "command": command});
         }
         if result.exit_code != 0 {
+            // grep/rg exit 1 with no output = no matches found, not an error.
+            if result.exit_code == 1 && trimmed.is_empty() && is_grep_command(&command) {
+                return json!({"result": "(no matches found)", "command": command});
+            }
             let body = if trimmed.is_empty() { "(no output)".to_string() } else { trimmed.clone() };
             let with_hint = maybe_prepend_error_diagnosis(
                 ctx.config.features.error_diagnosis,
@@ -378,6 +408,10 @@ async fn exec_bash(args: &Value, cwd: &Path, ctx: &ExecCtx<'_>) -> Value {
             let trimmed = trim_output(&sanitize_tool_output(&combined), 3000);
             if !out.status.success() {
                 let code = out.status.code().unwrap_or(-1);
+                // grep/rg exit 1 with no output = no matches found, not an error.
+                if code == 1 && trimmed.is_empty() && is_grep_command(&command) {
+                    return json!({"result": "(no matches found)", "command": command});
+                }
                 let with_hint = maybe_prepend_error_diagnosis(
                     ctx.config.features.error_diagnosis,
                     &command,
@@ -395,6 +429,19 @@ async fn exec_bash(args: &Value, cwd: &Path, ctx: &ExecCtx<'_>) -> Value {
             json!({"result": redact_string(&e.to_string()), "error": e.to_string(), "command": command})
         }
     }
+}
+
+/// True when `cmd` is a pure grep/rg invocation (exit 1 = no matches, not error).
+fn is_grep_command(cmd: &str) -> bool {
+    let t = cmd.trim();
+    // Walk the last statement in the command, handling `|`, `&&`, and `;` chains.
+    // Examples: "grep foo bar", "pdflatex ... | grep Overfull",
+    //           "cd /app && grep -n pattern file", "make build; grep err log"
+    let after_pipe = t.rsplit('|').next().unwrap_or(t).trim();
+    let last_stmt = after_pipe.rsplit("&&").next().unwrap_or(after_pipe).trim();
+    let last_stmt = last_stmt.rsplit(';').next().unwrap_or(last_stmt).trim();
+    let first_word = last_stmt.split_whitespace().next().unwrap_or("");
+    matches!(first_word, "grep" | "rg" | "egrep" | "fgrep")
 }
 
 /// Call the LLM error-diagnosis prompt and prepend a `[ERROR-DIAGNOSIS]`
@@ -1079,7 +1126,7 @@ async fn exec_propose_contract(args: &Value, cwd: &Path, config: &Config) -> Val
     }
 }
 
-async fn exec_mark_assertion(args: &Value, cwd: &Path) -> Value {
+async fn exec_mark_assertion(args: &Value, cwd: &Path, config: &Config) -> Value {
     use crate::session::contract::{self, AssertionState, CommandEvidence};
     let Some(id) = args.get("id").and_then(|v| v.as_str()) else {
         return json!({"error": "missing assertion `id`"});
@@ -1135,6 +1182,36 @@ async fn exec_mark_assertion(args: &Value, cwd: &Path) -> Value {
             "error": "marking `passed` without a verification command requires substantive evidence (≥30 chars). \
                      Re-run the check and include command + observation."
         });
+    }
+
+    // Second opinion: before accepting "passed", ask the second model to
+    // independently verify the evidence. Catches the model lying to itself.
+    if state == AssertionState::Passed {
+        let assertion_text = contract::current()
+            .and_then(|c| c.assertions.iter().find(|a| a.id == id).map(|a| a.text.clone()))
+            .unwrap_or_default();
+        if !assertion_text.is_empty() {
+            let cmd_str = check.as_ref().map(|c| c.command.as_str());
+            let ec = check.as_ref().map(|c| c.exit_code);
+            let obs_str = check.as_ref().map(|c| c.observation.as_str());
+            if let Some(reason) = crate::features_adapter::verify_assertion_passed(
+                &assertion_text,
+                &evidence,
+                cmd_str,
+                ec,
+                obs_str,
+                config,
+            )
+            .await
+            {
+                return json!({
+                    "error": format!(
+                        "[SECOND OPINION] Assertion {id} may not be passed: {reason}. \
+                         Re-verify with a concrete command and clear output before marking passed."
+                    )
+                });
+            }
+        }
     }
 
     match contract::mark_assertion(cwd, id, state, evidence, check) {
@@ -1194,8 +1271,8 @@ async fn exec_contract_status() -> Value {
     }
 }
 
-async fn exec_close_contract(args: &Value, cwd: &Path) -> Value {
-    use crate::session::contract::{self, ContractStatus};
+async fn exec_close_contract(args: &Value, cwd: &Path, config: &Config) -> Value {
+    use crate::session::contract::{self, AssertionState, ContractStatus};
     let Some(status_s) = args.get("status").and_then(|v| v.as_str()) else {
         return json!({"error": "missing `status` — only `completed` is accepted"});
     };
@@ -1204,6 +1281,29 @@ async fn exec_close_contract(args: &Value, cwd: &Path) -> Value {
         "aborted" => return json!({"error": "`aborted` is not available — fix failing assertions and close as `completed`"}),
         _ => return json!({"error": "`status` must be `completed`"}),
     };
+    // Second opinion: final gate — ask the second model to review all passed
+    // assertions together before allowing the contract to close.
+    if let Some(c) = contract::current() {
+        let passed: Vec<(String, String, String)> = c
+            .assertions
+            .iter()
+            .filter(|a| a.state == AssertionState::Passed)
+            .map(|a| (a.id.clone(), a.text.clone(), a.evidence.clone().unwrap_or_default()))
+            .collect();
+        if !passed.is_empty() {
+            if let Some(disputed) =
+                crate::features_adapter::verify_contract_complete(&c.brief, &passed, config).await
+            {
+                return json!({
+                    "error": format!(
+                        "[SECOND OPINION] Final review doubts these assertions are truly satisfied: {}. \
+                         Re-verify them before closing.",
+                        disputed.join(", ")
+                    )
+                });
+            }
+        }
+    }
     match contract::close(cwd, status) {
         Ok(c) => {
             let counts = c.counts();

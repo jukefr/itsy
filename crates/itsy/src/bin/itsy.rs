@@ -1292,6 +1292,13 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             // count as meaningful forward progress — don't accumulate toward
             // the readonly-turn nudge threshold.
             let mut batch_had_contract_progress = false;
+            // Non-read-only bash (compile, test, run) counts as active work —
+            // the model is executing, not just passively reading files.
+            let mut batch_had_active_bash = false;
+            // A read_file that returns new/changed content is a fresh read —
+            // the model is legitimately reacting to a state change, not looping.
+            // Keyed off the FileStateTracker's "unchanged" signal in the result text.
+            let mut batch_had_fresh_read = false;
             // Widen the tool set on subsequent calls unless the model picked a
             // category via select_category (in which case it'll set it below).
             let first_tool_name = tool_calls
@@ -1443,6 +1450,9 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     "bash" => !itsy::tools_impl::dedup::bash_is_read_only(&args),
                     _ => false,
                 };
+                if name == "bash" && is_mutating {
+                    batch_had_active_bash = true;
+                }
                 if itsy::settings::get().contract
                     && task_is_action
                     && itsy::session::contract::current().is_none()
@@ -1591,19 +1601,29 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                 // catches failed mutating calls; the per-turn tool-call cap is
                 // the final backstop.
 
-                // Idempotent-write dedup: memory_remember/memory_forget with
-                // identical args in the same turn is a no-op. Break the spiral
+                // Idempotent-write dedup: memory_remember/memory_forget/mark_assertion
+                // with identical args in the same turn is a no-op. Break the spiral
                 // before executing and return a short-circuit result.
-                const IDEMPOTENT_WRITE_TOOLS: &[&str] = &["memory_remember", "memory_forget"];
+                // mark_assertion is included because the model sometimes marks the same
+                // assertion as passed multiple times in a row instead of moving on.
+                const IDEMPOTENT_WRITE_TOOLS: &[&str] = &["memory_remember", "memory_forget", "mark_assertion"];
                 if IDEMPOTENT_WRITE_TOOLS.contains(&name.as_str()) {
                     let write_key = itsy::tools_impl::dedup::idempotent_write_key(&name, &args);
                     if !per_turn_write_seen.insert(write_key) {
+                        let skip_msg = if name == "mark_assertion" {
+                            let id_str = args.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+                            let state_str = args.get("state").and_then(|v| v.as_str()).unwrap_or("?");
+                            format!(
+                                "[DUPLICATE] mark_assertion for `{id_str}` as `{state_str}` was already called this turn. \
+                                 Move on to the next pending assertion — do not repeat the same mark."
+                            )
+                        } else {
+                            "[already stored this turn — identical call skipped]".to_string()
+                        };
                         session.history.lock().push(json!({
                             "role": "tool",
                             "tool_call_id": id,
-                            "content": serde_json::to_string(&json!({
-                                "result": "[already stored this turn — identical call skipped]"
-                            })).unwrap_or_default()
+                            "content": serde_json::to_string(&json!({"result": skip_msg})).unwrap_or_default()
                         }));
                         continue;
                     }
@@ -1698,7 +1718,20 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                 consecutive_blocks = 0;
 
                 // Successful read_file unblocks the file for patching.
+                // Also track whether the content was fresh or stale: the
+                // FileStateTracker stamps "unchanged since last read" into the
+                // result when the file hasn't changed. Only stale reads count
+                // toward the no-progress nudge; a fresh read means the model
+                // is reacting to real state changes.
                 if name == "read_file" && result.get("error").is_none() {
+                    let is_stale = result
+                        .get("result")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.contains("unchanged since last read"))
+                        .unwrap_or(false);
+                    if !is_stale {
+                        batch_had_fresh_read = true;
+                    }
                     if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
                         session.early_stop.lock().record_read(path);
                     }
@@ -1778,7 +1811,17 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                 // ≥2 times consecutively, inject a brief actionable hint.
                 // Reset the counter on success so hints don't accumulate.
                 {
-                    let had_error = result.get("error").is_some();
+                    // For bash/run, "Exit code 1" is informational for many tools
+                    // (pdflatex with warnings, diff, test, grep). Only count it as a
+                    // failure if the exit code is > 1 or it's a non-exit-code error.
+                    let had_error = result.get("error").map(|e| {
+                        let msg = e.as_str().unwrap_or("");
+                        if (name == "bash" || name == "run") && msg == "Exit code 1" {
+                            false
+                        } else {
+                            true
+                        }
+                    }).unwrap_or(false);
                     if had_error {
                         let n = recent_tool_failures
                             .entry(name.clone())
@@ -1901,10 +1944,12 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                         } => {
                             // Try LLM-based decompose first; fall back to the
                             // governor's regex strategy.
+                            let cfg_snap = session.config.lock().clone();
                             let strat = features_adapter::decompose_task(
                                 &user_msg,
                                 &errors.join("\n"),
                                 &file_content.chars().take(1000).collect::<String>(),
+                                &cfg_snap,
                             )
                             .await;
                             let (kind, reason, instruction) = if let Some(s) = strat {
@@ -1966,6 +2011,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                             "content": format!("[AUTO-FIX] The command FAILED (attempt {attempt_n}/2). Do NOT claim success. The error was:\n{err}\n\nRead the error, identify the bug, and fix it."),
                         }));
                     } else {
+                        let cfg_snap = session.config.lock().clone();
                         let strategy = features_adapter::decompose_task(
                             &user_msg,
                             result
@@ -1975,6 +2021,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                             args.get("command")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or(""),
+                            &cfg_snap,
                         )
                         .await
                         .map(|s| (s.strategy, s.reason, s.instruction))
@@ -2007,11 +2054,35 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                 {
                     improvement_attempts.insert("__bash".into(), 0);
                 }
+
+                // Early-stop on bash failure loops (8 consecutive non-zero exits).
+                // Exit code 1 is informational for many programs (pdflatex, diff,
+                // test, grep) — only count exit codes > 1 as hard failures.
+                if name == "bash" || name == "run" {
+                    let exit_code = result.get("error")
+                        .and_then(|e| e.as_str())
+                        .and_then(|msg| msg.strip_prefix("Exit code "))
+                        .and_then(|n| n.parse::<i32>().ok())
+                        .filter(|&c| c != 1)   // exit 1 = informational, not a hard failure
+                        .unwrap_or_else(|| if result.get("error").is_none() { 0 } else { 2 });
+                    let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+                    if let Some(signal) = session.early_stop.lock().record_bash_result(exit_code, command) {
+                        println!("  \x1b[33m⚡ {}\x1b[0m", signal.message);
+                        session
+                            .history
+                            .lock()
+                            .push(json!({"role": "user", "content": signal.injection}));
+                        break;
+                    }
+                }
             }
+            // Reset the text-only streak counter whenever a tool-call batch fires.
+            per_turn_repeats.insert("__text_only_streak".into(), 0);
+
             // No-progress nudge within a single handle_turn: fires when the
             // model has made N consecutive tool-call batches with no mutating
             // calls. Tight threshold (2) before the first edit; looser (6) after.
-            if !batch_had_mutating && !batch_had_contract_progress {
+            if !batch_had_mutating && !batch_had_contract_progress && !batch_had_active_bash && !batch_had_fresh_read {
                 let count = {
                     let mut c = session.readonly_turn_count.lock();
                     *c += 1;
@@ -2101,6 +2172,47 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     "role": "user",
                     "content": "[SYSTEM] You responded without using any tools. This task requires file operations. Use the appropriate tools (read_file, write_file, patch, etc.) — actually do it.",
                 }));
+                continue;
+            }
+        }
+
+        // Text-only streak guard: if the model generates 3+ consecutive
+        // text-only responses without calling any tool, it is stuck.
+        // This fires regardless of tool_calls_this_turn so it catches
+        // the "text flood after tool calls" pattern that bypasses the
+        // badger and empty-response guards (both gated on == 0).
+        {
+            let n = *per_turn_repeats
+                .entry("__text_only_streak".into())
+                .and_modify(|n| *n += 1)
+                .or_insert(1);
+            const MAX_TEXT_ONLY_STREAK: u32 = 3;
+            if n >= MAX_TEXT_ONLY_STREAK && current_category.as_deref() != Some("respond") {
+                println!(
+                    "  \x1b[33m⚠ text-only streak: {} consecutive responses without tools — forcing tool use ({n})\x1b[0m",
+                    n
+                );
+                let mut hist = session.history.lock();
+                if let Some(content) = &content_opt {
+                    hist.push(json!({"role": "assistant", "content": content}));
+                }
+                let has_contract = itsy::settings::get().contract
+                    && itsy::session::contract::current()
+                        .map(|c| {
+                            let cnt = c.counts();
+                            cnt.pending > 0 || cnt.failed > 0
+                        })
+                        .unwrap_or(false);
+                let msg = if has_contract {
+                    "[SYSTEM] You have responded with text only multiple times without using tools. \
+                     The contract has unverified assertions. Stop writing explanations — call a tool right now. \
+                     Run a verification command with `bash`, then call `mark_assertion` with the result. \
+                     Do NOT respond with text. Use a tool."
+                } else {
+                    "[SYSTEM] You have responded with text only multiple times without using tools. \
+                     Use a tool to make progress instead of describing what you plan to do."
+                };
+                hist.push(json!({"role": "user", "content": msg}));
                 continue;
             }
         }
@@ -2522,7 +2634,7 @@ async fn run_evaluator_phase(
     session: &AgentSession,
     contract: &itsy::session::contract::Contract,
 ) {
-    const MAX_TURNS: u32 = 10;
+    const MAX_TURNS: u32 = 50;
 
     let cwd = session.cwd.to_string_lossy().to_string();
     let mut config = session.config.lock().clone();

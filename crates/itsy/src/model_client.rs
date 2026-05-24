@@ -206,8 +206,13 @@ pub async fn chat_completion(ctx: &ChatContext<'_>) -> Option<Value> {
         // structured `tool_calls`. When that happens llama-server's OpenAI
         // adapter doesn't convert them. We normalise here as a fallback so
         // the rest of the harness never sees the raw XML.
+        //
+        // Also strip stray `<think>…</think>` / `</think>` fragments that
+        // occasionally leak into the content field when the model interleaves
+        // reasoning and response text.
         if let Some(msg) = value.pointer_mut("/choices/0/message") {
             extract_xml_tool_calls(msg);
+            strip_think_tags(msg);
         }
 
         return Some(value);
@@ -362,27 +367,73 @@ pub fn run_validation(file_path: &str) -> Option<ValidationOutcome> {
     None
 }
 
+/// Strip Qwen3-style `<think>…</think>` fragments from the content field.
+///
+/// llama-server normally moves thinking into `reasoning_content`, but
+/// occasionally a stray closing `</think>` or a full `<think>…</think>` block
+/// leaks into content. Remove them so the TUI never shows raw reasoning XML.
+fn strip_think_tags(msg: &mut Value) {
+    let content = match msg.get("content").and_then(|v| v.as_str()) {
+        Some(c) if c.contains("</think>") || c.contains("<think>") => c.to_string(),
+        _ => return,
+    };
+
+    // Strip full <think>…</think> blocks first, then any orphaned closing tag.
+    let mut s = content.clone();
+    loop {
+        if let Some(a) = s.find("<think>") {
+            if let Some(rel) = s[a..].find("</think>") {
+                s.drain(a..a + rel + "</think>".len());
+                continue;
+            } else {
+                s.drain(a..);
+                break;
+            }
+        }
+        // No more open tags — remove orphaned </think> if present.
+        while let Some(pos) = s.find("</think>") {
+            s.drain(pos..pos + "</think>".len());
+        }
+        break;
+    }
+
+    let clean = s.trim().to_string();
+    if clean == content.trim() {
+        return;
+    }
+    if let Some(obj) = msg.as_object_mut() {
+        if clean.is_empty() {
+            obj.remove("content");
+        } else {
+            obj.insert("content".into(), Value::String(clean));
+        }
+    }
+}
+
 /// Normalise Qwen3-style `<tool_call>` XML that leaks into the content field
 /// when llama-server's OpenAI adapter doesn't convert it. Handles two formats:
 ///
 /// - JSON:  `<tool_call>\n{"name":"fn","arguments":{...}}\n</tool_call>`
 /// - Attr:  `<tool_call><function=fn>\n<parameter=k>v</parameter>\n</function></tool_call>`
+/// Extract Qwen3-style `<tool_call>` XML from the assistant message content.
 ///
-/// On success, `tool_calls` is populated on `msg` and the XML is removed from
-/// `content`. No-ops when `tool_calls` is already non-empty.
+/// Always strips `<tool_call>…</tool_call>` blocks from `content` so they
+/// never leak to the TUI.  Only populates `tool_calls` on the message when
+/// the message doesn't already carry structured tool calls from the server —
+/// that way we never duplicate a call that was already parsed upstream.
 fn extract_xml_tool_calls(msg: &mut Value) {
     let content = match msg.get("content").and_then(|v| v.as_str()) {
         Some(c) if c.contains("<tool_call>") => c.to_string(),
         _ => return,
     };
-    // Already converted by the server — leave it alone.
-    if msg.get("tool_calls")
+
+    // When the server already provided structured tool_calls we still need to
+    // strip the XML from content, but we must not add duplicate entries.
+    let strip_only = msg
+        .get("tool_calls")
         .and_then(|v| v.as_array())
         .map(|a| !a.is_empty())
-        .unwrap_or(false)
-    {
-        return;
-    }
+        .unwrap_or(false);
 
     let mut tool_calls: Vec<Value> = Vec::new();
     let mut tc_id: u32 = 0;
@@ -397,6 +448,11 @@ fn extract_xml_tool_calls(msg: &mut Value) {
         } else {
             ""
         };
+
+        if strip_only {
+            // Don't bother parsing — we only need the stripping pass below.
+            continue;
+        }
 
         tc_id += 1;
         let id = format!("call_{tc_id}");
@@ -447,11 +503,7 @@ fn extract_xml_tool_calls(msg: &mut Value) {
         }
     }
 
-    if tool_calls.is_empty() {
-        return;
-    }
-
-    // Strip every <tool_call>…</tool_call> block from content.
+    // Always strip <tool_call>…</tool_call> blocks from content.
     let clean = {
         let mut s = content.clone();
         loop {
@@ -467,7 +519,9 @@ fn extract_xml_tool_calls(msg: &mut Value) {
     };
 
     if let Some(obj) = msg.as_object_mut() {
-        obj.insert("tool_calls".into(), Value::Array(tool_calls));
+        if !strip_only && !tool_calls.is_empty() {
+            obj.insert("tool_calls".into(), Value::Array(tool_calls));
+        }
         if clean.is_empty() {
             obj.remove("content");
         } else {

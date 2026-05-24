@@ -17,12 +17,15 @@ pub struct EarlyStopDetector {
     pub max_patch_failures: u32,
     pub max_response_tokens: u32,
     pub enable_greeting_detection: bool,
+    /// Consecutive bash non-zero exits before injecting a correction.
+    pub max_consecutive_bash_failures: u32,
     patch_failures: HashMap<String, u32>,
     patch_attempts: HashMap<String, u32>,
     /// Files blocked from patching after a stuck spiral.
     /// Cleared when the model successfully reads the file — forces
     /// re-read before re-patch rather than a permanent session ban.
     patch_blocked_files: HashSet<String>,
+    consecutive_bash_failures: u32,
 }
 
 impl EarlyStopDetector {
@@ -33,9 +36,11 @@ impl EarlyStopDetector {
             max_patch_failures: 4,
             max_response_tokens: 8192,
             enable_greeting_detection: true,
+            max_consecutive_bash_failures: 8,
             patch_failures: HashMap::new(),
             patch_attempts: HashMap::new(),
             patch_blocked_files: HashSet::new(),
+            consecutive_bash_failures: 0,
         }
     }
 
@@ -124,6 +129,40 @@ impl EarlyStopDetector {
                      2. Decide what the ENTIRE file should contain\n\
                      3. Use write_file to rewrite it completely from scratch\n\
                      Do NOT attempt another patch on this file."
+                ),
+            });
+        }
+        None
+    }
+
+    /// Record a bash tool result. Returns a StopSignal after
+    /// `max_consecutive_bash_failures` consecutive non-zero exits.
+    /// A successful exit resets the counter.
+    pub fn record_bash_result(&mut self, exit_code: i32, command: &str) -> Option<StopSignal> {
+        if exit_code == 0 {
+            self.consecutive_bash_failures = 0;
+            return None;
+        }
+        self.consecutive_bash_failures += 1;
+        if self.consecutive_bash_failures >= self.max_consecutive_bash_failures {
+            self.consecutive_bash_failures = 0;
+            let short_cmd: String = command.chars().take(80).collect();
+            return Some(StopSignal {
+                reason: "bash_failure_loop",
+                message: format!(
+                    "{} consecutive bash failures (last: `{short_cmd}`). Injecting correction.",
+                    self.max_consecutive_bash_failures
+                ),
+                action: "inject_correction",
+                injection: format!(
+                    "[SYSTEM] You have run {n} bash commands in a row and every one failed. \
+                     This approach is not working. STOP and reconsider:\n\
+                     1. Read the error output above carefully — what exactly is failing?\n\
+                     2. Try a completely different approach or simpler command.\n\
+                     3. If you are stuck on a compilation error, check the exact error message \
+                        and fix only that specific issue.\n\
+                     Do NOT keep retrying the same failing command.",
+                    n = self.max_consecutive_bash_failures
                 ),
             });
         }

@@ -134,7 +134,8 @@ Common locally-loaded models on this box (check `curl $BASE_URL/models`):
 - `bartowski/FINAL-Bench_Darwin-36B-Opus-GGUF:IQ2_XXS` (Darwin 36B)
 - `unsloth/Qwen3.6-35B-A3B-GGUF:IQ3_XXS` / `IQ4_XS`
 - `unsloth/Qwen3.5-9B-GGUF:Q4_K_XL`
-- `unsloth/gemma-4-26B-A4B-it-GGUF:IQ2_M`
+- `unsloth/gemma-4-26B-A4B-it-GGUF:IQ2_M` ← **current second-opinion model**
+  (also usable as the main model for comparison runs)
 
 From inside the harbor trial container, the host's loopback is reachable
 at `10.0.2.2` (rootless-docker convention) — that's the default the

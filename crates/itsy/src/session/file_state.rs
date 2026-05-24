@@ -60,6 +60,8 @@ struct Entry {
 
 pub struct FileStateTracker {
     known: Mutex<HashMap<PathBuf, Entry>>,
+    /// Content at first read this session — never overwritten by writes.
+    originals: Mutex<HashMap<PathBuf, String>>,
     disabled: bool,
     context_lines: usize,
     max_ratio: f64,
@@ -71,6 +73,7 @@ impl FileStateTracker {
         let s = crate::settings::get();
         Self {
             known: Mutex::new(HashMap::new()),
+            originals: Mutex::new(HashMap::new()),
             disabled: !s.diff_context,
             context_lines: if s.diff_context_lines > 0 {
                 s.diff_context_lines
@@ -95,6 +98,7 @@ impl FileStateTracker {
 
         if self.disabled {
             // Still track state so writes stay accurate.
+            self.originals.lock().entry(path.to_path_buf()).or_insert_with(|| content.to_string());
             g.insert(
                 path.to_path_buf(),
                 Entry { content: content.to_string(), hash, read_count: 1, recorded_at: Instant::now() },
@@ -114,7 +118,8 @@ impl FileStateTracker {
 
         match g.get_mut(path) {
             None => {
-                // First read (or expired) — full content.
+                // First read (or expired) — full content. Record original.
+                self.originals.lock().entry(path.to_path_buf()).or_insert_with(|| content.to_string());
                 g.insert(
                     path.to_path_buf(),
                     Entry { content: content.to_string(), hash, read_count: 1, recorded_at: now },
@@ -188,9 +193,16 @@ impl FileStateTracker {
         self.known.lock().remove(path);
     }
 
+    /// Return the content of `path` as it was when first read this session,
+    /// before any writes. Returns `None` if the file was never read.
+    pub fn get_original(&self, path: &Path) -> Option<String> {
+        self.originals.lock().get(path).cloned()
+    }
+
     /// Clear all state — call between agent runs.
     pub fn reset(&self) {
         self.known.lock().clear();
+        self.originals.lock().clear();
     }
 
     /// How many files are being tracked.
@@ -421,6 +433,7 @@ mod tests {
     fn tracker_enabled() -> FileStateTracker {
         FileStateTracker {
             known: Mutex::new(HashMap::new()),
+            originals: Mutex::new(HashMap::new()),
             disabled: false,
             context_lines: DEFAULT_CONTEXT_LINES,
             max_ratio: DEFAULT_MAX_RATIO,
@@ -500,6 +513,7 @@ mod tests {
         // Tracker with absurdly low max_ratio so any diff exceeds it.
         let t = FileStateTracker {
             known: Mutex::new(HashMap::new()),
+            originals: Mutex::new(HashMap::new()),
             disabled: false,
             context_lines: 3,
             max_ratio: 0.0001,

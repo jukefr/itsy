@@ -85,8 +85,10 @@ impl ReadTracker {
         let recently_modified = self.dirty_paths.lock().contains(&c);
         let reason = if recently_modified {
             format!(
-                "{tool} rejected: you just modified '{rel}' — call read_file to see the \
-                 current content before writing again."
+                "{tool} rejected: you just modified '{rel}'. \
+                 For sequential edits use `read_and_patch` — it reads then patches atomically, \
+                 so you never need a read_file between edits. \
+                 Do NOT rewrite the whole file with write_file; use read_and_patch instead."
             )
         } else {
             format!(
