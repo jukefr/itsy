@@ -590,8 +590,19 @@ fn merge_assertions(
     b: Vec<(String, String)>,
 ) -> Vec<(String, String)> {
     let mut seen_ids = std::collections::HashSet::new();
+    let mut seen_texts = std::collections::HashSet::new();
     let mut result: Vec<(String, String)> = Vec::new();
     for (id, text) in a.into_iter().chain(b) {
+        // Semantic dedup: if another assertion already says the same thing
+        // (after lowercasing + stripping punctuation + collapsing whitespace),
+        // drop this one. Two-model negotiation routinely produces verbatim or
+        // near-verbatim duplicates ("pdflatex compiles successfully" appears
+        // in both sets); without this we ended up with 12 assertions where 4
+        // were exact duplicates and 4 more were semantic overlaps.
+        let key = normalize_for_dedup(&text);
+        if !key.is_empty() && !seen_texts.insert(key) {
+            continue;
+        }
         if seen_ids.contains(&id) {
             let mut n = 2u32;
             let mut new_id = format!("{id}_{n}");
@@ -607,6 +618,31 @@ fn merge_assertions(
         }
     }
     result
+}
+
+/// Normalize an assertion text for deduplication: lowercase, drop non-
+/// alphanumeric characters, collapse runs of whitespace. Catches verbatim
+/// duplicates and most punctuation-only / phrasing-trivial variations.
+/// Two assertions that hash to the same key are treated as the same
+/// constraint.
+fn normalize_for_dedup(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev_space = true;
+    for c in s.chars() {
+        if c.is_alphanumeric() {
+            for lower in c.to_lowercase() {
+                out.push(lower);
+            }
+            prev_space = false;
+        } else if c.is_whitespace() || c.is_ascii_punctuation() {
+            if !prev_space {
+                out.push(' ');
+                prev_space = true;
+            }
+        }
+        // Non-ASCII non-alphanumeric symbols (emoji, etc.) are dropped silently.
+    }
+    out.trim().to_string()
 }
 
 fn parse_assertion_array(raw: &str) -> Option<Vec<(String, String)>> {
@@ -822,6 +858,69 @@ mod tests {
         let a = vec![("A.001".into(), "x".into())];
         assert_eq!(merge_assertions(a.clone(), vec![]), a);
         assert_eq!(merge_assertions(vec![], a.clone()), a);
+    }
+
+    /// Semantic dedup: identical text under different ids collapses to one.
+    /// Anti-regression for the case where two-model negotiation produced 12
+    /// assertions because every Qwen assertion appeared again verbatim from
+    /// Gemma under a renumbered id (`A1` + `A1_2`).
+    #[test]
+    fn merge_assertions_dedupes_identical_text() {
+        let a = vec![
+            ("A1".into(), "pdflatex compiles main.tex successfully".into()),
+            ("A2".into(), "no overfull hbox warnings".into()),
+        ];
+        let b = vec![
+            ("B1".into(), "pdflatex compiles main.tex successfully".into()),
+            ("B2".into(), "synonyms.txt is unchanged".into()),
+        ];
+        let merged = merge_assertions(a, b);
+        assert_eq!(merged.len(), 3, "duplicate text must collapse");
+        let texts: Vec<&str> = merged.iter().map(|(_, t)| t.as_str()).collect();
+        assert!(texts.contains(&"pdflatex compiles main.tex successfully"));
+        assert!(texts.contains(&"no overfull hbox warnings"));
+        assert!(texts.contains(&"synonyms.txt is unchanged"));
+    }
+
+    /// Punctuation / case differences should also be treated as duplicates.
+    #[test]
+    fn merge_assertions_dedupes_phrasing_variants() {
+        let a = vec![("A1".into(), "pdflatex compiles main.tex successfully (exit code 0)".into())];
+        let b = vec![("B1".into(), "pdflatex   compiles main.tex successfully, exit code 0.".into())];
+        let merged = merge_assertions(a, b);
+        assert_eq!(merged.len(), 1,
+            "casing/punctuation/whitespace differences must not bypass dedup");
+    }
+
+    /// Different texts with the same id still both ship (with renumbering).
+    /// Keeps the existing `merge_assertions_renames_collisions` behaviour
+    /// intact when the texts are actually distinct.
+    #[test]
+    fn merge_assertions_preserves_distinct_texts_under_same_id() {
+        let a = vec![("A.001".into(), "first thing".into())];
+        let b = vec![("A.001".into(), "totally different thing".into())];
+        let merged = merge_assertions(a, b);
+        assert_eq!(merged.len(), 2, "different text must not be deduped");
+    }
+
+    // ── normalize_for_dedup ────────────────────────────────────────────────
+
+    #[test]
+    fn normalize_strips_case_and_punctuation() {
+        assert_eq!(normalize_for_dedup("Hello, World!"), "hello world");
+        assert_eq!(normalize_for_dedup("  HELLO   world  "), "hello world");
+        assert_eq!(normalize_for_dedup("foo.bar:baz"), "foo bar baz");
+    }
+
+    #[test]
+    fn normalize_collapses_whitespace() {
+        assert_eq!(normalize_for_dedup("a\n\tb  c"), "a b c");
+    }
+
+    #[test]
+    fn normalize_empty_is_empty() {
+        assert_eq!(normalize_for_dedup(""), "");
+        assert_eq!(normalize_for_dedup("...  ,, !!"), "");
     }
 
     // ── parse_assertion_array ──────────────────────────────────────────────
