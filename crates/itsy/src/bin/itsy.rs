@@ -761,8 +761,15 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     session.mutable.lock().reset_bash_loop_after_mutation();
                 }
 
-                // Pretty-print outcome.
-                print_tool_result(&name, &result, elapsed_ms, session.ro.flags.verbose);
+                // Pretty-print outcome — into the fullscreen TUI's running
+                // tool line if it's attached, otherwise to stdout.
+                let fs_handle = session.mutable.lock().fullscreen.clone();
+                if let Some(fs) = &fs_handle {
+                    let (status, msg) = tool_result_summary(&name, &result, elapsed_ms);
+                    fs.finish_tool(&name, status, &msg);
+                } else {
+                    print_tool_result(&name, &result, elapsed_ms, session.ro.flags.verbose);
+                }
 
                 // Record success/failure for tool scoring.
                 {
@@ -1152,27 +1159,12 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
         let content_opt = msg.get("content").and_then(|c| c.as_str()).map(String::from);
         let content_trimmed_len = content_opt.as_deref().map(|c| c.trim().len()).unwrap_or(0);
 
-        // Surface any extracted reasoning (inline <think> blocks captured by
-        // chat_completion, OR a `reasoning_content` field from providers that
-        // split it out separately) into the fullscreen TUI as a hidden-by-default
-        // line. The user toggles with Ctrl+T.
-        {
-            let fs_opt = session.mutable.lock().fullscreen.clone();
-            if let Some(fs) = &fs_opt {
-                if let Some(blocks) = msg.get("_itsy_thinking_blocks").and_then(|v| v.as_array()) {
-                    for b in blocks {
-                        if let Some(s) = b.as_str() {
-                            fs.add_thinking(s.to_string());
-                        }
-                    }
-                }
-                if let Some(rc) = msg.get("reasoning_content").and_then(|v| v.as_str()) {
-                    if !rc.trim().is_empty() {
-                        fs.add_thinking(rc.to_string());
-                    }
-                }
-            }
-        }
+        // Thinking is already pushed into the fullscreen TUI via
+        // `stream_thinking_token` during the SSE callback — re-adding from
+        // `_itsy_thinking_blocks` / `reasoning_content` here would duplicate
+        // every thinking block. Streaming only runs when fullscreen is
+        // attached, so there's no non-streaming branch that needs to surface
+        // reasoning to the TUI.
 
         // Empty-response retry: model returned no content AND no tool
         // calls. This is the IQ2_XXS "I give up" failure mode. Push the
@@ -1385,6 +1377,34 @@ fn sync_contract_to_todo(session: &AgentSession) {
         TodoItem { label: a.text.clone(), state, meta: Some(a.id.clone()) }
     }).collect();
     fs.set_todo(items);
+}
+
+/// Build a short one-line summary of a tool result, plus its status
+/// ("ok" / "err"). Used by both the classic stdout path and the fullscreen
+/// TUI's `finish_tool` so both surfaces present the same outcome string.
+fn tool_result_summary(name: &str, result: &Value, elapsed_ms: u64) -> (&'static str, String) {
+    if let Some(err) = result.get("error").and_then(|v| v.as_str()) {
+        ("err", format!("{err} ({elapsed_ms}ms)"))
+    } else if let Some(action) = result.get("action").and_then(|v| v.as_str()) {
+        let path = result.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        let lines = result.get("lines").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let line_num = result.get("line").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let body = match action {
+            "Created" => format!("created {path} ({lines} lines, {elapsed_ms}ms)"),
+            "Updated" => format!("updated {path} ({lines} lines, {elapsed_ms}ms)"),
+            "Edited" => format!("edited {path}:{line_num} ({elapsed_ms}ms)"),
+            _ => format!("{name} ({elapsed_ms}ms)"),
+        };
+        ("ok", body)
+    } else if let Some(cmd) = result.get("command").and_then(|v| v.as_str()) {
+        ("ok", format!("$ {cmd} ({elapsed_ms}ms)"))
+    } else if let Some(out) = result.get("result").and_then(|v| v.as_str()) {
+        let summary = out.lines().next().unwrap_or(out).trim_end_matches(':');
+        ("ok", format!("{} ({elapsed_ms}ms)",
+            itsy::executor::truncate_short(summary, 80)))
+    } else {
+        ("ok", format!("done ({elapsed_ms}ms)"))
+    }
 }
 
 fn print_tool_result(name: &str, result: &Value, elapsed_ms: u64, verbose: bool) {

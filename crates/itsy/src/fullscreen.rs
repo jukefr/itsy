@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        self, Event, KeyCode, KeyEvent, KeyEventKind,
         KeyModifiers, MouseEvent, MouseEventKind,
     },
     execute,
@@ -375,6 +375,35 @@ impl Fullscreen {
         st.push_line(ChatLine::Tool {
             name: name.to_string(),
             status,
+            msg: msg.to_string(),
+        });
+    }
+
+    /// Find the most recent `Tool` line that matches `name` and is still
+    /// `Running`, and update it in place with the terminal status + message.
+    /// Falls back to pushing a fresh tool line if no running line is found —
+    /// guarantees the result is always visible.
+    pub fn finish_tool(&self, name: &str, status: &str, msg: &str) {
+        let new_status = match status {
+            "ok" => ToolStatus::Ok,
+            "err" | "error" => ToolStatus::Err,
+            _ => ToolStatus::Running,
+        };
+        let mut st = self.state.lock();
+        let tab = st.active_mut();
+        for line in tab.chat_lines.iter_mut().rev() {
+            if let ChatLine::Tool { name: n, status: s, msg: m } = line {
+                if n == name && *s == ToolStatus::Running {
+                    *s = new_status;
+                    *m = msg.to_string();
+                    return;
+                }
+            }
+        }
+        // No running line — push a fresh one.
+        tab.chat_lines.push(ChatLine::Tool {
+            name: name.to_string(),
+            status: new_status,
             msg: msg.to_string(),
         });
     }
@@ -969,7 +998,12 @@ where
 {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    // Note: mouse capture intentionally NOT enabled. Some terminals leak
+    // partial SGR mouse-tracking bytes (e.g. "<35;50;15M") onto stdout when
+    // the TUI interleaves crossterm event reads with raw `println!` writes
+    // from the agent loop, leaving garbled digits on screen. PageUp/PageDown
+    // cover scroll; no other interaction needs the mouse.
+    execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut term = Terminal::new(backend)?;
 
@@ -1124,7 +1158,7 @@ where
     })();
 
     disable_raw_mode()?;
-    execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen)?;
+    execute!(io::stdout(), LeaveAlternateScreen)?;
     res
 }
 
@@ -1534,6 +1568,73 @@ mod tests {
         // unknown / "running" both fall to Running.
         assert_eq!(tools[2], &ToolStatus::Running);
         assert_eq!(tools[3], &ToolStatus::Running);
+    }
+
+    /// `finish_tool` mutates the matching Running line in place rather than
+    /// pushing a second line — anti-regression for the bug where every tool
+    /// produced two chat lines (running + ok) instead of one updated line.
+    #[test]
+    fn finish_tool_updates_running_line_in_place() {
+        let fs = Fullscreen::new();
+        fs.add_tool("bash", "running", "");
+        fs.finish_tool("bash", "ok", "$ ls (12ms)");
+
+        let st = fs.state.lock();
+        let tool_lines: Vec<&ChatLine> = st.active().chat_lines.iter()
+            .filter(|l| matches!(l, ChatLine::Tool { .. }))
+            .collect();
+        assert_eq!(tool_lines.len(), 1, "should mutate, not push a second line");
+        match tool_lines[0] {
+            ChatLine::Tool { name, status, msg } => {
+                assert_eq!(name, "bash");
+                assert_eq!(*status, ToolStatus::Ok);
+                assert_eq!(msg, "$ ls (12ms)");
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// `finish_tool` with no matching running line falls back to pushing —
+    /// guarantees the user always sees the result.
+    #[test]
+    fn finish_tool_pushes_when_no_running_line() {
+        let fs = Fullscreen::new();
+        fs.finish_tool("bash", "ok", "no prior running line");
+
+        let st = fs.state.lock();
+        let tool_lines: Vec<&ChatLine> = st.active().chat_lines.iter()
+            .filter(|l| matches!(l, ChatLine::Tool { .. }))
+            .collect();
+        assert_eq!(tool_lines.len(), 1);
+    }
+
+    /// Multiple parallel runs: finish_tool finds the right one by name +
+    /// status. Updates the most recent matching Running entry only.
+    #[test]
+    fn finish_tool_picks_most_recent_matching_running() {
+        let fs = Fullscreen::new();
+        fs.add_tool("bash", "running", "");
+        fs.add_tool("read_file", "running", "");
+        fs.add_tool("bash", "running", "");
+        fs.finish_tool("bash", "ok", "done");
+
+        let st = fs.state.lock();
+        let bash_lines: Vec<&ChatLine> = st.active().chat_lines.iter()
+            .filter(|l| matches!(l, ChatLine::Tool { name, .. } if name == "bash"))
+            .collect();
+        assert_eq!(bash_lines.len(), 2);
+        // First bash is still Running, second (most recent) is now Ok.
+        match bash_lines[0] {
+            ChatLine::Tool { status, .. } => assert_eq!(*status, ToolStatus::Running),
+            _ => unreachable!(),
+        }
+        match bash_lines[1] {
+            ChatLine::Tool { status, msg, .. } => {
+                assert_eq!(*status, ToolStatus::Ok);
+                assert_eq!(msg, "done");
+            }
+            _ => unreachable!(),
+        }
     }
 
     /// `add_diff` truncates large old/new at 8 lines and emits a "more" marker.
