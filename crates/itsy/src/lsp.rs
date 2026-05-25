@@ -541,4 +541,106 @@ mod tests {
             Some(42)
         );
     }
+
+    /// Multi-line header with `Content-Length` after another field is still parsed.
+    #[test]
+    fn parses_content_length_after_other_headers() {
+        let header = b"Content-Type: application/json\r\nContent-Length: 1234\r\n";
+        assert_eq!(parse_content_length(header), Some(1234));
+    }
+
+    /// Missing Content-Length returns None — anti-regression for accepting bogus headers.
+    #[test]
+    fn missing_content_length_returns_none() {
+        assert!(parse_content_length(b"Foo: bar\r\n").is_none());
+        assert!(parse_content_length(b"").is_none());
+    }
+
+    /// Non-UTF8 bytes in header return None (no panic).
+    #[test]
+    fn non_utf8_header_returns_none() {
+        let bad = vec![0xff, 0xfe, 0xfd];
+        assert!(parse_content_length(&bad).is_none());
+    }
+
+    /// `find_subslice` finds the needle at the right position.
+    #[test]
+    fn find_subslice_locates_needle() {
+        assert_eq!(find_subslice(b"hello world", b"world"), Some(6));
+        assert_eq!(find_subslice(b"abc", b"d"), None);
+        assert_eq!(find_subslice(b"", b"x"), None);
+        assert_eq!(find_subslice(b"abc", b""), None, "empty needle must return None");
+        // Needle longer than haystack.
+        assert_eq!(find_subslice(b"hi", b"hello"), None);
+    }
+
+    /// `detect_server` selects TypeScript on tsconfig.json.
+    #[test]
+    fn detects_typescript_from_tsconfig() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("tsconfig.json"), "{}").unwrap();
+        let s = detect_server(dir.path()).unwrap();
+        assert_eq!(s.language, "typescript");
+        assert_eq!(s.cmd, "typescript-language-server");
+    }
+
+    /// `detect_server` selects TypeScript on package.json (no tsconfig).
+    #[test]
+    fn detects_typescript_from_package_json() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("package.json"), "{}").unwrap();
+        let s = detect_server(dir.path()).unwrap();
+        assert_eq!(s.language, "typescript");
+    }
+
+    /// `detect_server` selects Python on pyproject.toml.
+    #[test]
+    fn detects_python_from_pyproject() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("pyproject.toml"), "[project]\nname='x'\n").unwrap();
+        let s = detect_server(dir.path()).unwrap();
+        assert_eq!(s.language, "python");
+        assert_eq!(s.cmd, "pyright-langserver");
+    }
+
+    /// `detect_server` selects Go on go.mod.
+    #[test]
+    fn detects_go_from_gomod() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("go.mod"), "module x\n").unwrap();
+        let s = detect_server(dir.path()).unwrap();
+        assert_eq!(s.language, "go");
+        assert_eq!(s.cmd, "gopls");
+    }
+
+    /// Empty directory: no LSP server detected.
+    #[test]
+    fn no_server_detected_for_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(detect_server(dir.path()).is_none());
+    }
+
+    /// Detection priority: tsconfig (TypeScript) wins over Cargo.toml if both
+    /// exist — anti-regression for the cascade ordering.
+    #[test]
+    fn typescript_wins_over_rust_when_both_present() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("tsconfig.json"), "{}").unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname='x'\n").unwrap();
+        let s = detect_server(dir.path()).unwrap();
+        assert_eq!(s.language, "typescript",
+            "tsconfig must outrank Cargo.toml in detection order");
+    }
+
+    /// `path_to_uri` builds a file:// URI from an absolute path.
+    #[test]
+    fn path_to_uri_absolute_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("file.rs");
+        std::fs::write(&f, "fn main() {}").unwrap();
+        let uri = path_to_uri(&f);
+        assert!(uri.starts_with("file://"));
+        // The file name should appear in the URI.
+        assert!(uri.ends_with("file.rs"));
+    }
 }

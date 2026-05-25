@@ -227,3 +227,180 @@ impl<L: AgentLoop> AcpAdapter<L> {
         self.agent_loop.run_prompt(&augmented, context)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Event helpers ──────────────────────────────────────────────────────
+
+    #[test]
+    fn tool_call_event_shape() {
+        let ev = from_tool_call("bash", &json!({"command":"ls"}));
+        assert_eq!(ev.kind, "tool_call");
+        assert_eq!(ev.data["name"], "bash");
+        assert_eq!(ev.data["arguments"]["command"], "ls");
+    }
+
+    #[test]
+    fn tool_result_event_shape() {
+        let ev = from_tool_result("bash", &json!({"stdout":"hi"}));
+        assert_eq!(ev.kind, "tool_result");
+        assert_eq!(ev.data["name"], "bash");
+        assert_eq!(ev.data["result"]["stdout"], "hi");
+    }
+
+    #[test]
+    fn assistant_text_event_shape() {
+        let ev = from_assistant_text("hello world");
+        assert_eq!(ev.kind, "assistant_text");
+        assert_eq!(ev.data["text"], "hello world");
+    }
+
+    #[test]
+    fn error_event_shape() {
+        let ev = from_error("oops");
+        assert_eq!(ev.kind, "error");
+        assert_eq!(ev.data["message"], "oops");
+    }
+
+    #[test]
+    fn metadata_event_preserves_payload() {
+        let meta = json!({"foo":"bar","count":3});
+        let ev = from_metadata(&meta);
+        assert_eq!(ev.kind, "metadata");
+        assert_eq!(ev.data, meta);
+    }
+
+    // ── Capabilities default ───────────────────────────────────────────────
+
+    #[test]
+    fn default_capabilities_enable_all_features() {
+        let c = AcpCapabilities::default();
+        assert!(c.edit);
+        assert!(c.command);
+        assert!(c.chat);
+        assert!(c.diagnostics);
+    }
+
+    // ── Adapter round-trip via stdin/stdout buffers ────────────────────────
+
+    struct EchoAgent;
+    impl AgentLoop for EchoAgent {
+        fn run_prompt(&mut self, text: &str, _ctx: Option<&Value>) -> PromptResult {
+            PromptResult { actions: vec![], message: format!("echo: {text}") }
+        }
+    }
+
+    /// Adapter emits capabilities on startup and `response` for `prompt` messages,
+    /// then exits on `shutdown`.
+    #[test]
+    fn adapter_responds_to_prompt_and_shutdown() {
+        let input = b"{\"type\":\"prompt\",\"id\":\"1\",\"text\":\"hello\"}\n{\"type\":\"shutdown\"}\n".to_vec();
+        let mut output = Vec::new();
+        let mut a = AcpAdapter::new(EchoAgent, json!({}));
+        a.run(input.as_slice(), &mut output);
+        let s = String::from_utf8_lossy(&output);
+        // First line: capabilities.
+        assert!(s.contains("agent.capabilities"));
+        assert!(s.contains("itsy"));
+        // Second: response.
+        assert!(s.contains("\"type\":\"response\""));
+        assert!(s.contains("echo: hello"));
+    }
+
+    /// Malformed JSON lines produce an `error` reply but DON'T abort the loop.
+    #[test]
+    fn adapter_recovers_from_malformed_json() {
+        let input = b"not json {{\n{\"type\":\"shutdown\"}\n".to_vec();
+        let mut output = Vec::new();
+        let mut a = AcpAdapter::new(EchoAgent, json!({}));
+        a.run(input.as_slice(), &mut output);
+        let s = String::from_utf8_lossy(&output);
+        assert!(s.contains("agent.capabilities"));
+        assert!(s.contains("\"type\":\"error\""), "must emit error on bad JSON; got: {s}");
+    }
+
+    /// Unknown message type → error reply (but loop continues).
+    #[test]
+    fn adapter_reports_unknown_message_type() {
+        let input = b"{\"type\":\"frobnicate\"}\n{\"type\":\"shutdown\"}\n".to_vec();
+        let mut output = Vec::new();
+        let mut a = AcpAdapter::new(EchoAgent, json!({}));
+        a.run(input.as_slice(), &mut output);
+        let s = String::from_utf8_lossy(&output);
+        assert!(s.contains("Unknown message type: frobnicate"));
+    }
+
+    /// `context.update` produces no reply but stores context for later prompts.
+    /// The next prompt's augmented text includes the file path from the context.
+    #[test]
+    fn context_update_then_prompt_augments_text() {
+        struct CaptureAgent { captured: std::sync::Arc<std::sync::Mutex<String>> }
+        impl AgentLoop for CaptureAgent {
+            fn run_prompt(&mut self, text: &str, _ctx: Option<&Value>) -> PromptResult {
+                *self.captured.lock().unwrap() = text.to_string();
+                PromptResult::default()
+            }
+        }
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let input = format!(
+            "{}\n{}\n{}\n",
+            json!({"type":"prompt","id":"1","text":"fix the bug","context":{"file":{"path":"src/foo.rs"}}}),
+            json!({"type":"shutdown"}),
+            ""
+        ).into_bytes();
+        let mut output = Vec::new();
+        let mut a = AcpAdapter::new(
+            CaptureAgent { captured: captured.clone() },
+            json!({}),
+        );
+        a.run(input.as_slice(), &mut output);
+        let augmented = captured.lock().unwrap().clone();
+        assert!(augmented.contains("fix the bug"));
+        assert!(augmented.contains("src/foo.rs"),
+            "augmented text must include file path; got {augmented:?}");
+    }
+
+    /// Diagnostic context is folded into the augmented prompt.
+    #[test]
+    fn diagnostics_are_folded_into_prompt() {
+        struct CaptureAgent { captured: std::sync::Arc<std::sync::Mutex<String>> }
+        impl AgentLoop for CaptureAgent {
+            fn run_prompt(&mut self, text: &str, _ctx: Option<&Value>) -> PromptResult {
+                *self.captured.lock().unwrap() = text.to_string();
+                PromptResult::default()
+            }
+        }
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let prompt_msg = json!({
+            "type":"prompt","id":"1","text":"fix",
+            "context":{"diagnostics":[{"severity":"error","file":"x.rs","line":42,"message":"type mismatch"}]}
+        });
+        let input = format!("{prompt_msg}\n{}\n", json!({"type":"shutdown"})).into_bytes();
+        let mut output = Vec::new();
+        let mut a = AcpAdapter::new(
+            CaptureAgent { captured: captured.clone() },
+            json!({}),
+        );
+        a.run(input.as_slice(), &mut output);
+        let augmented = captured.lock().unwrap().clone();
+        assert!(augmented.contains("IDE diagnostics:"));
+        assert!(augmented.contains("type mismatch"));
+        assert!(augmented.contains("x.rs:42"));
+    }
+
+    /// Empty input lines are skipped (no reply, no panic).
+    #[test]
+    fn adapter_skips_empty_lines() {
+        let input = b"\n\n   \n{\"type\":\"shutdown\"}\n".to_vec();
+        let mut output = Vec::new();
+        let mut a = AcpAdapter::new(EchoAgent, json!({}));
+        a.run(input.as_slice(), &mut output);
+        // Only capabilities frame should appear.
+        let s = String::from_utf8_lossy(&output);
+        assert!(s.contains("agent.capabilities"));
+        // No "error" lines from blank inputs.
+        assert!(!s.contains("\"type\":\"error\""));
+    }
+}

@@ -171,3 +171,183 @@ pub fn keywords_for_search(message: &str, limit: usize) -> Vec<String> {
     }
     k
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ── pick_within_budget ─────────────────────────────────────────────────
+
+    fn cand(key: &str, score: f64, tokens: usize) -> Candidate {
+        Candidate { key: key.into(), text: format!("text:{key}"), score, tokens }
+    }
+
+    #[test]
+    fn picker_returns_highest_score_first_within_budget() {
+        let cs = vec![cand("a", 0.5, 100), cand("b", 0.9, 100), cand("c", 0.7, 100)];
+        let r = pick_within_budget(cs, 350); // 350 ≥ 3×100 — all three fit
+        let keys: Vec<&str> = r.iter().map(|c| c.key.as_str()).collect();
+        // Sorted by score desc: b (0.9) > c (0.7) > a (0.5).
+        assert_eq!(keys, vec!["b", "c", "a"]);
+    }
+
+    /// At exactly the boundary, the third item gets squeezed out.
+    #[test]
+    fn picker_skips_third_item_at_tight_budget() {
+        let cs = vec![cand("a", 0.5, 100), cand("b", 0.9, 100), cand("c", 0.7, 100)];
+        let r = pick_within_budget(cs, 250); // exactly room for two
+        let keys: Vec<&str> = r.iter().map(|c| c.key.as_str()).collect();
+        assert_eq!(keys, vec!["b", "c"], "only top two fit in 250-token budget");
+    }
+
+    #[test]
+    fn picker_skips_items_over_budget() {
+        let cs = vec![cand("big", 0.9, 200), cand("small1", 0.5, 50), cand("small2", 0.4, 50)];
+        let r = pick_within_budget(cs, 100);
+        // big (200 > 100): skip. small1 (50) fits. small2 (50) brings total to 100, fits.
+        let keys: Vec<&str> = r.iter().map(|c| c.key.as_str()).collect();
+        assert!(!keys.contains(&"big"), "must skip over-budget item");
+        assert_eq!(keys, vec!["small1", "small2"]);
+    }
+
+    #[test]
+    fn picker_handles_empty_input() {
+        let r = pick_within_budget(vec![], 1000);
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn picker_zero_budget_picks_nothing() {
+        let cs = vec![cand("a", 0.9, 1)];
+        assert!(pick_within_budget(cs, 0).is_empty(),
+            "zero budget must pick nothing");
+    }
+
+    // ── extract_keywords ──────────────────────────────────────────────────
+
+    /// CamelCase / PascalCase words are kept verbatim (likely symbol names).
+    #[test]
+    fn extract_preserves_camelcase() {
+        let k = extract_keywords("look at AuthService and UserRepository");
+        assert!(k.contains(&"AuthService".to_string()));
+        assert!(k.contains(&"UserRepository".to_string()));
+    }
+
+    /// Lowercase meaningful words get lowercased.
+    #[test]
+    fn extract_lowercases_meaningful_words() {
+        let k = extract_keywords("debug the parser logic");
+        assert!(k.contains(&"parser".to_string()));
+        assert!(k.contains(&"logic".to_string()));
+    }
+
+    /// Stop words are filtered.
+    #[test]
+    fn extract_filters_stop_words() {
+        let k = extract_keywords("please find the file and fix the bug");
+        // "please", "find", "the", "fix" all should be filtered.
+        for w in ["please", "find", "the", "fix"] {
+            assert!(!k.iter().any(|kw| kw.eq_ignore_ascii_case(w)),
+                "stop word {w} must be filtered; got {k:?}");
+        }
+    }
+
+    /// Output capped at 5 keywords.
+    #[test]
+    fn extract_caps_at_five() {
+        let k = extract_keywords("parser lexer tokenizer evaluator interpreter compiler runtime");
+        assert!(k.len() <= 5, "must cap at 5; got {} keywords: {k:?}", k.len());
+    }
+
+    /// CamelCase words come BEFORE lowercase ones — pin the priority.
+    #[test]
+    fn extract_prioritises_camelcase() {
+        let k = extract_keywords("rewrite parser and AuthService logic");
+        // First non-stopword should be the CamelCase one.
+        assert_eq!(k.first().map(|s| s.as_str()), Some("AuthService"),
+            "CamelCase must lead; got {k:?}");
+    }
+
+    /// Short words (<4 chars lowercase) are filtered.
+    #[test]
+    fn extract_drops_short_lowercase_words() {
+        let k = extract_keywords("a b cd efghijk");
+        // "a", "b", "cd" all too short (<4 chars).
+        assert!(!k.iter().any(|w| w == "a" || w == "b" || w == "cd"));
+        assert!(k.iter().any(|w| w == "efghijk"));
+    }
+
+    /// Punctuation is treated as separator.
+    #[test]
+    fn extract_treats_punctuation_as_separator() {
+        let k = extract_keywords("parser,lexer.tokenizer");
+        assert!(k.iter().any(|w| w == "parser"));
+        assert!(k.iter().any(|w| w == "lexer"));
+        assert!(k.iter().any(|w| w == "tokenizer"));
+    }
+
+    // ── retrieve_context_from_results ─────────────────────────────────────
+
+    #[test]
+    fn retrieve_empty_results_is_default() {
+        let r = retrieve_context_from_results(&[], 10);
+        assert!(r.files.is_empty());
+        assert!(r.symbols.is_empty());
+        assert_eq!(r.token_estimate, 0);
+    }
+
+    #[test]
+    fn retrieve_extracts_file_paths_from_content_array() {
+        let results = vec![json!({
+            "content": [{"text": "found in src/auth/login.rs and lib/parser.py"}]
+        })];
+        let r = retrieve_context_from_results(&results, 10);
+        assert!(r.files.iter().any(|f| f.contains("login.rs")));
+        assert!(r.files.iter().any(|f| f.contains("parser.py")));
+    }
+
+    #[test]
+    fn retrieve_extracts_symbols_from_text() {
+        let results = vec![json!({
+            "content": [{"text": "calls AuthService and UserRepository, function login()"}]
+        })];
+        let r = retrieve_context_from_results(&results, 10);
+        assert!(r.symbols.iter().any(|s| s == "AuthService"));
+        assert!(r.symbols.iter().any(|s| s == "UserRepository"));
+        assert!(r.symbols.iter().any(|s| s == "login"),
+            "must extract function name (strip 'function ' prefix); got {:?}", r.symbols);
+    }
+
+    #[test]
+    fn retrieve_handles_string_result() {
+        // Raw string (no `content` array).
+        let results = vec![json!("see auth.rs and ParserService")];
+        let r = retrieve_context_from_results(&results, 10);
+        assert!(r.files.iter().any(|f| f.contains("auth.rs")));
+        assert!(r.symbols.iter().any(|s| s == "ParserService"));
+    }
+
+    #[test]
+    fn retrieve_respects_max_files() {
+        let big_text = (0..50).map(|i| format!("file{i}.rs")).collect::<Vec<_>>().join(" ");
+        let results = vec![json!({"content": [{"text": big_text}]})];
+        let r = retrieve_context_from_results(&results, 5);
+        assert!(r.files.len() <= 5, "must cap at max_files=5; got {} files", r.files.len());
+    }
+
+    #[test]
+    fn retrieve_dedupes_repeated_files() {
+        let results = vec![json!({"content": [{"text": "auth.rs auth.rs auth.rs"}]})];
+        let r = retrieve_context_from_results(&results, 10);
+        let auth_count = r.files.iter().filter(|f| f.contains("auth.rs")).count();
+        assert_eq!(auth_count, 1, "must dedupe; got {auth_count} copies of auth.rs");
+    }
+
+    /// `keywords_for_search` caps the keyword list at `limit`.
+    #[test]
+    fn keywords_for_search_respects_limit() {
+        let k = keywords_for_search("parser lexer tokenizer evaluator interpreter", 2);
+        assert!(k.len() <= 2);
+    }
+}

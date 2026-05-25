@@ -259,4 +259,127 @@ mod tests {
         assert!(l.iter().find(|i| i.id == s2.id).unwrap().active);
         assert!(!l.iter().find(|i| i.id == s1.id).unwrap().active);
     }
+
+    /// New session gets a default title `Session N` when no title given.
+    #[test]
+    fn auto_titles_when_none() {
+        let m = MultiSession::new();
+        let s1 = m.create(None);
+        let s2 = m.create(None);
+        assert_eq!(s1.title, "Session 1");
+        assert_eq!(s2.title, "Session 2");
+    }
+
+    /// kill returns false on unknown id.
+    #[test]
+    fn kill_unknown_returns_false() {
+        let m = MultiSession::new();
+        m.create(None);
+        assert!(!m.kill("no-such-id"));
+        assert_eq!(m.count(), 1, "real session must not be removed");
+    }
+
+    /// Killing the last session leaves active=None.
+    #[test]
+    fn kill_last_session_clears_active() {
+        let m = MultiSession::new();
+        let s = m.create(None);
+        assert!(m.kill(&s.id));
+        assert!(m.active_id().is_none());
+        assert_eq!(m.count(), 0);
+    }
+
+    /// switch to an unknown id returns None and doesn't change active.
+    #[test]
+    fn switch_unknown_returns_none() {
+        let m = MultiSession::new();
+        let s = m.create(None);
+        assert!(m.switch("nope").is_none());
+        assert_eq!(m.active_id().as_deref(), Some(s.id.as_str()),
+            "active must remain unchanged on failed switch");
+    }
+
+    /// status() returns None for unknown id.
+    #[test]
+    fn status_unknown_is_none() {
+        let m = MultiSession::new();
+        m.create(None);
+        assert!(m.status("nope").is_none());
+    }
+
+    /// set_status updates lifecycle state.
+    #[test]
+    fn set_status_updates_lifecycle() {
+        let m = MultiSession::new();
+        let s = m.create(None);
+        assert!(m.set_status(&s.id, SessionStatus::Paused));
+        let after = m.status(&s.id).unwrap();
+        assert_eq!(after.status, SessionStatus::Paused);
+    }
+
+    /// set_status on unknown returns false.
+    #[test]
+    fn set_status_unknown_returns_false() {
+        let m = MultiSession::new();
+        assert!(!m.set_status("nope", SessionStatus::Paused));
+    }
+
+    /// push_message and get_messages round-trip on the active session.
+    #[test]
+    fn push_and_get_messages_round_trip() {
+        let m = MultiSession::new();
+        let _ = m.create(None);
+        assert!(m.push_message(serde_json::json!({"role":"user","content":"hi"})));
+        assert!(m.push_message(serde_json::json!({"role":"assistant","content":"hello"})));
+        let msgs = m.get_messages();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0]["content"], "hi");
+        assert_eq!(msgs[1]["content"], "hello");
+    }
+
+    /// push_message returns false when there's no active session.
+    #[test]
+    fn push_message_without_active_returns_false() {
+        let m = MultiSession::new();
+        let r = m.push_message(serde_json::json!({"role":"user","content":"x"}));
+        assert!(!r, "must refuse push when no active session exists");
+    }
+
+    /// get_messages with no active session returns an empty vec.
+    #[test]
+    fn get_messages_with_no_active_is_empty() {
+        let m = MultiSession::new();
+        assert!(m.get_messages().is_empty());
+    }
+
+    /// inc_tool_calls increments the counter on the active session only.
+    #[test]
+    fn inc_tool_calls_increments_active() {
+        let m = MultiSession::new();
+        let s = m.create(None);
+        m.inc_tool_calls();
+        m.inc_tool_calls();
+        let info = m.status(&s.id).unwrap();
+        assert_eq!(info.tool_calls, 2);
+    }
+
+    /// `new_id` produces 6 hex chars.
+    #[test]
+    fn new_id_format() {
+        let id = MultiSession::new_id();
+        assert_eq!(id.len(), 6);
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit()), "got id={id}");
+    }
+
+    /// count() reflects sessions added/removed.
+    #[test]
+    fn count_tracks_size() {
+        let m = MultiSession::new();
+        assert_eq!(m.count(), 0);
+        let s1 = m.create(None);
+        let _ = m.create(None);
+        assert_eq!(m.count(), 2);
+        m.kill(&s1.id);
+        assert_eq!(m.count(), 1);
+    }
 }

@@ -179,3 +179,90 @@ pub fn debug(area: &str, msg: &str) {
         eprintln!("[{area}] {msg}");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `span_id` is monotonic-ish: two consecutive calls return different ids.
+    #[test]
+    fn span_id_is_unique_per_call() {
+        let a = span_id();
+        let b = span_id();
+        assert_ne!(a, b);
+        assert!(a.contains('-'), "format: <ts>-<counter>; got {a}");
+    }
+
+    /// `Logger::new` and `create_logger` are equivalent constructors.
+    #[test]
+    fn logger_constructors_are_equivalent() {
+        let a = Logger::new("svc");
+        let b = create_logger("svc");
+        assert_eq!(a.service, b.service);
+        assert_eq!(a.service, "svc");
+    }
+
+    /// Default global logger uses the canonical service name.
+    #[test]
+    fn global_logger_uses_canonical_name() {
+        assert_eq!(logger().service, "ItsyCognition");
+    }
+
+    /// `merge_fields` overwrites reserved keys with caller-provided ones.
+    /// Anti-regression: a logged trace_id from the caller must replace the empty default.
+    #[test]
+    fn merge_fields_lets_caller_override_defaults() {
+        let mut out: Map<String, Value> = Map::new();
+        out.insert("trace_id".into(), json!(""));
+        out.insert("level".into(), json!("info"));
+        let extra = json!({"trace_id": "abc-123", "level": "warn"});
+        merge_fields(&mut out, extra.as_object().unwrap());
+        assert_eq!(out["trace_id"], "abc-123");
+        assert_eq!(out["level"], "warn");
+    }
+
+    /// `build_fields` produces a JSON object with `event_area` + nested
+    /// `metadata` containing the optional error.
+    #[test]
+    fn build_fields_shape() {
+        let f = build_fields("auth", Some("bad token"));
+        assert_eq!(f["event_area"], "auth");
+        assert_eq!(f["metadata"]["error"], "bad token");
+
+        let f = build_fields("auth", None);
+        assert_eq!(f["event_area"], "auth");
+        // metadata is an empty object when no error provided.
+        assert!(f["metadata"].as_object().unwrap().is_empty());
+    }
+
+    /// All emit-level methods are safe no-ops when ITSY_COGNITION_LOG is unset.
+    /// Anti-regression: a log call must NEVER panic, regardless of env state.
+    #[test]
+    fn emit_is_safe_with_no_target() {
+        // Don't assert on stdout/stderr (parallel tests would race).
+        // Just confirm no panic.
+        let l = Logger::new("test");
+        l.info("event", None);
+        l.warn("event", None);
+        l.error("event", None);
+        l.debug("event", None);
+    }
+
+    /// LogEntry serialises with `metadata` omitted when None.
+    #[test]
+    fn log_entry_omits_none_metadata() {
+        let e = LogEntry {
+            level: "info".into(),
+            event: "x".into(),
+            status: "ok".into(),
+            trace_id: "t".into(),
+            timestamp: "2024".into(),
+            service: "svc".into(),
+            span_id: "s".into(),
+            metadata: None,
+        };
+        let j: Value = serde_json::to_value(&e).unwrap();
+        assert!(j.get("metadata").is_none(), "None metadata must be omitted");
+        assert_eq!(j["level"], "info");
+    }
+}

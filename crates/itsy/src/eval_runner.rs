@@ -237,3 +237,112 @@ pub fn known_suite(name: &str) -> Result<&'static str, String> {
 pub fn suite_to_value(r: &SuiteResult) -> Value {
     serde_json::to_value(r).unwrap_or(Value::Null)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `known_suite` returns the canonical name for valid suites.
+    #[test]
+    fn known_suite_recognises_canonical_names() {
+        assert_eq!(known_suite("classify_accuracy"), Ok("classify_accuracy"));
+        assert_eq!(known_suite("tool_selection"), Ok("tool_selection"));
+        assert_eq!(known_suite("response_quality"), Ok("response_quality"));
+    }
+
+    /// `known_suite` returns an error with the available list for unknown suites.
+    #[test]
+    fn known_suite_lists_available_on_unknown() {
+        let err = known_suite("nonexistent").unwrap_err();
+        assert!(err.contains("Unknown suite: nonexistent"));
+        assert!(err.contains("classify_accuracy"));
+        assert!(err.contains("tool_selection"));
+        assert!(err.contains("response_quality"));
+    }
+
+    /// `format_results` renders the suite name, score, and per-case marks.
+    #[test]
+    fn format_results_renders_pass_fail_marks() {
+        let r = SuiteResult {
+            suite: "test".into(),
+            name: "Test Suite".into(),
+            total: 2,
+            passed: 1,
+            failed: 1,
+            score: "50.0%".into(),
+            cases: vec![
+                CaseResult { input: "input one".into(), passed: true, got: "ok".into(), expected: Some("ok".into()) },
+                CaseResult { input: "input two".into(), passed: false, got: "wrong".into(), expected: Some("right".into()) },
+            ],
+        };
+        let out = format_results(&r);
+        assert!(out.contains("Test Suite"));
+        assert!(out.contains("50.0%"));
+        assert!(out.contains("✓"));
+        assert!(out.contains("✗"));
+        assert!(out.contains("exp: right"));
+        assert!(out.contains("input one"));
+    }
+
+    /// `format_results` truncates long inputs (~50 char cap).
+    #[test]
+    fn format_results_truncates_long_inputs() {
+        let long_in = "x".repeat(500);
+        let r = SuiteResult {
+            suite: "t".into(),
+            name: "N".into(),
+            total: 1,
+            passed: 1,
+            failed: 0,
+            score: "100%".into(),
+            cases: vec![CaseResult { input: long_in, passed: true, got: "ok".into(), expected: None }],
+        };
+        let out = format_results(&r);
+        let x_run = out.matches('x').count();
+        assert!(x_run <= 60, "must truncate long input; got {x_run} xs");
+    }
+
+    /// `suite_to_value` returns valid JSON matching the SuiteResult shape.
+    #[test]
+    fn suite_to_value_round_trips() {
+        let r = SuiteResult {
+            suite: "test".into(),
+            name: "Test".into(),
+            total: 3,
+            passed: 2,
+            failed: 1,
+            score: "66.7%".into(),
+            cases: vec![],
+        };
+        let v = suite_to_value(&r);
+        assert_eq!(v["suite"], "test");
+        assert_eq!(v["passed"], 2);
+        assert_eq!(v["failed"], 1);
+        assert_eq!(v["total"], 3);
+        assert_eq!(v["score"], "66.7%");
+    }
+
+    /// EvalRunner::new starts with an empty results list.
+    #[test]
+    fn eval_runner_new_starts_empty() {
+        use crate::config::{
+            ContextConfig, GitConfig, ModelConfig, ToolsConfig, TuiConfig,
+        };
+        let cfg = Config {
+            model: ModelConfig { provider: "x".into(), name: "y".into(), base_url: "http://localhost".into(), timeout: 60, api_key: None },
+            context: ContextConfig { max_budget_pct: 70, detected_window: 32_768, working_memory_tokens: 8192, summary_threshold: 8000 },
+            tools: ToolsConfig { bash_timeout: 30, tool_routing: "direct".into(), web_browse: false, shell_persist: true, shell_contain: false, rtk: true },
+            tui: TuiConfig { show_token_usage: false, auto_approve: false, theme: "dark".into(), classic: false },
+            git: GitConfig { auto_commit: false },
+            features: Default::default(), models: None, limits: Default::default(),
+            security: Default::default(), diff: Default::default(), filetree: Default::default(),
+            snapshots: Default::default(), code_graph: Default::default(),
+            tests: Default::default(), traces: Default::default(),
+            dedup: Default::default(), evidence: Default::default(),
+            plugins: Default::default(), diag: Default::default(),
+            second_opinion: Default::default(),
+        };
+        let r = EvalRunner::new(&cfg);
+        assert!(r.results.is_empty());
+    }
+}

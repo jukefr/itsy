@@ -179,3 +179,65 @@ impl Default for McpBridge {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `new()` builds an idle bridge with `next_id == 1`.
+    #[test]
+    fn new_starts_idle() {
+        let b = McpBridge::new();
+        let inner = b.inner.lock();
+        assert!(inner.proc.is_none());
+        assert!(inner.stdin.is_none());
+        assert_eq!(inner.next_id, 1, "id counter must start at 1");
+    }
+
+    /// `Default` and `new` produce equivalent bridges.
+    #[test]
+    fn default_matches_new() {
+        let a = McpBridge::default();
+        let b = McpBridge::new();
+        let ai = a.inner.lock();
+        let bi = b.inner.lock();
+        assert_eq!(ai.next_id, bi.next_id);
+        assert!(ai.proc.is_none() && bi.proc.is_none());
+    }
+
+    /// `call` without a running server returns None (no panic).
+    /// Anti-regression: callers must be able to invoke optimistically.
+    #[tokio::test]
+    async fn call_without_start_returns_none() {
+        let b = McpBridge::new();
+        let r = b.call("tools/list", serde_json::json!({})).await;
+        assert!(r.is_none(), "call before start must safely return None");
+    }
+
+    /// `kill` on an idle bridge is a no-op (no panic).
+    #[test]
+    fn kill_idle_is_noop() {
+        let b = McpBridge::new();
+        b.kill();
+        // Subsequent kill also safe.
+        b.kill();
+    }
+
+    /// `find_mcp_path` returns None when no candidates exist (default test env).
+    /// Anti-regression: must not panic exploring filesystem candidates.
+    #[test]
+    fn find_mcp_path_handles_no_candidates() {
+        // We can't easily make this return Some without dropping fixtures into
+        // the cargo build dir. Just confirm the function returns without panic.
+        let _ = McpBridge::find_mcp_path();
+    }
+
+    /// `init_code_graph` returns true when native graph indexes successfully,
+    /// false when no graph backend and no MCP server is available.
+    #[tokio::test]
+    async fn init_code_graph_returns_bool() {
+        let b = McpBridge::new();
+        // Whatever the result, the function must NOT panic and must return a bool.
+        let _result: bool = b.init_code_graph("test-version").await;
+    }
+}

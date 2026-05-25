@@ -676,3 +676,145 @@ fn strip_fences(s: &str) -> String {
         .trim()
         .to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── strip_fences ────────────────────────────────────────────────────────
+
+    #[test]
+    fn strip_fences_handles_json_fence() {
+        assert_eq!(strip_fences("```json\n{\"a\":1}\n```"), "{\"a\":1}");
+    }
+
+    #[test]
+    fn strip_fences_handles_bare_fence() {
+        assert_eq!(strip_fences("```\ndata\n```"), "data");
+    }
+
+    #[test]
+    fn strip_fences_passes_through_unfenced() {
+        assert_eq!(strip_fences("plain text"), "plain text");
+        assert_eq!(strip_fences("{\"a\":1}"), "{\"a\":1}");
+    }
+
+    #[test]
+    fn strip_fences_handles_empty() {
+        assert_eq!(strip_fences(""), "");
+        assert_eq!(strip_fences("   "), "");
+    }
+
+    // ── truncate ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn truncate_short_strings_pass_through() {
+        assert_eq!(truncate("hello", 10), "hello");
+    }
+
+    #[test]
+    fn truncate_long_strings_cap_at_n() {
+        let s = "x".repeat(100);
+        assert_eq!(truncate(&s, 20).len(), 20);
+    }
+
+    #[test]
+    fn truncate_respects_utf8_boundaries() {
+        // 'é' is 2 bytes; cutting at 5 in "héllo" needs to land on a char boundary.
+        let r = truncate("héllo wörld", 5);
+        // Must not panic, and must yield valid UTF-8.
+        assert!(r.len() <= 5);
+        assert!(r.chars().count() > 0);
+    }
+
+    // ── merge_assertions ────────────────────────────────────────────────────
+
+    #[test]
+    fn merge_assertions_concatenates_unique_ids() {
+        let a = vec![("A.001".into(), "first".into())];
+        let b = vec![("A.002".into(), "second".into())];
+        let merged = merge_assertions(a, b);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].0, "A.001");
+        assert_eq!(merged[1].0, "A.002");
+    }
+
+    /// Conflicting IDs are renumbered (`A.001` → `A.001_2`) — anti-regression
+    /// for silent data loss when two assertion sets share IDs.
+    #[test]
+    fn merge_assertions_renames_collisions() {
+        let a = vec![("A.001".into(), "from a".into())];
+        let b = vec![("A.001".into(), "from b".into())];
+        let merged = merge_assertions(a, b);
+        assert_eq!(merged.len(), 2, "no assertion may be silently dropped");
+        assert_eq!(merged[0].0, "A.001");
+        assert_eq!(merged[1].0, "A.001_2",
+            "duplicate ID must be renumbered, not collapsed");
+        assert_eq!(merged[0].1, "from a");
+        assert_eq!(merged[1].1, "from b");
+    }
+
+    /// Multiple collisions of the same id keep increasing the suffix.
+    #[test]
+    fn merge_assertions_handles_triple_collision() {
+        let a = vec![("X".into(), "a".into()), ("X".into(), "b".into())];
+        let b = vec![("X".into(), "c".into())];
+        let merged = merge_assertions(a, b);
+        assert_eq!(merged.len(), 3);
+        let ids: Vec<&str> = merged.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, vec!["X", "X_2", "X_3"]);
+    }
+
+    /// Empty inputs handled gracefully.
+    #[test]
+    fn merge_assertions_empty_inputs() {
+        assert!(merge_assertions(vec![], vec![]).is_empty());
+        let a = vec![("A.001".into(), "x".into())];
+        assert_eq!(merge_assertions(a.clone(), vec![]), a);
+        assert_eq!(merge_assertions(vec![], a.clone()), a);
+    }
+
+    // ── parse_assertion_array ──────────────────────────────────────────────
+
+    #[test]
+    fn parse_assertions_valid_array() {
+        let raw = r#"[{"id":"A.001","text":"hello world"},{"id":"A.002","text":"goodbye"}]"#;
+        let r = parse_assertion_array(raw).unwrap();
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[0], ("A.001".into(), "hello world".into()));
+        assert_eq!(r[1], ("A.002".into(), "goodbye".into()));
+    }
+
+    /// Parse strips fences first.
+    #[test]
+    fn parse_assertions_strips_fences_first() {
+        let raw = "```json\n[{\"id\":\"A.001\",\"text\":\"hello world\"}]\n```";
+        let r = parse_assertion_array(raw).unwrap();
+        assert_eq!(r.len(), 1);
+    }
+
+    /// Missing fields → assertion dropped.
+    #[test]
+    fn parse_assertions_drops_invalid_items() {
+        let raw = r#"[
+            {"id":"A.001","text":"valid one"},
+            {"id":"","text":"empty id"},
+            {"text":"missing id"},
+            {"id":"A.002","text":"x"}
+        ]"#;
+        let r = parse_assertion_array(raw).unwrap();
+        // A.001 stays; empty id, missing id dropped; A.002 text too short (3 chars).
+        assert!(r.iter().any(|(id, _)| id == "A.001"));
+        assert!(!r.iter().any(|(id, _)| id.is_empty()));
+        assert!(!r.iter().any(|(id, _)| id == "A.002"),
+            "text shorter than 5 chars must be dropped; got {r:?}");
+    }
+
+    /// Non-array / malformed JSON returns None.
+    #[test]
+    fn parse_assertions_rejects_non_array() {
+        assert!(parse_assertion_array("not json").is_none());
+        assert!(parse_assertion_array("{\"obj\":true}").is_none());
+        assert!(parse_assertion_array("[]").is_none(), "empty array → None");
+    }
+}

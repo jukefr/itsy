@@ -485,3 +485,146 @@ fn truncate(s: &str, n: usize) -> String {
 }
 
 fn _unused(_p: &Path) {} // keep PermissionsExt import live on non-Unix builds
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp() -> tempfile::TempDir { tempfile::tempdir().unwrap() }
+
+    /// `start` returns a non-empty ID and switches into recording mode.
+    #[test]
+    fn start_returns_id_and_enables_recording() {
+        let dir = tmp();
+        let mut r = TraceRecorder::new(dir.path().to_path_buf());
+        assert!(!r.recording);
+        assert!(r.current.is_none());
+        let id = r.start("test prompt", "test-model");
+        assert!(!id.is_empty());
+        assert!(r.recording);
+        let cur = r.current.as_ref().unwrap();
+        assert_eq!(cur.prompt, "test prompt");
+        assert_eq!(cur.model, "test-model");
+        assert_eq!(cur.id, id);
+    }
+
+    /// Recording when not started is a no-op (doesn't panic).
+    #[test]
+    fn record_tool_call_before_start_is_noop() {
+        let mut r = TraceRecorder::new(tmp().path().to_path_buf());
+        r.record_tool_call("bash", &serde_json::json!({}), &serde_json::json!({}), 5);
+        assert!(r.current.is_none(), "no recording → no trace");
+    }
+
+    /// `record_tool_call` appends a step with the safe args + truncated result.
+    #[test]
+    fn record_tool_call_appends_step() {
+        let mut r = TraceRecorder::new(tmp().path().to_path_buf());
+        let _id = r.start("p", "m");
+        r.record_tool_call("bash", &serde_json::json!({"command":"ls"}),
+            &serde_json::json!({"result":"file1\nfile2"}), 42);
+        let cur = r.current.as_ref().unwrap();
+        assert_eq!(cur.steps.len(), 1);
+        match &cur.steps[0] {
+            TraceStep::ToolCall { name, duration_ms, .. } => {
+                assert_eq!(name, "bash");
+                assert_eq!(*duration_ms, 42);
+            }
+            other => panic!("expected ToolCall, got {other:?}"),
+        }
+    }
+
+    /// `record_tokens` accumulates token totals.
+    #[test]
+    fn record_tokens_accumulates() {
+        let mut r = TraceRecorder::new(tmp().path().to_path_buf());
+        let _ = r.start("p", "m");
+        r.record_tokens(100, 50);
+        r.record_tokens(20, 10);
+        let t = &r.current.as_ref().unwrap().tokens;
+        assert_eq!(t.prompt, 120);
+        assert_eq!(t.completion, 60);
+    }
+
+    /// `record_classification` only records when `recording` is true.
+    #[test]
+    fn record_classification_respects_recording_flag() {
+        let mut r = TraceRecorder::new(tmp().path().to_path_buf());
+        // No start() — should be no-op.
+        r.record_classification("coding", Some("plan"), 0.8);
+        assert!(r.current.is_none());
+
+        let _ = r.start("p", "m");
+        r.record_classification("coding", Some("plan"), 0.8);
+        let cur = r.current.as_ref().unwrap();
+        assert_eq!(cur.steps.len(), 1);
+    }
+
+    /// `stop` finalises the trace (sets ended_at, duration_ms) and clears
+    /// the recorder for the next session.
+    #[test]
+    fn stop_finalises_trace_and_clears_state() {
+        let dir = tmp();
+        let mut r = TraceRecorder::new(dir.path().to_path_buf());
+        let _ = r.start("p", "m");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let trace = r.stop().expect("must return the finalised trace");
+        assert!(trace.ended_at.is_some());
+        assert!(trace.duration_ms.is_some());
+        assert!(trace.duration_ms.unwrap() >= 1, "expected non-trivial duration");
+        assert!(!r.recording);
+        assert!(r.current.is_none());
+    }
+
+    /// `stop` when not recording returns None.
+    #[test]
+    fn stop_without_start_returns_none() {
+        let mut r = TraceRecorder::new(tmp().path().to_path_buf());
+        assert!(r.stop().is_none());
+    }
+
+    /// Pure helpers — truncate is char-boundary safe.
+    #[test]
+    fn truncate_helper_handles_multibyte() {
+        // 'é' is 2 bytes — naive truncate(5) on "héllo" panics; this must not.
+        let s = truncate(&"é".repeat(2000), 50);
+        assert!(s.len() <= 50);
+        assert!(s.chars().count() > 0);
+    }
+
+    #[test]
+    fn truncate_helper_passes_through_short() {
+        assert_eq!(truncate("hi", 100), "hi");
+    }
+
+    /// `short_id` produces non-empty, alphanumeric IDs.
+    #[test]
+    fn short_id_is_alphanumeric() {
+        let id = short_id();
+        assert!(!id.is_empty());
+        assert!(id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
+            "got id={id}");
+    }
+
+    /// `record_error` captures scope + message.
+    #[test]
+    fn record_error_captures_message() {
+        let mut r = TraceRecorder::new(tmp().path().to_path_buf());
+        let _ = r.start("p", "m");
+        r.record_error("model_client", "API timeout");
+        let cur = r.current.as_ref().unwrap();
+        assert_eq!(cur.steps.len(), 1);
+        // Just confirm the step was recorded (variant detail is internal).
+    }
+
+    /// `record_validation` captures file path + pass/fail.
+    #[test]
+    fn record_validation_captures_path_and_status() {
+        let mut r = TraceRecorder::new(tmp().path().to_path_buf());
+        let _ = r.start("p", "m");
+        r.record_validation("src/foo.rs", true, &[]);
+        r.record_validation("src/bar.rs", false, &["error1".into(), "error2".into()]);
+        let cur = r.current.as_ref().unwrap();
+        assert_eq!(cur.steps.len(), 2);
+    }
+}

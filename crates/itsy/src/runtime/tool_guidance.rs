@@ -146,3 +146,104 @@ pub fn select_tool_skill_cards(messages: &[Value]) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Known tool names produce non-empty cards.
+    #[test]
+    fn known_tools_have_cards() {
+        for name in ["patch", "read_and_patch", "write_file", "bash", "read_file"] {
+            assert!(!tool_skill_card(name).is_empty(), "{name} must have a card");
+        }
+    }
+
+    /// Unknown tool names yield empty card.
+    #[test]
+    fn unknown_tool_yields_empty_card() {
+        assert!(tool_skill_card("xxx").is_empty());
+        assert!(tool_skill_card("").is_empty());
+    }
+
+    /// No messages → empty selection.
+    #[test]
+    fn empty_history_selects_no_cards() {
+        assert_eq!(select_tool_skill_cards(&[]), "");
+    }
+
+    /// Error in tool message → that tool's card is selected.
+    #[test]
+    fn error_tool_message_selects_card() {
+        let msgs = vec![
+            json!({"role": "user", "content": "please patch the file"}),
+            json!({"role": "assistant", "tool_calls": [
+                {"id": "x", "function": {"name": "patch", "arguments": "{}"}}
+            ]}),
+            json!({"role": "tool", "tool_call_id": "x", "content": "Error: hunk failed: mismatch"}),
+        ];
+        let s = select_tool_skill_cards(&msgs);
+        assert!(s.contains("## Tool guidance"));
+        assert!(s.contains("### patch"));
+    }
+
+    /// User intent keywords surface intent-based cards even without prior failures.
+    #[test]
+    fn user_intent_surfaces_cards() {
+        // "write" → write_file card. (write_file appears in the user msg.)
+        let msgs = vec![json!({"role":"user","content":"please write a new file"})];
+        let s = select_tool_skill_cards(&msgs);
+        assert!(s.contains("### write_file"), "got: {s}");
+    }
+
+    /// `[SYSTEM]`-prefixed user messages are ignored for intent detection.
+    /// Anti-regression: system nudges shouldn't perturb intent classification.
+    #[test]
+    fn system_prefixed_user_messages_ignored_for_intent() {
+        let msgs = vec![
+            json!({"role":"user","content":"[SYSTEM] you have been reading too long, write something"}),
+        ];
+        let s = select_tool_skill_cards(&msgs);
+        // No real intent — should not pick a "write_file" card from a system nudge.
+        assert!(s.is_empty() || !s.contains("### write_file"),
+            "system-nudge content must not trigger intent cards; got {s}");
+    }
+
+    /// At most 3 cards per injection (bounded payload).
+    #[test]
+    fn caps_card_count_at_three() {
+        let msgs = vec![
+            json!({"role":"user","content":"read write patch bash edit fix run check"}),
+            json!({"role":"assistant","tool_calls":[
+                {"id":"a","function":{"name":"patch","arguments":"{}"}},
+                {"id":"b","function":{"name":"bash","arguments":"{}"}},
+                {"id":"c","function":{"name":"read_file","arguments":"{}"}},
+                {"id":"d","function":{"name":"write_file","arguments":"{}"}},
+            ]}),
+        ];
+        let s = select_tool_skill_cards(&msgs);
+        let card_count = s.matches("###").count();
+        assert!(card_count <= 3, "must cap at 3 cards; got {card_count}");
+    }
+
+    /// Error-recovery takes priority over recency.
+    #[test]
+    fn error_tools_outrank_recency() {
+        let msgs = vec![
+            json!({"role":"user","content":"hi"}),
+            json!({"role":"assistant","tool_calls":[
+                {"id":"x","function":{"name":"bash","arguments":"{}"}},
+                {"id":"y","function":{"name":"read_file","arguments":"{}"}},
+                {"id":"z","function":{"name":"patch","arguments":"{}"}},
+            ]}),
+            // Only patch errored.
+            json!({"role":"tool","tool_call_id":"x","content":"ok"}),
+            json!({"role":"tool","tool_call_id":"y","content":"ok"}),
+            json!({"role":"tool","tool_call_id":"z","content":"Error: hunk failed"}),
+        ];
+        let s = select_tool_skill_cards(&msgs);
+        // patch card should appear, with priority. We just need it present.
+        assert!(s.contains("### patch"));
+    }
+}

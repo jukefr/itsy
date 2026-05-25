@@ -144,3 +144,240 @@ impl OpenAICompatProvider {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::types::{ChatMessage, ChatRequest};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn req(model: &str) -> ChatRequest {
+        ChatRequest {
+            model: model.into(),
+            messages: vec![ChatMessage {
+                role: "user".into(),
+                content: serde_json::json!("hi"),
+                name: None, tool_call_id: None, tool_calls: None,
+            }],
+            temperature: Some(0.0),
+            top_p: None,
+            max_output: None,
+            stop: None,
+            json: false,
+            tools: None,
+            tool_choice: None,
+        }
+    }
+
+    /// Constructor rejects loopback by default (SSRF gate).
+    #[test]
+    fn new_refuses_loopback_without_env_flag() {
+        if std::env::var("LLM_ALLOW_PUBLIC_ENDPOINTS").ok().as_deref() == Some("1") {
+            return; // env unlocks loopback; skip.
+        }
+        // SSRF default allows loopback/RFC1918 (assert_endpoint_allowed flow).
+        // What it RAW-rejects is metadata. Use that.
+        let r = OpenAICompatProvider::new("http://169.254.169.254/v1", None);
+        assert!(r.is_err(), "metadata endpoint must always be refused");
+    }
+
+    /// Constructor strips trailing slash from endpoint.
+    #[tokio::test]
+    async fn new_strips_trailing_slash() {
+        let server = MockServer::start().await;
+        // server.uri() already lacks trailing slash; add one explicitly.
+        let endpoint_with_slash = format!("{}/", server.uri());
+        let p = OpenAICompatProvider::new(&endpoint_with_slash, None).unwrap();
+        assert!(!p.endpoint.ends_with('/'),
+            "endpoint must be normalized; got {}", p.endpoint);
+    }
+
+    /// 200 response is parsed: content, usage, tool_calls all populated.
+    #[tokio::test]
+    async fn chat_parses_successful_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&json!({
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "Hello!",
+                        "tool_calls": [{
+                            "id": "call_123",
+                            "type": "function",
+                            "function": {"name": "bash", "arguments": "{\"command\":\"ls\"}"}
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }],
+                "usage": {"prompt_tokens": 50, "completion_tokens": 10}
+            })))
+            .mount(&server).await;
+
+        let p = OpenAICompatProvider::new(&server.uri(), None).unwrap();
+        let resp = p.chat(&req("test-model")).await.unwrap();
+        assert_eq!(resp.content, "Hello!");
+        assert_eq!(resp.usage.prompt_tokens, Some(50));
+        assert_eq!(resp.usage.completion_tokens, Some(10));
+        let calls = resp.tool_calls.expect("tool_calls must be populated");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_123");
+        assert_eq!(calls[0].name, "bash");
+        assert_eq!(calls[0].arguments, "{\"command\":\"ls\"}");
+    }
+
+    /// Empty tool_calls array filters to None (not Some(vec![])).
+    /// Anti-regression: downstream branches on `Some(_)` vs `None`.
+    #[tokio::test]
+    async fn chat_filters_empty_tool_calls_to_none() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&json!({
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "no tools", "tool_calls": []},
+                    "finish_reason": "stop"
+                }]
+            })))
+            .mount(&server).await;
+        let p = OpenAICompatProvider::new(&server.uri(), None).unwrap();
+        let resp = p.chat(&req("test")).await.unwrap();
+        assert!(resp.tool_calls.is_none(),
+            "empty tool_calls array must filter to None, got {:?}", resp.tool_calls);
+    }
+
+    /// 4xx returns Err with status + body in message.
+    #[tokio::test]
+    async fn chat_returns_err_on_4xx() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(400).set_body_string("malformed request"))
+            .mount(&server).await;
+        let p = OpenAICompatProvider::new(&server.uri(), None).unwrap();
+        let err = p.chat(&req("test")).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("400"), "must include status code; got {msg}");
+        assert!(msg.contains("malformed request"), "must include body; got {msg}");
+    }
+
+    /// 5xx returns Err.
+    #[tokio::test]
+    async fn chat_returns_err_on_5xx() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server).await;
+        let p = OpenAICompatProvider::new(&server.uri(), None).unwrap();
+        assert!(p.chat(&req("test")).await.is_err());
+    }
+
+    /// `tools` are included in the request body when ChatRequest specifies them.
+    #[tokio::test]
+    async fn chat_serialises_tools_into_request() {
+        use super::super::types::ToolSpec;
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&json!({
+                "choices":[{"index":0,"message":{"role":"assistant","content":""},"finish_reason":"stop"}]
+            })))
+            .mount(&server).await;
+
+        let mut r = req("test");
+        r.tools = Some(vec![ToolSpec {
+            name: "bash".into(), description: "run".into(),
+            parameters: json!({"type":"object"}),
+        }]);
+        let p = OpenAICompatProvider::new(&server.uri(), None).unwrap();
+        let _ = p.chat(&r).await;
+
+        let received = server.received_requests().await.unwrap();
+        let body: Value = serde_json::from_slice(&received[0].body).unwrap();
+        let tools = body["tools"].as_array().expect("tools must be present");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["function"]["name"], "bash");
+    }
+
+    /// When `json=true` AND no tools, `response_format` is set to json_object.
+    /// When `json=true` AND tools present, `response_format` is removed
+    /// (anti-regression: json mode conflicts with tool mode on most providers).
+    #[tokio::test]
+    async fn json_mode_and_tools_are_mutually_exclusive() {
+        use super::super::types::ToolSpec;
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&json!({
+                "choices":[{"index":0,"message":{"role":"assistant","content":""},"finish_reason":"stop"}]
+            })))
+            .mount(&server).await;
+
+        // (a) json=true, no tools → response_format=json_object set.
+        let mut r = req("test");
+        r.json = true;
+        let p = OpenAICompatProvider::new(&server.uri(), None).unwrap();
+        let _ = p.chat(&r).await;
+        let received = server.received_requests().await.unwrap();
+        let body: Value = serde_json::from_slice(&received[0].body).unwrap();
+        assert_eq!(body["response_format"]["type"], "json_object",
+            "json=true without tools must set response_format; body={body}");
+
+        // (b) json=true, tools present → response_format REMOVED.
+        let server2 = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&json!({
+                "choices":[{"index":0,"message":{"role":"assistant","content":""},"finish_reason":"stop"}]
+            })))
+            .mount(&server2).await;
+        r.tools = Some(vec![ToolSpec {
+            name: "bash".into(), description: "".into(),
+            parameters: json!({"type":"object"}),
+        }]);
+        let p2 = OpenAICompatProvider::new(&server2.uri(), None).unwrap();
+        let _ = p2.chat(&r).await;
+        let received2 = server2.received_requests().await.unwrap();
+        let body2: Value = serde_json::from_slice(&received2[0].body).unwrap();
+        assert!(body2.get("response_format").is_none(),
+            "json + tools must REMOVE response_format; body={body2}");
+    }
+
+    /// Confidence is computed from logprobs when present.
+    #[tokio::test]
+    async fn confidence_derived_from_logprobs() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&json!({
+                "choices":[{
+                    "index":0,
+                    "message":{"role":"assistant","content":"hi"},
+                    "finish_reason":"stop",
+                    "logprobs": {
+                        "content": [
+                            {"token": "h", "logprob": -0.1},
+                            {"token": "i", "logprob": -0.1}
+                        ]
+                    }
+                }]
+            })))
+            .mount(&server).await;
+        let p = OpenAICompatProvider::new(&server.uri(), None).unwrap();
+        let resp = p.chat(&req("test")).await.unwrap();
+        let c = resp.confidence.expect("confidence must be set from logprobs");
+        // exp(-0.1) ≈ 0.905 — in [0,1] range.
+        assert!(c > 0.5 && c <= 1.0, "confidence should be in (0.5,1.0]; got {c}");
+    }
+
+    /// Missing logprobs → confidence is None (don't fabricate).
+    #[tokio::test]
+    async fn confidence_is_none_when_no_logprobs() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&json!({
+                "choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]
+            })))
+            .mount(&server).await;
+        let p = OpenAICompatProvider::new(&server.uri(), None).unwrap();
+        let resp = p.chat(&req("test")).await.unwrap();
+        assert!(resp.confidence.is_none());
+    }
+}

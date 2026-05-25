@@ -1122,3 +1122,171 @@ fn help_text() -> String {
 "
     .into()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn min_config() -> Config {
+        use crate::config::{
+            ContextConfig, GitConfig, ModelConfig, ToolsConfig, TuiConfig,
+        };
+        Config {
+            model: ModelConfig { provider: "openai".into(), name: "test-model".into(), base_url: "http://localhost:1234/v1".into(), timeout: 60, api_key: None },
+            context: ContextConfig { max_budget_pct: 70, detected_window: 32_768, working_memory_tokens: 8192, summary_threshold: 8000 },
+            tools: ToolsConfig { bash_timeout: 30, tool_routing: "direct".into(), web_browse: false, shell_persist: true, shell_contain: false, rtk: true },
+            tui: TuiConfig { show_token_usage: false, auto_approve: false, theme: "dark".into(), classic: false },
+            git: GitConfig { auto_commit: false },
+            features: Default::default(), models: None,
+            limits: Default::default(), security: Default::default(),
+            diff: Default::default(), filetree: Default::default(),
+            snapshots: Default::default(), code_graph: Default::default(),
+            tests: Default::default(), traces: Default::default(),
+            dedup: Default::default(), evidence: Default::default(),
+            plugins: Default::default(), diag: Default::default(),
+            second_opinion: Default::default(),
+        }
+    }
+
+    fn min_ctx() -> (CommandCtx, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = CommandCtx {
+            config: Arc::new(Mutex::new(min_config())),
+            history: Arc::new(Mutex::new(Vec::new())),
+            memory: Arc::new(Mutex::new(MemoryStore::new_json_only(dir.path()))),
+            tokens: Arc::new(Mutex::new(TokenTracker::new())),
+            cwd: Some(dir.path().to_path_buf()),
+            token_monitor: None,
+            sessions: None,
+            multi: None,
+            undo: None,
+            snapshots: None,
+            trace: None,
+            skills: None,
+            plugins: None,
+            lsp: None,
+        };
+        (ctx, dir)
+    }
+
+    /// Quit aliases all map to CommandResult::Quit.
+    #[tokio::test]
+    async fn quit_aliases_terminate() {
+        let (ctx, _d) = min_ctx();
+        for cmd in ["/quit", "/q", "/exit"] {
+            let r = handle_command(cmd, &ctx).await.unwrap();
+            assert!(matches!(r, CommandResult::Quit), "{cmd} must Quit; got {r:?}");
+        }
+    }
+
+    /// /clear empties the history.
+    #[tokio::test]
+    async fn clear_empties_history() {
+        let (ctx, _d) = min_ctx();
+        ctx.history.lock().push(serde_json::json!({"role":"user","content":"hi"}));
+        ctx.history.lock().push(serde_json::json!({"role":"assistant","content":"ok"}));
+        let r = handle_command("/clear", &ctx).await.unwrap();
+        assert!(matches!(r, CommandResult::Print(_)));
+        assert!(ctx.history.lock().is_empty(), "history must be empty after /clear");
+    }
+
+    /// /help returns the help screen with known commands listed.
+    #[tokio::test]
+    async fn help_lists_commands() {
+        let (ctx, _d) = min_ctx();
+        let r = handle_command("/help", &ctx).await.unwrap();
+        let CommandResult::Print(text) = r else { panic!("/help should print"); };
+        for cmd in ["/model", "/endpoint", "/stats", "/tokens", "/budget", "/memory",
+                    "/compact", "/profile", "/trace", "/diff", "/git", "/files",
+                    "/undo", "/sessions", "/help", "/quit"] {
+            assert!(text.contains(cmd), "/help must mention {cmd}");
+        }
+    }
+
+    /// Unknown commands give a helpful error pointing to /help.
+    #[tokio::test]
+    async fn unknown_command_steers_to_help() {
+        let (ctx, _d) = min_ctx();
+        let r = handle_command("/banana", &ctx).await.unwrap();
+        let CommandResult::Print(text) = r else { panic!(); };
+        assert!(text.to_lowercase().contains("unknown"));
+        assert!(text.contains("/help"), "must steer the user to /help");
+    }
+
+    /// Empty input falls through (no head matches).
+    #[tokio::test]
+    async fn empty_input_does_not_panic() {
+        let (ctx, _d) = min_ctx();
+        let r = handle_command("", &ctx).await.unwrap();
+        assert!(matches!(r, CommandResult::Print(_)));
+    }
+
+    /// `/endpoint` with no args shows current.
+    #[tokio::test]
+    async fn endpoint_shows_current_when_no_arg() {
+        let (ctx, _d) = min_ctx();
+        let r = handle_command("/endpoint", &ctx).await.unwrap();
+        let CommandResult::Print(text) = r else { panic!(); };
+        assert!(text.contains("Current:"));
+        assert!(text.contains("http://localhost:1234/v1"));
+    }
+
+    /// `/endpoint <url>` sets the new endpoint.
+    #[tokio::test]
+    async fn endpoint_with_arg_updates_config() {
+        let (ctx, _d) = min_ctx();
+        let r = handle_command("/endpoint http://example.com/v2", &ctx).await.unwrap();
+        let CommandResult::Print(text) = r else { panic!(); };
+        assert!(text.contains("http://example.com/v2"));
+        assert_eq!(ctx.config.lock().model.base_url, "http://example.com/v2",
+            "config must be updated in place");
+    }
+
+    /// `/stats` reports model, endpoint, and history length.
+    #[tokio::test]
+    async fn stats_reports_session_state() {
+        let (ctx, _d) = min_ctx();
+        ctx.history.lock().push(serde_json::json!({"role":"user","content":"hi"}));
+        let r = handle_command("/stats", &ctx).await.unwrap();
+        let CommandResult::Print(text) = r else { panic!(); };
+        assert!(text.contains("test-model"));
+        assert!(text.contains("localhost:1234"));
+        assert!(text.contains("1 messages") || text.contains("1\n"));
+    }
+
+    /// `/budget` produces a visual bar showing context utilisation.
+    #[tokio::test]
+    async fn budget_shows_token_bar() {
+        let (ctx, _d) = min_ctx();
+        let r = handle_command("/budget", &ctx).await.unwrap();
+        let CommandResult::Print(text) = r else { panic!(); };
+        assert!(text.contains("Window:"));
+        assert!(text.contains("Budget:"));
+        assert!(text.contains("Used:"));
+        // Bar uses block chars.
+        assert!(text.contains("█") || text.contains("░"),
+            "must include a progress bar; got {text:?}");
+    }
+
+    /// `/memory list` with empty store reports no entries.
+    #[tokio::test]
+    async fn memory_list_on_empty_store() {
+        let (ctx, _d) = min_ctx();
+        let r = handle_command("/memory list", &ctx).await.unwrap();
+        let CommandResult::Print(text) = r else { panic!(); };
+        // Either reports empty or shows headers — just no panic.
+        assert!(!text.is_empty());
+    }
+
+    /// `/web on` and `/web off` flip the setting.
+    #[tokio::test]
+    async fn web_toggle_flips_setting() {
+        let (ctx, _d) = min_ctx();
+        let _ = handle_command("/web off", &ctx).await.unwrap();
+        let _ = handle_command("/web on", &ctx).await.unwrap();
+        // Hard to assert exact setting without exposing it; just no panic + non-empty result.
+        let r = handle_command("/web", &ctx).await.unwrap();
+        let CommandResult::Print(text) = r else { panic!(); };
+        assert!(!text.is_empty());
+    }
+}

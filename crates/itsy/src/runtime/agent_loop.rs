@@ -88,6 +88,7 @@ pub struct AgentSession {
 }
 
 /// Action a guard can take when it fires.
+#[derive(Debug)]
 pub enum GuardAction {
     /// Inject a system message and continue the inner loop.
     Inject { message: String },
@@ -622,5 +623,160 @@ mod tests {
         m.reset_bash_loop_after_mutation();
         assert!(m.bash_loop_keys.is_empty());
         assert!(m.tool_repeat_counts.is_empty());
+    }
+
+    // ── TurnState::check_quality_monitor ───────────────────────────────────
+
+    fn fresh_state() -> TurnState {
+        TurnState::new("test".into(), "coding", None, 100)
+    }
+
+    /// Valid tool names produce no GuardAction.
+    #[test]
+    fn quality_monitor_accepts_known_tools() {
+        let mut s = fresh_state();
+        let mut history = Vec::new();
+        let known = ["bash", "read_file", "write_file"];
+        let calls = vec![json!({"id":"1","function":{"name":"bash","arguments":"{}"}})];
+        assert!(s.check_quality_monitor(&calls, &known, &mut history).is_none());
+        assert!(history.is_empty(), "no history mutation on valid calls");
+    }
+
+    /// An unknown tool name produces an Inject GuardAction and pushes a
+    /// corrective tool message into history.
+    #[test]
+    fn quality_monitor_rejects_unknown_tool_with_inject() {
+        let mut s = fresh_state();
+        let mut history = Vec::new();
+        let known = ["bash"];
+        let calls = vec![json!({"id":"x","function":{"name":"frobnicate","arguments":"{}"}})];
+        let action = s.check_quality_monitor(&calls, &known, &mut history);
+        assert!(matches!(action, Some(GuardAction::Inject { .. })));
+        assert_eq!(history.len(), 2, "must push 1 tool reply + 1 user nudge");
+        // Tool reply mentions the bad tool name.
+        let tool_msg = history[0]["content"].as_str().unwrap();
+        assert!(tool_msg.contains("frobnicate"));
+        assert!(tool_msg.contains("bash"), "must list valid tools");
+    }
+
+    /// Empty tool name is also flagged.
+    #[test]
+    fn quality_monitor_rejects_empty_tool_name() {
+        let mut s = fresh_state();
+        let mut history = Vec::new();
+        let known = ["bash"];
+        let calls = vec![json!({"id":"x","function":{"name":"","arguments":"{}"}})];
+        let action = s.check_quality_monitor(&calls, &known, &mut history);
+        assert!(matches!(action, Some(GuardAction::Inject { .. })));
+        assert!(history[0]["content"].as_str().unwrap().contains("empty"));
+    }
+
+    /// After 2 corrections, the third invocation does NOT inject again
+    /// (give up — the model is stuck).
+    #[test]
+    fn quality_monitor_gives_up_after_two_corrections() {
+        let mut s = fresh_state();
+        let mut history = Vec::new();
+        let known = ["bash"];
+        let bad = vec![json!({"id":"x","function":{"name":"xxx","arguments":"{}"}})];
+
+        assert!(matches!(s.check_quality_monitor(&bad, &known, &mut history),
+            Some(GuardAction::Inject { .. })));
+        assert!(matches!(s.check_quality_monitor(&bad, &known, &mut history),
+            Some(GuardAction::Inject { .. })));
+        // Third time: no GuardAction.
+        assert!(s.check_quality_monitor(&bad, &known, &mut history).is_none(),
+            "third call must NOT keep nudging — model is hopelessly stuck");
+    }
+
+    // ── TurnState::check_idempotent_write ──────────────────────────────────
+
+    /// Non-idempotent tools are NEVER skipped (bash, read_file, etc.).
+    #[test]
+    fn idempotent_check_passes_through_non_idempotent_tools() {
+        let mut s = fresh_state();
+        let mut history = Vec::new();
+        let args = json!({"command": "ls"});
+        assert!(s.check_idempotent_write("bash", &args, "x", &mut history).is_none());
+        // Calling again with same args → still passes through (not idempotent).
+        assert!(s.check_idempotent_write("bash", &args, "y", &mut history).is_none());
+    }
+
+    /// First memory_remember with given args is allowed; second is Skip.
+    #[test]
+    fn idempotent_check_dedupes_memory_remember() {
+        let mut s = fresh_state();
+        let mut history = Vec::new();
+        let args = json!({"type":"decision","title":"x","content":"y"});
+        // First time → allowed.
+        assert!(s.check_idempotent_write("memory_remember", &args, "1", &mut history).is_none());
+        // Second time with same args → Skip.
+        let r = s.check_idempotent_write("memory_remember", &args, "2", &mut history);
+        assert!(matches!(r, Some(GuardAction::Skip)),
+            "duplicate memory_remember must be Skip; got {r:?}");
+        // The skip pushes an explanatory tool message.
+        assert_eq!(history.len(), 1);
+        assert!(history[0]["content"].as_str().unwrap().contains("identical call skipped")
+            || history[0]["content"].as_str().unwrap().contains("DUPLICATE"));
+    }
+
+    /// Different args → not deduped (it's a distinct write).
+    #[test]
+    fn idempotent_check_doesnt_dedup_different_args() {
+        let mut s = fresh_state();
+        let mut history = Vec::new();
+        let args_a = json!({"type":"decision","title":"a","content":"x"});
+        let args_b = json!({"type":"decision","title":"b","content":"y"});
+        assert!(s.check_idempotent_write("memory_remember", &args_a, "1", &mut history).is_none());
+        assert!(s.check_idempotent_write("memory_remember", &args_b, "2", &mut history).is_none(),
+            "different args must NOT collapse to the same idempotent key");
+    }
+
+    /// mark_assertion duplicate has a more detailed skip message naming the
+    /// assertion id and state.
+    #[test]
+    fn idempotent_check_mark_assertion_message_includes_id() {
+        let mut s = fresh_state();
+        let mut history = Vec::new();
+        let args = json!({"id":"A.001","state":"passed","evidence":"ran ok"});
+        let _ = s.check_idempotent_write("mark_assertion", &args, "1", &mut history);
+        let r = s.check_idempotent_write("mark_assertion", &args, "2", &mut history);
+        assert!(matches!(r, Some(GuardAction::Skip)));
+        let payload = history[0]["content"].as_str().unwrap();
+        assert!(payload.contains("A.001"), "must name the assertion id; got {payload}");
+        assert!(payload.contains("passed"), "must name the state; got {payload}");
+    }
+
+    // ── TurnState::should_stop ────────────────────────────────────────────
+
+    #[test]
+    fn should_stop_at_max_tool_calls() {
+        let mut s = TurnState::new("t".into(), "coding", None, 3);
+        assert!(!s.should_stop());
+        s.tool_calls_this_turn = 2;
+        assert!(!s.should_stop());
+        s.tool_calls_this_turn = 3;
+        assert!(s.should_stop(), "must stop AT max (>= comparison)");
+        s.tool_calls_this_turn = 4;
+        assert!(s.should_stop(), "must remain stopped above max");
+    }
+
+    // ── TurnState::new initial state ──────────────────────────────────────
+
+    #[test]
+    fn turn_state_new_has_clean_counters() {
+        let s = TurnState::new("hi".into(), "coding", Some("plan".into()), 50);
+        assert_eq!(s.user_msg, "hi");
+        assert_eq!(s.augmented, "hi", "augmented must mirror user_msg initially");
+        assert_eq!(s.task_type, "coding");
+        assert_eq!(s.current_category.as_deref(), Some("plan"));
+        assert_eq!(s.tool_calls_this_turn, 0);
+        assert_eq!(s.max_tool_calls, 50);
+        assert_eq!(s.consecutive_blocks, 0);
+        assert!(!s.had_mutating_call);
+        assert!(!s.empty_retry_injected);
+        assert!(s.edited_files.is_empty());
+        assert!(s.per_turn_repeats.is_empty());
+        assert!(s.per_turn_write_seen.is_empty());
     }
 }

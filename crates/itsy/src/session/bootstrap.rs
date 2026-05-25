@@ -447,3 +447,144 @@ fn python_framework(content: &str) -> Option<&'static str> {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Pure helpers ───────────────────────────────────────────────────────
+
+    #[test]
+    fn strip_version_keeps_only_digits_and_dots() {
+        assert_eq!(strip_version("v1.2.3"), "1.2.3");
+        assert_eq!(strip_version("^1.0.0"), "1.0.0");
+        assert_eq!(strip_version("~2.5.1"), "2.5.1");
+        assert_eq!(strip_version(">=3.0.0-beta"), "3.0.0");
+    }
+
+    #[test]
+    fn major_extracts_leading_segment() {
+        assert_eq!(major("1.2.3"), Some("1".into()));
+        assert_eq!(major("18.19.0"), Some("18".into()));
+        assert!(major("").is_none());
+    }
+
+    #[test]
+    fn trim_nonempty_filters_blanks() {
+        assert_eq!(trim_nonempty("hello"), Some("hello".into()));
+        assert_eq!(trim_nonempty("  hello  "), Some("hello".into()));
+        assert!(trim_nonempty("").is_none());
+        assert!(trim_nonempty("   ").is_none());
+    }
+
+    #[test]
+    fn parse_tool_versions_extracts_pinned_version() {
+        let content = "nodejs 18.19.0\npython 3.11.4\nrust 1.75.0";
+        assert_eq!(parse_tool_versions(content, "nodejs"), Some("18.19.0".into()));
+        assert_eq!(parse_tool_versions(content, "python"), Some("3.11.4".into()));
+        assert_eq!(parse_tool_versions(content, "rust"), Some("1.75.0".into()));
+        // Missing tool → None.
+        assert!(parse_tool_versions(content, "ruby").is_none());
+        // Empty → None.
+        assert!(parse_tool_versions("", "nodejs").is_none());
+    }
+
+    // ── Python framework detection ─────────────────────────────────────────
+
+    #[test]
+    fn python_framework_matches_known_libs() {
+        // Higher-priority frameworks come first in the cascade.
+        assert_eq!(python_framework("dependencies: fastapi\n"), Some("FastAPI"));
+        assert_eq!(python_framework("Django>=4.0"), Some("Django"));
+        assert_eq!(python_framework("flask==2.3.0"), Some("Flask"));
+        assert_eq!(python_framework("from starlette import"), Some("Starlette"));
+        assert_eq!(python_framework("import aiohttp"), Some("aiohttp"));
+        assert_eq!(python_framework("import tornado"), Some("Tornado"));
+        assert!(python_framework("just plain old python").is_none());
+    }
+
+    /// FastAPI wins over Starlette even if both names appear — FastAPI is the
+    /// higher-priority match. Anti-regression for ordering.
+    #[test]
+    fn python_framework_fastapi_wins_over_starlette() {
+        // FastAPI depends on Starlette, so any FastAPI project also has Starlette.
+        // Pin that the cascade picks the more specific framework first.
+        let content = "fastapi==0.100\nstarlette==0.27";
+        assert_eq!(python_framework(content), Some("FastAPI"));
+    }
+
+    // ── Node framework detection ───────────────────────────────────────────
+
+    fn deps_with(names: &[&str]) -> BTreeMap<String, ()> {
+        names.iter().map(|n| (n.to_string(), ())).collect()
+    }
+
+    #[test]
+    fn node_framework_recognises_known_libraries() {
+        assert_eq!(node_framework(&deps_with(&["next"])), Some("Next.js"));
+        assert_eq!(node_framework(&deps_with(&["nuxt"])), Some("Nuxt.js"));
+        assert_eq!(node_framework(&deps_with(&["@angular/core"])), Some("Angular"));
+        assert_eq!(node_framework(&deps_with(&["react"])), Some("React"));
+        assert_eq!(node_framework(&deps_with(&["vue"])), Some("Vue"));
+        assert_eq!(node_framework(&deps_with(&["svelte"])), Some("Svelte"));
+        assert_eq!(node_framework(&deps_with(&["express"])), Some("Express"));
+        assert_eq!(node_framework(&deps_with(&["fastify"])), Some("Fastify"));
+        assert_eq!(node_framework(&deps_with(&["nestjs"])), Some("NestJS"));
+        assert_eq!(node_framework(&deps_with(&["@nestjs/core"])), Some("NestJS"));
+        assert_eq!(node_framework(&deps_with(&["electron"])), Some("Electron"));
+        assert!(node_framework(&deps_with(&["unknown-lib"])).is_none());
+    }
+
+    /// Next.js wins over React because both are typically present in a Next project.
+    /// Anti-regression for the cascade order — Next is the more specific signal.
+    #[test]
+    fn node_framework_next_wins_over_react() {
+        assert_eq!(node_framework(&deps_with(&["next", "react"])), Some("Next.js"));
+    }
+
+    // ── End-to-end scan via tempdirs ──────────────────────────────────────
+
+    #[test]
+    fn bootstrap_context_empty_dir_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = bootstrap_context(dir.path());
+        assert!(ctx.is_empty(), "empty dir must produce empty context; got {ctx:?}");
+    }
+
+    #[test]
+    fn bootstrap_context_detects_cargo_project() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"),
+            "[package]\nname=\"x\"\nversion=\"0.1.0\"\nedition=\"2021\"\n").unwrap();
+        let ctx = bootstrap_context(dir.path());
+        assert!(ctx.contains("Project:"), "expected Project: prefix; got {ctx:?}");
+        // The cargo metadata path should mention Rust somewhere.
+        assert!(ctx.to_lowercase().contains("rust") || ctx.contains("Cargo"),
+            "must reference Rust/Cargo; got {ctx:?}");
+    }
+
+    #[test]
+    fn bootstrap_context_detects_node_project_with_framework() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("package.json"), r#"{
+            "name":"x",
+            "dependencies":{"react":"^18.0.0","next":"^14.0.0"},
+            "scripts":{"test":"jest"}
+        }"#).unwrap();
+        let ctx = bootstrap_context(dir.path());
+        assert!(ctx.contains("Project:"));
+        // Next.js takes priority over React.
+        assert!(ctx.contains("Next.js"), "must report Next.js framework; got {ctx:?}");
+    }
+
+    #[test]
+    fn bootstrap_context_detects_python_with_django() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("requirements.txt"), "django>=4.2\npsycopg2==2.9.6\n").unwrap();
+        std::fs::write(dir.path().join("setup.py"), "from setuptools import setup\nsetup()").unwrap();
+        let ctx = bootstrap_context(dir.path());
+        assert!(ctx.contains("Project:"));
+        assert!(ctx.to_lowercase().contains("django"),
+            "must report Django framework; got {ctx:?}");
+    }
+}

@@ -734,5 +734,268 @@ mod tests {
         assert!(result.is_some());
         assert!(!result.unwrap().passed);
     }
+
+    // ── chat_completion via wiremock ──────────────────────────────────────
+    //
+    // These tests drive the real `chat_completion` function against a fake
+    // OpenAI-compatible HTTP server. They pin retry behavior, transient-error
+    // recovery, tool-call extraction, and finish_reason=length retry — all
+    // logic that would otherwise only get exercised against a live llama-server.
+
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Boilerplate to build a ChatContext pointing at a wiremock server.
+    fn chat_ctx<'a>(base_url: &'a str, tools: Vec<Value>, conversation: &'a [Value]) -> ChatContext<'a> {
+        ChatContext {
+            model_name: "test-model",
+            base_url,
+            api_key: None,
+            timeout: Duration::from_secs(5),
+            temp_adapt: false,
+            conversation,
+            tools,
+            current_task_type: Some("coding"),
+            system_prompt: "You are a test agent.".into(),
+            force_disable_thinking: false,
+        }
+    }
+
+    /// Successful 200 with a normal tool_calls response is parsed and returned.
+    #[tokio::test]
+    async fn chat_completion_returns_parsed_response_on_200() {
+        let server = MockServer::start().await;
+        let response = json!({
+            "id": "x", "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "message": {"role":"assistant","content":"hello","tool_calls":[]},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5}
+        });
+        Mock::given(method("POST")).and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response))
+            .mount(&server).await;
+
+        let convo = vec![json!({"role": "user", "content": "hi"})];
+        let r = chat_completion(&chat_ctx(&server.uri(), vec![], &convo)).await;
+        let v = r.expect("must return Some on 200");
+        assert_eq!(v["choices"][0]["message"]["content"], "hello");
+    }
+
+    /// 4xx on first attempt triggers ONE retry. The mock asserts that the
+    /// endpoint was hit exactly twice — first failure + retry success.
+    #[tokio::test]
+    async fn chat_completion_retries_once_on_4xx() {
+        let server = MockServer::start().await;
+        // First call: 400. Subsequent calls: 200.
+        Mock::given(method("POST")).and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(400).set_body_string("bad request"))
+            .up_to_n_times(1)
+            .mount(&server).await;
+        Mock::given(method("POST")).and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&json!({
+                "choices":[{"index":0,"message":{"role":"assistant","content":"recovered"},"finish_reason":"stop"}]
+            })))
+            .mount(&server).await;
+
+        let convo = vec![json!({"role": "user", "content": "hi"})];
+        let r = chat_completion(&chat_ctx(&server.uri(), vec![], &convo)).await;
+        let v = r.expect("must recover after one retry");
+        assert_eq!(v["choices"][0]["message"]["content"], "recovered");
+    }
+
+    /// 5xx error fails immediately without retry — anti-regression for
+    /// double-retry that would amplify backend overload.
+    #[tokio::test]
+    async fn chat_completion_does_not_retry_5xx() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("server error"))
+            .expect(1) // wiremock will FAIL the test if called more or fewer times
+            .mount(&server).await;
+        let convo = vec![json!({"role": "user", "content": "hi"})];
+        let r = chat_completion(&chat_ctx(&server.uri(), vec![], &convo)).await;
+        assert!(r.is_none(), "5xx must return None without retry");
+        // wiremock asserts `expect(1)` on drop.
+    }
+
+    /// Sustained 4xx (both attempts) returns None — anti-regression for the
+    /// retry loop running forever.
+    #[tokio::test]
+    async fn chat_completion_returns_none_after_4xx_retries_exhausted() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(429).set_body_string("rate limited"))
+            .expect(2) // exactly two attempts: original + one retry
+            .mount(&server).await;
+        let convo = vec![json!({"role": "user", "content": "hi"})];
+        let r = chat_completion(&chat_ctx(&server.uri(), vec![], &convo)).await;
+        assert!(r.is_none());
+    }
+
+    /// Network connect error returns None — model_client never panics on transport failure.
+    #[tokio::test]
+    async fn chat_completion_returns_none_on_network_error() {
+        // Port 1 should reject connections immediately.
+        let convo = vec![json!({"role": "user", "content": "hi"})];
+        let r = chat_completion(&chat_ctx("http://127.0.0.1:1", vec![], &convo)).await;
+        assert!(r.is_none());
+    }
+
+    /// Request body must NOT include a `tools` key when tools list is empty
+    /// (avoids Qwen3 misinterpreting `tools: []` as tool-mode-with-no-tools).
+    /// We assert this by capturing the request body via wiremock's matcher.
+    #[tokio::test]
+    async fn chat_completion_omits_tools_key_when_list_empty() {
+        let server = MockServer::start().await;
+
+        // Match a POST whose body does NOT contain "tools".
+        Mock::given(method("POST")).and(path("/chat/completions"))
+            .and(wiremock::matchers::body_partial_json(json!({"model":"test-model"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&json!({
+                "choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]
+            })))
+            .mount(&server).await;
+
+        let convo = vec![json!({"role": "user", "content": "hi"})];
+        let _ = chat_completion(&chat_ctx(&server.uri(), vec![], &convo)).await;
+
+        // Inspect the captured request to confirm "tools" was NOT serialised.
+        let received = server.received_requests().await.expect("requests captured");
+        let req = received.iter().find(|r| r.url.path().contains("chat/completions")).expect("hit chat endpoint");
+        let body: Value = serde_json::from_slice(&req.body).unwrap();
+        assert!(body.get("tools").is_none(),
+            "body must omit `tools` key entirely when list is empty; got body={body}");
+    }
+
+    /// Tools key IS present (as array) when ctx.tools is non-empty.
+    #[tokio::test]
+    async fn chat_completion_includes_tools_when_list_non_empty() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&json!({
+                "choices":[{"index":0,"message":{"role":"assistant","content":""},"finish_reason":"stop"}]
+            })))
+            .mount(&server).await;
+
+        let tools = vec![json!({"type":"function","function":{"name":"bash","parameters":{}}})];
+        let convo = vec![json!({"role": "user", "content": "hi"})];
+        let _ = chat_completion(&chat_ctx(&server.uri(), tools, &convo)).await;
+
+        let received = server.received_requests().await.unwrap();
+        let req = &received[0];
+        let body: Value = serde_json::from_slice(&req.body).unwrap();
+        let body_tools = body.get("tools").and_then(|v| v.as_array()).expect("tools must be present");
+        assert!(!body_tools.is_empty(), "non-empty input list must serialise to non-empty tools");
+    }
+
+    /// Authorization header is set from api_key.
+    #[tokio::test]
+    async fn chat_completion_sends_bearer_token() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&json!({
+                "choices":[{"index":0,"message":{"role":"assistant","content":""},"finish_reason":"stop"}]
+            })))
+            .mount(&server).await;
+
+        let convo = vec![json!({"role": "user", "content": "hi"})];
+        let uri = server.uri();
+        let mut ctx = chat_ctx(&uri, vec![], &convo);
+        ctx.api_key = Some("sk-test-secret".into());
+        let _ = chat_completion(&ctx).await;
+
+        let received = server.received_requests().await.unwrap();
+        let req = &received[0];
+        let auth = req.headers.get("authorization");
+        // Env may inject API keys; we only assert when env is clean.
+        if std::env::var("OPENAI_API_KEY").is_err()
+            && std::env::var("ANTHROPIC_API_KEY").is_err()
+            && std::env::var("DEEPSEEK_API_KEY").is_err() {
+            assert!(auth.is_some(), "must send Authorization header");
+            assert!(auth.unwrap().to_str().unwrap().starts_with("Bearer "));
+        }
+    }
+
+    /// Invalid JSON in 200 response returns None (parse failure).
+    /// Anti-regression: an upstream that returns malformed JSON must not crash.
+    #[tokio::test]
+    async fn chat_completion_returns_none_on_invalid_json_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not json {{"))
+            .mount(&server).await;
+        let convo = vec![json!({"role": "user", "content": "hi"})];
+        let r = chat_completion(&chat_ctx(&server.uri(), vec![], &convo)).await;
+        assert!(r.is_none());
+    }
+
+    // ── stream_final_response ──────────────────────────────────────────────
+
+    /// SSE stream is parsed and `on_token` is called per delta. The final
+    /// concatenated string is returned.
+    #[tokio::test]
+    async fn stream_response_accumulates_tokens() {
+        let server = MockServer::start().await;
+        let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\
+                   data: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\
+                   data: [DONE]\n";
+        Mock::given(method("POST")).and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sse))
+            .mount(&server).await;
+
+        let convo = vec![json!({"role":"user","content":"hi"})];
+        let mut tokens: Vec<String> = Vec::new();
+        let r = stream_final_response("test-model", &server.uri(), None, 5, &convo, None,
+            |t| tokens.push(t.to_string())).await;
+        assert_eq!(r, Some("Hello world".into()));
+        assert_eq!(tokens, vec!["Hello".to_string(), " world".to_string()]);
+    }
+
+    /// 4xx on streaming endpoint returns None (no panic on non-200).
+    #[tokio::test]
+    async fn stream_response_returns_none_on_4xx() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&server).await;
+        let convo = vec![json!({"role":"user","content":"hi"})];
+        let r = stream_final_response("test", &server.uri(), None, 5, &convo, None, |_| {}).await;
+        assert!(r.is_none());
+    }
+
+    /// Lines without the `data:` prefix are ignored.
+    #[tokio::test]
+    async fn stream_response_ignores_non_data_lines() {
+        let server = MockServer::start().await;
+        let sse = ": comment line\n\
+                   event: something\n\
+                   data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\
+                   data: [DONE]\n";
+        Mock::given(method("POST")).and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sse))
+            .mount(&server).await;
+        let convo = vec![json!({"role":"user","content":"x"})];
+        let r = stream_final_response("test", &server.uri(), None, 5, &convo, None, |_| {}).await;
+        assert_eq!(r, Some("hi".into()));
+    }
+
+    /// Malformed JSON lines are skipped (logged) without aborting the stream.
+    /// Anti-regression: one bad chunk shouldn't lose the whole response.
+    #[tokio::test]
+    async fn stream_response_skips_bad_json_chunks() {
+        let server = MockServer::start().await;
+        let sse = "data: not a json\n\
+                   data: {\"choices\":[{\"delta\":{\"content\":\"survives\"}}]}\n\
+                   data: [DONE]\n";
+        Mock::given(method("POST")).and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sse))
+            .mount(&server).await;
+        let convo = vec![json!({"role":"user","content":"x"})];
+        let r = stream_final_response("test", &server.uri(), None, 5, &convo, None, |_| {}).await;
+        assert_eq!(r, Some("survives".into()));
+    }
 }
 

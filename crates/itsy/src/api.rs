@@ -355,3 +355,167 @@ impl ItsyApi {
         Ok(result)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn min_config() -> Config {
+        use crate::config::{
+            ContextConfig, GitConfig, ModelConfig, ToolsConfig, TuiConfig,
+        };
+        Config {
+            model: ModelConfig { provider: "openai".into(), name: "test".into(), base_url: "http://localhost:1234/v1".into(), timeout: 60, api_key: None },
+            context: ContextConfig { max_budget_pct: 70, detected_window: 32_768, working_memory_tokens: 8192, summary_threshold: 8000 },
+            tools: ToolsConfig { bash_timeout: 30, tool_routing: "direct".into(), web_browse: false, shell_persist: true, shell_contain: false, rtk: true },
+            tui: TuiConfig { show_token_usage: false, auto_approve: false, theme: "dark".into(), classic: false },
+            git: GitConfig { auto_commit: false },
+            features: Default::default(), models: None, limits: Default::default(),
+            security: Default::default(), diff: Default::default(), filetree: Default::default(),
+            snapshots: Default::default(), code_graph: Default::default(),
+            tests: Default::default(), traces: Default::default(),
+            dedup: Default::default(), evidence: Default::default(),
+            plugins: Default::default(), diag: Default::default(),
+            second_opinion: Default::default(),
+        }
+    }
+
+    /// `ItsyApi::new` constructs with default options.
+    #[test]
+    fn new_uses_default_options() {
+        let api = ItsyApi::new(min_config());
+        // History starts empty.
+        assert!(api.history.is_empty());
+        // Default tools whitelist is None (all tools allowed).
+        assert!(api.options.tools.is_none());
+        // Profile resolves to something (even if no match → defaults).
+        let _ = api.profile();
+    }
+
+    /// `RunResult` JSON serialisation uses camelCase keys.
+    /// Anti-regression: JS callers depend on this exact shape.
+    #[test]
+    fn run_result_serialises_camel_case() {
+        let r = RunResult {
+            response: "hi".into(),
+            tool_calls: vec![],
+            files_created: vec!["a.rs".into()],
+            files_modified: vec!["b.rs".into()],
+            tokens_used: TokenUsage { input: 10, output: 5, total: 15 },
+            elapsed_ms: 123,
+            success: true,
+            error: None,
+        };
+        let j: Value = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+        assert_eq!(j["response"], "hi");
+        assert!(j.get("toolCalls").is_some(), "JSON key must be toolCalls; got keys {:?}",
+            j.as_object().unwrap().keys().collect::<Vec<_>>());
+        assert!(j.get("filesCreated").is_some());
+        assert!(j.get("filesModified").is_some());
+        assert!(j.get("tokensUsed").is_some());
+        assert!(j.get("elapsedMs").is_some());
+        // Optional error is omitted when None.
+        assert!(j.get("error").is_none(), "error must be omitted when None");
+    }
+
+    /// `RunResult` includes `error` when present.
+    #[test]
+    fn run_result_includes_error_when_some() {
+        let r = RunResult {
+            response: String::new(), tool_calls: vec![],
+            files_created: vec![], files_modified: vec![],
+            tokens_used: TokenUsage::default(), elapsed_ms: 0,
+            success: false,
+            error: Some("timeout".into()),
+        };
+        let j: Value = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+        assert_eq!(j["error"], "timeout");
+        assert_eq!(j["success"], false);
+    }
+
+    /// `TokenUsage` JSON serialisation uses camelCase + flat fields.
+    #[test]
+    fn token_usage_serialises_camel_case() {
+        let t = TokenUsage { input: 100, output: 50, total: 150 };
+        let j: Value = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
+        assert_eq!(j["input"], 100);
+        assert_eq!(j["output"], 50);
+        assert_eq!(j["total"], 150);
+    }
+
+    /// `AgentEvent` is tagged on the `type` field with snake_case variants.
+    /// Anti-regression: external subscribers branch on this string.
+    #[test]
+    fn agent_event_is_externally_tagged() {
+        let ev = AgentEvent::ToolStart { name: "bash".into(), args: serde_json::json!({"command":"ls"}) };
+        let j: Value = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
+        assert_eq!(j["type"], "tool_start");
+        assert_eq!(j["name"], "bash");
+
+        let ev = AgentEvent::Token { chunk: "hello".into() };
+        let j: Value = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
+        assert_eq!(j["type"], "token");
+        assert_eq!(j["chunk"], "hello");
+
+        let ev = AgentEvent::Error { message: "boom".into() };
+        let j: Value = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
+        assert_eq!(j["type"], "error");
+        assert_eq!(j["message"], "boom");
+    }
+
+    /// `subscribe` returns a Receiver that gets events emitted via `events.send`.
+    #[tokio::test]
+    async fn subscribers_receive_emitted_events() {
+        let api = ItsyApi::new(min_config());
+        let mut rx = api.subscribe();
+        // Emit via private `emit` — but it's pub(crate), so we send through events directly.
+        let _ = api.events.send(AgentEvent::Token { chunk: "tick".into() });
+        let received = rx.recv().await.expect("receiver must get event");
+        if let AgentEvent::Token { chunk } = received {
+            assert_eq!(chunk, "tick");
+        } else {
+            panic!("wrong event variant");
+        }
+    }
+
+    /// Two subscribers both see the same event (broadcast semantics).
+    #[tokio::test]
+    async fn broadcast_to_multiple_subscribers() {
+        let api = ItsyApi::new(min_config());
+        let mut a = api.subscribe();
+        let mut b = api.subscribe();
+        let _ = api.events.send(AgentEvent::Token { chunk: "x".into() });
+        let ra = a.recv().await.unwrap();
+        let rb = b.recv().await.unwrap();
+        assert!(matches!(ra, AgentEvent::Token { .. }));
+        assert!(matches!(rb, AgentEvent::Token { .. }));
+    }
+
+    /// Default RunOptions uses the current cwd, no tool whitelist, and a
+    /// reasonable timeout.
+    #[test]
+    fn run_options_default_sane() {
+        let opts = RunOptions::default();
+        assert!(opts.tools.is_none(), "default allows all tools");
+        assert!(opts.timeout > Duration::from_millis(0), "timeout must be positive");
+        assert!(opts.cwd.exists() || opts.cwd == PathBuf::from("."),
+            "cwd must be reachable; got {:?}", opts.cwd);
+    }
+
+    /// `with_options` retains the user-supplied RunOptions.
+    #[test]
+    fn with_options_retains_user_options() {
+        let mut whitelist = HashSet::new();
+        whitelist.insert("read_file".to_string());
+        let opts = RunOptions {
+            timeout: Duration::from_secs(10),
+            tools: Some(whitelist.clone()),
+            verbose: true,
+            cwd: PathBuf::from("/tmp"),
+        };
+        let api = ItsyApi::with_options(min_config(), opts);
+        assert_eq!(api.options.timeout, Duration::from_secs(10));
+        assert_eq!(api.options.tools.as_ref().unwrap(), &whitelist);
+        assert!(api.options.verbose);
+    }
+}

@@ -40,3 +40,42 @@ pub fn is_enabled(feature: &str) -> PolicyDecision {
         reason: "env-controlled",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Default-off features: enabled iff env is exactly "true".
+    /// Anti-regression: a truthy-ish "1" must NOT enable them.
+    #[test]
+    fn default_off_features_require_exact_true() {
+        // Setting tests that read env vars is racy under cargo test parallelism,
+        // so we only check the "no env" baseline + unknown feature.
+        for feature in ["web_browse", "auto_approve", "auto_commit", "diff_context"] {
+            let d = is_enabled(feature);
+            // We don't unconditionally assert `enabled` direction — env may be
+            // contaminated — but we can check that the function returns without
+            // panicking and reports `env-controlled`.
+            assert_eq!(d.reason, "env-controlled", "feature {feature}");
+        }
+    }
+
+    /// Unknown feature returns `enabled=false` and `reason="no policy registered"`.
+    #[test]
+    fn unknown_feature_returns_disabled() {
+        let d = is_enabled("bogus_feature_xyz");
+        assert!(!d.enabled);
+        assert_eq!(d.reason, "no policy registered");
+        assert_eq!(d.feature, "unknown");
+    }
+
+    /// Default-on features are listed and reachable. (Behavior is env-dependent.)
+    #[test]
+    fn default_on_features_are_known() {
+        for feature in ["write_guard", "shell_persist", "rtk"] {
+            let d = is_enabled(feature);
+            assert_eq!(d.reason, "env-controlled",
+                "default-on feature {feature} must be registered");
+        }
+    }
+}

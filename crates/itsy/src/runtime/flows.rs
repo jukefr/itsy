@@ -141,3 +141,111 @@ impl FlowRegistry {
         self.flows.get(name)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+
+    /// All steps run in order on success path; FlowOutcome reports ok=true.
+    #[test]
+    fn flow_runs_steps_in_order_on_success() {
+        let order: Arc<std::sync::Mutex<Vec<&'static str>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let o1 = order.clone();
+        let o2 = order.clone();
+        let o3 = order.clone();
+        let steps = vec![
+            Step::<(), String>::new("a", move |_| { o1.lock().unwrap().push("a"); Ok(()) }),
+            Step::<(), String>::new("b", move |_| { o2.lock().unwrap().push("b"); Ok(()) }),
+            Step::<(), String>::new("c", move |_| { o3.lock().unwrap().push("c"); Ok(()) }),
+        ];
+        let mut ctx = ();
+        let out = execute_flow("test", steps, &mut ctx);
+        assert!(out.ok);
+        assert!(out.failed_step.is_none());
+        assert_eq!(*order.lock().unwrap(), vec!["a", "b", "c"]);
+    }
+
+    /// Failure compensates prior steps in REVERSE order.
+    #[test]
+    fn flow_compensates_in_reverse_on_failure() {
+        let compensated: Arc<std::sync::Mutex<Vec<&'static str>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let c1 = compensated.clone();
+        let c2 = compensated.clone();
+        let steps = vec![
+            Step::<(), String>::new("a", |_| Ok(()))
+                .with_compensation(move |_| { c1.lock().unwrap().push("a"); Ok(()) }),
+            Step::<(), String>::new("b", |_| Ok(()))
+                .with_compensation(move |_| { c2.lock().unwrap().push("b"); Ok(()) }),
+            Step::<(), String>::new("c", |_| Err("boom".to_string())),
+        ];
+        let mut ctx = ();
+        let out = execute_flow("test", steps, &mut ctx);
+        assert!(!out.ok);
+        assert_eq!(out.failed_step.as_deref(), Some("c"));
+        // Compensations run in reverse: b before a.
+        assert_eq!(*compensated.lock().unwrap(), vec!["b", "a"]);
+        // Outcome lists them in compensation order too.
+        assert_eq!(out.compensated, vec!["b", "a"]);
+        assert_eq!(out.error.as_deref(), Some("boom"));
+    }
+
+    /// A broken compensation does NOT block subsequent ones.
+    #[test]
+    fn compensation_error_does_not_block_others() {
+        let counter = Arc::new(AtomicU32::new(0));
+        let c1 = counter.clone();
+        let c2 = counter.clone();
+        let steps = vec![
+            Step::<(), String>::new("a", |_| Ok(()))
+                .with_compensation(move |_| { c1.fetch_add(1, Ordering::SeqCst); Ok(()) }),
+            Step::<(), String>::new("b", |_| Ok(()))
+                .with_compensation(move |_| { c2.fetch_add(1, Ordering::SeqCst); Err("compensation failed".to_string()) }),
+            Step::<(), String>::new("c", |_| Err("boom".to_string())),
+        ];
+        let mut ctx = ();
+        let out = execute_flow("test", steps, &mut ctx);
+        assert!(!out.ok);
+        // Both compensation closures must have been invoked.
+        assert_eq!(counter.load(Ordering::SeqCst), 2,
+            "broken compensation must NOT short-circuit the chain");
+        // Failed compensation is NOT included in `out.compensated`.
+        assert_eq!(out.compensated, vec!["a"]);
+    }
+
+    /// Steps without compensation skip cleanly.
+    #[test]
+    fn missing_compensation_does_not_panic() {
+        let steps = vec![
+            Step::<(), String>::new("a", |_| Ok(())), // no compensation
+            Step::<(), String>::new("b", |_| Err("boom".to_string())),
+        ];
+        let mut ctx = ();
+        let out = execute_flow("test", steps, &mut ctx);
+        assert!(!out.ok);
+        assert!(out.compensated.is_empty());
+    }
+
+    /// Empty step list returns ok=true.
+    #[test]
+    fn empty_flow_returns_ok() {
+        let mut ctx = ();
+        let out = execute_flow("empty", Vec::<Step<(), String>>::new(), &mut ctx);
+        assert!(out.ok);
+        assert!(out.compensated.is_empty());
+    }
+
+    /// FlowRegistry stores and retrieves named flows.
+    #[test]
+    fn registry_register_and_get() {
+        let mut r = FlowRegistry::new();
+        let steps = vec![serde_json::json!({"name":"step1"})];
+        r.register("my_flow", steps.clone());
+        assert_eq!(r.get("my_flow"), Some(&steps));
+        assert!(r.get("unknown").is_none());
+    }
+}

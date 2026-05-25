@@ -211,4 +211,102 @@ mod tests {
         t.record(&json!({"usage": {"prompt_tokens": 1500, "completion_tokens": 0}}), "default");
         assert_eq!(t.format_short(), "1.5k tokens");
     }
+
+    /// Empty response → zero usage (no panic, no NaN).
+    #[test]
+    fn extract_usage_missing_fields_returns_zero() {
+        let u = extract_usage(&json!({}));
+        assert_eq!(u.input_tokens, 0);
+        assert_eq!(u.output_tokens, 0);
+        assert_eq!(u.total_tokens, 0);
+    }
+
+    /// total_tokens defaults to input + output when not provided.
+    #[test]
+    fn extract_usage_derives_total_when_missing() {
+        let r = json!({"usage": {"prompt_tokens": 5, "completion_tokens": 7}});
+        let u = extract_usage(&r);
+        assert_eq!(u.total_tokens, 12,
+            "total must default to prompt + completion when absent");
+    }
+
+    /// extract_usage uses the explicit total_tokens when present (even if
+    /// it differs from prompt + completion, e.g. cached tokens).
+    #[test]
+    fn extract_usage_respects_explicit_total() {
+        let r = json!({"usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 35}});
+        let u = extract_usage(&r);
+        assert_eq!(u.total_tokens, 35,
+            "must honour explicit total_tokens (e.g. cached prompt tokens add to total)");
+    }
+
+    /// estimate_tokens uses a 4-chars-per-token rough heuristic.
+    #[test]
+    fn estimate_tokens_approximation() {
+        assert_eq!(estimate_tokens(""), 0);
+        // ~4 chars/token rounding up.
+        assert!(estimate_tokens("hello world") >= 2);
+        assert!(estimate_tokens("hello world") <= 4);
+    }
+
+    /// estimate_message_tokens accumulates content size plus per-message overhead.
+    #[test]
+    fn estimate_message_tokens_includes_overhead() {
+        let m = json!({"role":"user","content":"hi"});
+        let n = estimate_message_tokens(&m);
+        // Even tiny content should produce a non-zero estimate (overhead applied).
+        assert!(n > 0);
+    }
+
+    /// estimate_history_tokens sums across messages.
+    #[test]
+    fn estimate_history_tokens_sums() {
+        let h = vec![
+            json!({"role":"user","content":"hello world"}),
+            json!({"role":"assistant","content":"hi there friend"}),
+        ];
+        let n = estimate_history_tokens(&h);
+        assert!(n >= estimate_message_tokens(&h[0]) + estimate_message_tokens(&h[1])
+                || n == estimate_message_tokens(&h[0]) + estimate_message_tokens(&h[1]),
+            "must sum (or at least not be smaller than) per-message estimates");
+    }
+
+    /// calculate_cost: per-token unit math.
+    #[test]
+    fn calculate_cost_unit_math() {
+        let usage = Usage { input_tokens: 1_000_000, output_tokens: 500_000, total_tokens: 1_500_000 };
+        let pricing = Pricing { input: 3.0, output: 15.0 };
+        let cost = calculate_cost(usage, pricing);
+        // 1M @ $3 + 0.5M @ $15 = $3 + $7.50 = $10.50
+        assert!((cost - 10.5).abs() < 1e-6, "got {cost}");
+    }
+
+    /// get_pricing returns sane defaults for unknown models.
+    #[test]
+    fn get_pricing_unknown_model_returns_defaults() {
+        let p = get_pricing("unknown-xyz");
+        // Unknown → falls through to "default" (0.0 / 0.0 for local).
+        assert_eq!(p.input, 0.0);
+        assert_eq!(p.output, 0.0);
+    }
+
+    /// get_pricing returns the configured rates for known models.
+    #[test]
+    fn get_pricing_returns_real_rates_for_known_models() {
+        let sonnet = get_pricing("claude-sonnet-4-5");
+        let haiku = get_pricing("claude-haiku-4-5");
+        // Sonnet is more expensive than Haiku in both dims.
+        assert!(sonnet.input > haiku.input, "Sonnet input must exceed Haiku");
+        assert!(sonnet.output > haiku.output, "Sonnet output must exceed Haiku");
+    }
+
+    /// `format_short` handles totals < 1000.
+    #[test]
+    fn format_short_handles_small_totals() {
+        let mut t = TokenTracker::new();
+        t.record(&json!({"usage": {"prompt_tokens": 250, "completion_tokens": 0}}), "default");
+        let s = t.format_short();
+        assert!(s.contains("250") || s.contains("0.2k"),
+            "must format under-1k totals sensibly; got {s}");
+    }
 }

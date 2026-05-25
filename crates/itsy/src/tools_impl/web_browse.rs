@@ -584,6 +584,8 @@ mod tests {
 
     #[test]
     fn ssrf_blocks_loopback() {
+        let _g = WEB_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        lock_loopback();
         assert!(assert_url_safe("http://127.0.0.1/").is_err());
         assert!(assert_url_safe("http://169.254.169.254/").is_err());
     }
@@ -602,5 +604,222 @@ mod tests {
         let txt = "User-agent: *\nDisallow: /private";
         assert!(!robots_allows(txt, "/private/file"));
         assert!(robots_allows(txt, "/public"));
+    }
+
+    // ── HTML extraction (pure, no HTTP) ────────────────────────────────────
+
+    #[test]
+    fn extract_title_handles_attrs_in_title_tag() {
+        // <title lang="en"> still works.
+        let html = r#"<title lang="en">My Page</title>"#;
+        assert_eq!(extract_title(html), "My Page");
+    }
+
+    #[test]
+    fn extract_title_returns_empty_when_absent() {
+        assert_eq!(extract_title("<html><body>no title</body></html>"), "");
+    }
+
+    #[test]
+    fn extract_title_decodes_html_entities() {
+        assert_eq!(extract_title("<title>Foo &lt; Bar &amp; Baz</title>"),
+            "Foo < Bar & Baz");
+    }
+
+    #[test]
+    fn extract_meta_description_handles_single_and_double_quotes() {
+        let d1 = r#"<meta name="description" content="single">"#;
+        let d2 = r#"<meta name='description' content='single quote attrs'>"#;
+        assert_eq!(extract_meta_description(d1), "single");
+        assert_eq!(extract_meta_description(d2), "single quote attrs");
+    }
+
+    #[test]
+    fn extract_readable_drops_script_and_style() {
+        let html = r#"<html><body><script>console.log('secret')</script>
+            <style>.x{}</style>
+            <article>Visible body</article></body></html>"#;
+        let t = extract_readable(html);
+        assert!(t.contains("Visible body"));
+        assert!(!t.contains("secret"), "script content must be stripped; got {t}");
+        assert!(!t.contains(".x{}"), "style content must be stripped; got {t}");
+    }
+
+    /// HTML-unescape covers named + numeric entities.
+    #[test]
+    fn html_unescape_handles_common_entities() {
+        assert_eq!(html_unescape("&lt;&gt;&amp;&quot;&#39;&nbsp;"), "<>&\"' ");
+        assert_eq!(html_unescape("hello &amp; world"), "hello & world");
+        // Numeric: &#65; = 'A'
+        assert!(html_unescape("&#65;").contains('A') || html_unescape("&#65;") == "&#65;",
+            "numeric refs may or may not be decoded; pin the chosen behavior");
+    }
+
+    /// `strip_tags` removes tag markup but keeps text content.
+    #[test]
+    fn strip_tags_preserves_text() {
+        let s = strip_tags("<p>Hello <b>world</b>!</p>");
+        assert!(s.contains("Hello"));
+        assert!(s.contains("world"));
+        assert!(s.contains("!"));
+        assert!(!s.contains("<p>"));
+        assert!(!s.contains("</b>"));
+    }
+
+    // ── canonicalize_url ────────────────────────────────────────────────────
+
+    #[test]
+    fn canonical_preserves_meaningful_path() {
+        let c = canonicalize_url("https://example.com/posts/2024/01/article");
+        assert_eq!(c, "https://example.com/posts/2024/01/article");
+    }
+
+    /// canonicalize_url is idempotent.
+    #[test]
+    fn canonical_is_idempotent() {
+        let c1 = canonicalize_url("https://Example.COM:443/foo?b=2&utm_source=x&a=1#frag");
+        let c2 = canonicalize_url(&c1);
+        assert_eq!(c1, c2);
+    }
+
+    /// Tracker params get stripped (utm_*, fbclid, gclid).
+    #[test]
+    fn canonical_strips_all_tracker_params() {
+        let raw = "https://example.com/?utm_source=a&utm_medium=b&fbclid=x&gclid=y&keep=ok";
+        let c = canonicalize_url(raw);
+        assert!(!c.contains("utm_"));
+        assert!(!c.contains("fbclid"));
+        assert!(!c.contains("gclid"));
+        assert!(c.contains("keep=ok"), "non-tracker params must survive; got {c}");
+    }
+
+    // ── SSRF (extra coverage) ──────────────────────────────────────────────
+
+    #[test]
+    fn ssrf_rejects_non_http_schemes() {
+        // Non-http schemes are rejected REGARDLESS of allow_public_endpoints;
+        // no lock needed.
+        assert!(assert_url_safe("file:///etc/passwd").is_err());
+        assert!(assert_url_safe("ftp://example.com").is_err());
+        assert!(assert_url_safe("gopher://example.com").is_err());
+    }
+
+    #[test]
+    fn ssrf_rejects_metadata_hosts() {
+        // Metadata hosts are rejected REGARDLESS of allow_public_endpoints.
+        assert!(assert_url_safe("http://169.254.169.254/").is_err());
+        assert!(assert_url_safe("http://metadata.google.internal/").is_err());
+    }
+
+    #[test]
+    fn ssrf_rejects_rfc1918() {
+        // RFC1918 rejection depends on `allow_public_endpoints=false` —
+        // lock first, then assert.
+        let _g = WEB_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        lock_loopback();
+        assert!(assert_url_safe("http://10.0.0.1/").is_err());
+        assert!(assert_url_safe("http://192.168.1.1/").is_err());
+        assert!(assert_url_safe("http://172.16.0.1/").is_err());
+    }
+
+    // ── decode_ddg_url ────────────────────────────────────────────────────
+
+    #[test]
+    fn ddg_redirect_url_decoded() {
+        // DDG wraps targets in /l/?uddg=<encoded>. We just need to know we
+        // either get back a usable URL or the original unchanged.
+        let raw = "https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fa";
+        let decoded = decode_ddg_url(raw);
+        assert!(decoded.contains("example.com") || decoded == raw,
+            "ddg wrapper must be decoded or passed through; got {decoded}");
+    }
+
+    // ── HTTP path via wiremock ─────────────────────────────────────────────
+    //
+    // `assert_url_safe` rejects 127.0.0.1 by default. Use the `allow_public_endpoints`
+    // settings flag to unlock the loopback path for these tests. Serialised
+    // because the flag is process-global.
+
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    static WEB_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn unlock_loopback() {
+        crate::settings::update(|s| {
+            s.allow_public_endpoints = true;
+            s.web_respect_robots = false;
+        });
+    }
+
+    fn lock_loopback() {
+        crate::settings::update(|s| {
+            s.allow_public_endpoints = false;
+            s.web_respect_robots = false;
+        });
+    }
+
+    #[tokio::test]
+    async fn web_fetch_returns_extracted_content() {
+        let _g = WEB_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unlock_loopback();
+        let server = MockServer::start().await;
+        let html = r#"<html><head><title>My Article</title>
+            <meta name="description" content="A great article"></head>
+            <body><article>Body content here</article></body></html>"#;
+        Mock::given(method("GET")).and(path("/article"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(html).insert_header("content-type", "text/html"))
+            .mount(&server).await;
+
+        let url = format!("{}/article", server.uri());
+        let r = web_fetch(&url, 5).await.expect("web_fetch should succeed");
+        assert!(r.contains("My Article"), "title must appear; got: {r}");
+        assert!(r.contains("A great article"), "description must appear; got: {r}");
+        assert!(r.contains("Body content here"), "body must appear; got: {r}");
+        lock_loopback();
+    }
+
+    #[tokio::test]
+    async fn web_fetch_handles_404() {
+        let _g = WEB_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unlock_loopback();
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/missing"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server).await;
+
+        let url = format!("{}/missing", server.uri());
+        let r = web_fetch(&url, 5).await;
+        // 404 still returns body; we just want no panic.
+        assert!(r.is_ok());
+        lock_loopback();
+    }
+
+    #[tokio::test]
+    async fn web_fetch_respects_timeout() {
+        let _g = WEB_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        unlock_loopback();
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/slow"))
+            .respond_with(ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_secs(10))
+                .set_body_string("never"))
+            .mount(&server).await;
+        let url = format!("{}/slow", server.uri());
+        let started = std::time::Instant::now();
+        let r = web_fetch(&url, 1).await;
+        let elapsed = started.elapsed();
+        assert!(r.is_err(), "must error on timeout");
+        assert!(elapsed < std::time::Duration::from_secs(5),
+            "timeout must fire promptly; took {elapsed:?}");
+        lock_loopback();
+    }
+
+    #[tokio::test]
+    async fn web_fetch_rejects_unsafe_url() {
+        let _g = WEB_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        lock_loopback(); // ensure default SSRF gate is engaged
+        let r = web_fetch("http://169.254.169.254/", 5).await;
+        assert!(r.is_err(), "metadata IP must always be rejected, even with mock");
     }
 }

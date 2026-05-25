@@ -276,4 +276,125 @@ mod tests {
     fn sanitize_id_strips_unsafe_chars() {
         assert_eq!(sanitize_id("abc-123_xyz; rm -rf /"), "abc-123_xyzrm-rf");
     }
+
+    /// JSON export round-trips through serde — the structure is preserved.
+    #[test]
+    fn json_export_preserves_structure() {
+        let s = json!({
+            "title": "T", "model": "m", "messages": [{"role":"user","content":"x"}]
+        });
+        let json_str = export_json(&s);
+        let parsed: Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(parsed["title"], "T");
+        assert_eq!(parsed["model"], "m");
+        assert_eq!(parsed["messages"][0]["role"], "user");
+    }
+
+    /// `export_json` redacts sensitive-looking strings (e.g. API keys).
+    /// Anti-regression: shared sessions must never leak secrets.
+    #[test]
+    fn json_export_redacts_secrets() {
+        let s = json!({
+            "title": "T",
+            "messages": [{"role":"user","content":"my key is sk-proj-abc123def456ghi789jkl012mno345pqr678"}]
+        });
+        let out = export_json(&s);
+        // Either the secret is redacted, or this test alerts us if the redactor regresses.
+        assert!(!out.contains("sk-proj-abc123def456ghi789jkl012mno345pqr678"),
+            "session export must redact OpenAI-style keys; got: {out}");
+    }
+
+    /// Empty messages array produces well-formed Markdown (no panic).
+    #[test]
+    fn markdown_export_handles_empty_messages() {
+        let s = json!({"title":"empty","messages":[]});
+        let md = export_markdown(&s);
+        assert!(md.contains("itsy Session: empty"));
+        assert!(md.contains("Messages: 0") || md.contains("**Messages:** 0"));
+    }
+
+    /// HTML export sets a content-type charset and includes UTF-8 safe content.
+    #[test]
+    fn html_export_is_utf8_self_describing() {
+        let s = json!({"title":"héllo","messages":[]});
+        let h = export_html(&s);
+        assert!(h.contains("charset=\"utf-8\""));
+        assert!(h.contains("héllo"));
+        assert!(h.starts_with("<!doctype html>") || h.starts_with("<!DOCTYPE html>"));
+    }
+
+    /// `export` dispatches to the right renderer.
+    #[test]
+    fn export_dispatches_by_format() {
+        let s = json!({"title":"t","messages":[]});
+        let md = export(&s, ShareFormat::Markdown);
+        let js = export(&s, ShareFormat::Json);
+        let h  = export(&s, ShareFormat::Html);
+        assert!(md.contains("itsy Session"));
+        assert!(js.contains("\"title\""));
+        assert!(h.contains("<html") || h.contains("<HTML"));
+    }
+
+    /// `export_to_file` writes to disk and sets `0600` permissions on Unix.
+    #[test]
+    fn export_to_file_writes_with_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("session.md");
+        let s = json!({"title":"t","messages":[]});
+        let written = export_to_file(&s, &p, ShareFormat::Markdown).unwrap();
+        assert_eq!(written, p);
+        assert!(p.exists());
+        let body = std::fs::read_to_string(&p).unwrap();
+        assert!(body.contains("itsy Session"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "shared session must be 0600; got {:o}", mode);
+        }
+    }
+
+    /// `html_escape` escapes the dangerous five characters (&, <, >, ", ').
+    #[test]
+    fn html_escape_covers_dangerous_chars() {
+        assert_eq!(html_escape("<&>"), "&lt;&amp;&gt;");
+        assert_eq!(html_escape("\""), "&quot;");
+        assert_eq!(html_escape("'"), "&#39;");
+        // Plain ASCII passes through.
+        assert_eq!(html_escape("hello world"), "hello world");
+    }
+
+    /// `export_messages_markdown` formats the message stream. Currently it
+    /// reuses the session renderer with a synthetic envelope; pin that the
+    /// content makes it through and the role marker (## You / ## AI) appears.
+    #[test]
+    fn messages_markdown_renders_role_blocks() {
+        let messages = vec![
+            json!({"role":"user","content":"hi"}),
+            json!({"role":"assistant","content":"hello"}),
+        ];
+        let md = export_messages_markdown(&messages);
+        assert!(md.contains("## You"));
+        assert!(md.contains("## AI"));
+        assert!(md.contains("hi"));
+        assert!(md.contains("hello"));
+    }
+
+    /// Tool messages render with the truncated-snippet prefix.
+    #[test]
+    fn markdown_tool_messages_are_truncated() {
+        let s = json!({
+            "title":"t",
+            "messages":[{"role":"tool", "content": "X".repeat(500)}]
+        });
+        let md = export_markdown(&s);
+        // Tool block uses "> Tool: " prefix.
+        assert!(md.contains("> Tool:"));
+        // Snippet is capped at 200 chars in the source — output should not
+        // contain a 500-X run.
+        let max_x_run = md.chars().fold((0usize, 0usize), |(cur, max), c| {
+            if c == 'X' { let n = cur + 1; (n, max.max(n)) } else { (0, max) }
+        }).1;
+        assert!(max_x_run <= 200, "tool snippet must be truncated; got {max_x_run}");
+    }
 }

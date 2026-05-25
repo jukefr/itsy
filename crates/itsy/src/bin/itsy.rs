@@ -52,17 +52,8 @@ fn max_tool_calls_per_turn() -> u32 {
     itsy::settings::get().max_tool_calls_per_turn
 }
 
-/// Actionable hint injected when the same tool fails twice in a row.
-/// Generic across tasks — no task-specific knowledge, just tool usage tips.
-fn recency_tool_hint(tool_name: &str) -> &'static str {
-    match tool_name {
-        "patch" => "Try `read_and_patch` instead — it reads the current file first then patches atomically, avoiding stale-content mismatches.",
-        "bash" => "Double-check that commands and paths exist. Use `which <cmd>` or `ls <path>` to probe before running complex commands.",
-        "write_file" => "Call `read_file` on the target path first — the write guard requires a prior read before writing.",
-        "read_file" => "Verify the path exists with `bash` before reading.",
-        _ => "Try a different approach, a different tool, or verify your assumptions with a simpler command first.",
-    }
-}
+use itsy::runtime::agent_helpers::recency_tool_hint;
+use itsy::runtime::evaluator::{evaluator_read_file, evaluator_run_bash};
 /// Maximum auto-improvement iterations per file before we DECOMPOSE.
 const MAX_IMPROVE_ITERATIONS: u32 = 4;
 
@@ -1402,95 +1393,9 @@ fn evaluator_tools() -> Vec<Value> {
     ]
 }
 
-/// Run a bash command for the evaluator (read-only intent, 15s timeout).
-fn evaluator_run_bash(command: &str, cwd: &str) -> String {
-    let result = run_bash_with_timeout(command, cwd, std::time::Duration::from_secs(15));
-    let mut s = format!("exit_code={}", result.exit_code);
-    if !result.stdout.is_empty() {
-        s.push_str(&format!("\nstdout:\n{}", result.stdout.trim_end()));
-    }
-    if !result.stderr.is_empty() {
-        s.push_str(&format!("\nstderr:\n{}", result.stderr.trim_end()));
-    }
-    if s.len() > 2000 {
-        s.truncate(2000);
-        s.push_str("\n[output truncated]");
-    }
-    s
-}
-
-struct BashOutput {
-    exit_code: i32,
-    stdout: String,
-    stderr: String,
-}
-
-fn run_bash_with_timeout(command: &str, cwd: &str, timeout: std::time::Duration) -> BashOutput {
-    use std::process::Command;
-    use std::io::Read;
-    let mut child = match Command::new("bash")
-        .arg("-c")
-        .arg(command)
-        .current_dir(cwd)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => return BashOutput { exit_code: -1, stdout: String::new(), stderr: format!("error: {e}") },
-    };
-
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-    let mut child_stdout = child.stdout.take().expect("piped stdout");
-    let mut child_stderr = child.stderr.take().expect("piped stderr");
-    let start = std::time::Instant::now();
-
-    // Wait for the child to finish, with a timeout.
-    loop {
-        if start.elapsed() >= timeout {
-            let _ = child.kill();
-            return BashOutput { exit_code: -1, stdout: String::new(), stderr: "timed out".into() };
-        }
-
-        // Read available data from stdout/stderr.
-        let _ = child_stdout.read_to_end(&mut stdout);
-        let _ = child_stderr.read_to_end(&mut stderr);
-
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                // Child exited — read any remaining output.
-                let _ = child_stdout.read_to_end(&mut stdout);
-                let _ = child_stderr.read_to_end(&mut stderr);
-                return BashOutput {
-                    exit_code: status.code().unwrap_or(-1),
-                    stdout: String::from_utf8_lossy(&stdout).to_string(),
-                    stderr: String::from_utf8_lossy(&stderr).to_string(),
-                };
-            }
-            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
-            Err(e) => return BashOutput { exit_code: -1, stdout: String::new(), stderr: format!("error: {e}") },
-        }
-    }
-}
-
-fn evaluator_read_file(path: &str, cwd: &str) -> String {
-    let p = if std::path::Path::new(path).is_absolute() {
-        std::path::PathBuf::from(path)
-    } else {
-        std::path::Path::new(cwd).join(path)
-    };
-    match std::fs::read_to_string(&p) {
-        Ok(s) => {
-            if s.len() > 3000 {
-                format!("{}\n[file truncated at 3000 chars]", &s[..3000])
-            } else {
-                s
-            }
-        }
-        Err(e) => format!("error reading {}: {e}", p.display()),
-    }
-}
+// `evaluator_run_bash`, `run_bash_with_timeout`, `BashOutput`, and
+// `evaluator_read_file` live in `itsy::runtime::evaluator` now — imported
+// at the top of this file so they're unit-testable from the library crate.
 
 /// Adversarial evaluation phase. Runs after the generator closes the
 /// contract. Gets a clean history, tool-restricted to read+bash only,

@@ -357,4 +357,113 @@ mod tests {
         assert_eq!(l[0].path, "b");
         assert_eq!(l[1].path, "a");
     }
+
+    /// Empty stack: undo_last and len are sensible defaults.
+    #[test]
+    fn empty_stack_is_inert() {
+        let mut s = UndoStack::new();
+        assert!(s.is_empty());
+        assert_eq!(s.len(), 0);
+        assert!(s.undo_last().is_none());
+        assert!(s.list(10).is_empty());
+    }
+
+    /// Undo-by-id picks a specific entry, not necessarily the last.
+    #[test]
+    fn undo_by_id_targets_specific_entry() {
+        let dir = tempdir().unwrap();
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        fs::write(&a, b"a_v1").unwrap();
+        fs::write(&b, b"b_v1").unwrap();
+        let mut s = UndoStack::new();
+        s.set_base_dir(dir.path());
+        let id_a = s.record_write("a.txt", Some("a_v1".into()), "a_v2".into());
+        let _id_b = s.record_write("b.txt", Some("b_v1".into()), "b_v2".into());
+        fs::write(&a, b"a_v2").unwrap();
+        fs::write(&b, b"b_v2").unwrap();
+
+        // Undo `a` by id — `b` should remain in stack.
+        let r = s.undo_by_id(id_a).unwrap();
+        assert!(r.error.is_none());
+        assert_eq!(fs::read_to_string(&a).unwrap(), "a_v1");
+        assert_eq!(fs::read_to_string(&b).unwrap(), "b_v2", "b must be untouched");
+        assert_eq!(s.len(), 1, "stack should have 1 entry left (b's undo)");
+    }
+
+    /// Undo-by-id with an unknown id returns None.
+    #[test]
+    fn undo_by_id_unknown_returns_none() {
+        let mut s = UndoStack::new();
+        s.record_write("x", Some("".into()), "".into());
+        assert!(s.undo_by_id(99999).is_none());
+        assert_eq!(s.len(), 1, "stack must be unchanged");
+    }
+
+    /// list cap is honored.
+    #[test]
+    fn list_respects_count() {
+        let mut s = UndoStack::new();
+        for i in 0..5 {
+            s.record_write(&format!("f{i}"), Some("".into()), "".into());
+        }
+        assert_eq!(s.list(2).len(), 2);
+        assert_eq!(s.list(100).len(), 5);
+    }
+
+    /// record_delete + undo restores the file content.
+    #[test]
+    fn delete_then_undo_restores_file() {
+        let dir = tempdir().unwrap();
+        let f = dir.path().join("gone.txt");
+        // File doesn't exist by the time of undo (delete already happened).
+        let mut s = UndoStack::new();
+        s.set_base_dir(dir.path());
+        s.record_delete("gone.txt", Some("recovered content".into()));
+        let r = s.undo_last().unwrap();
+        assert!(r.error.is_none(), "got {:?}", r);
+        assert_eq!(fs::read_to_string(&f).unwrap(), "recovered content");
+    }
+
+    /// record_delete without `before` content: undo fails with a clear error.
+    #[test]
+    fn delete_without_content_undo_errors() {
+        let dir = tempdir().unwrap();
+        let mut s = UndoStack::new();
+        s.set_base_dir(dir.path());
+        s.record_delete("ghost.txt", None);
+        let r = s.undo_last().unwrap();
+        assert!(r.error.is_some(),
+            "undo with no recorded contents must surface an error");
+    }
+
+    /// record_rename + undo moves the file back.
+    #[test]
+    fn rename_then_undo_moves_back() {
+        let dir = tempdir().unwrap();
+        let from = dir.path().join("old.txt");
+        let to = dir.path().join("new.txt");
+        fs::write(&from, b"x").unwrap();
+        // Perform the rename, then record it.
+        fs::rename(&from, &to).unwrap();
+        let mut s = UndoStack::new();
+        s.set_base_dir(dir.path());
+        s.record_rename("old.txt", "new.txt");
+
+        let r = s.undo_last().unwrap();
+        assert!(r.error.is_none(), "{:?}", r);
+        assert!(from.exists(), "old path must be restored");
+        assert!(!to.exists(), "new path must be gone");
+    }
+
+    /// Capacity cap: when the stack exceeds capacity, oldest entries are dropped.
+    /// Anti-regression: a sloppy LIFO with no cap would OOM.
+    #[test]
+    fn capacity_caps_stack_size() {
+        let mut s = UndoStack::with_capacity(3);
+        for i in 0..10 {
+            s.record_write(&format!("f{i}"), Some("".into()), "".into());
+        }
+        assert!(s.len() <= 3, "stack must not exceed capacity; got {} entries", s.len());
+    }
 }
