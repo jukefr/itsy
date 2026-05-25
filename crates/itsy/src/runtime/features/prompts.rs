@@ -252,3 +252,175 @@ pub fn known_prompts() -> &'static [&'static str] {
         "semantic_merge",
     ]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// All known prompt names render successfully with empty input.
+    /// Anti-regression: a new prompt added to `known_prompts` but not to `render`
+    /// would fall through to the Err arm — catch that immediately.
+    #[test]
+    fn every_known_prompt_renders() {
+        for name in known_prompts() {
+            let r = render(name, &json!({}));
+            assert!(r.is_ok(), "known prompt {name} must render, got {:?}", r);
+        }
+    }
+
+    /// Unknown prompt returns Err — never silently produces an empty prompt.
+    #[test]
+    fn unknown_prompt_returns_error() {
+        let r = render("nonexistent_xyz", &json!({}));
+        assert!(r.is_err());
+        assert!(r.unwrap_err().to_string().contains("Unknown prompt"));
+    }
+
+    /// `summarize_file` interpolates the file path, content, and target token cap.
+    #[test]
+    fn summarize_file_includes_inputs() {
+        let r = render("summarize_file", &json!({
+            "file_path": "src/foo.rs",
+            "target_tokens": 1000,
+            "content": "fn foo() {}"
+        })).unwrap();
+        assert!(r.contains("src/foo.rs"));
+        assert!(r.contains("1000"));
+        assert!(r.contains("fn foo() {}"));
+    }
+
+    /// `repair_tool_call` instructs the model to return only corrected JSON.
+    #[test]
+    fn repair_tool_call_demands_json_only() {
+        let r = render("repair_tool_call", &json!({
+            "original_call": "bad json",
+            "error": "missing brace",
+            "tool_schema": "{}"
+        })).unwrap();
+        assert!(r.contains("Return ONLY valid JSON"),
+            "must instruct JSON-only reply");
+    }
+
+    /// `intent_clarifier` truncates very long user messages to ~300 chars.
+    /// (The prompt template itself may include the letter 'x' a couple times.)
+    #[test]
+    fn intent_clarifier_truncates_message() {
+        let huge_msg = "x".repeat(2000);
+        let r = render("intent_clarifier", &json!({"user_message": huge_msg})).unwrap();
+        let xs = r.matches('x').count();
+        // 300 from user_message + maybe a couple stray 'x' in the prompt template.
+        assert!(xs <= 305, "user_message must be capped near 300 chars; got {xs} xs");
+        assert!(xs >= 300, "user_message should be 300 chars after truncation; got {xs}");
+    }
+
+    /// `commit_message` requires conventional-commit format.
+    #[test]
+    fn commit_message_specifies_conventional_format() {
+        let r = render("commit_message", &json!({
+            "task": "fix the bug",
+            "changed_files": "a.rs, b.rs"
+        })).unwrap();
+        assert!(r.contains("feat|fix|docs"),
+            "must enumerate the allowed conventional-commit types");
+        assert!(r.contains("under 72 chars"),
+            "must impose subject-line length limit");
+    }
+
+    /// `error_diagnosis` truncates very long stderr.
+    #[test]
+    fn error_diagnosis_truncates_stderr() {
+        let huge = "X".repeat(5000);
+        let r = render("error_diagnosis", &json!({
+            "command": "cargo test",
+            "exit_code": 1,
+            "stderr": huge
+        })).unwrap();
+        let xs = r.matches('X').count();
+        assert!(xs <= 1500, "stderr must be capped at 1500 chars; got {xs}");
+        assert!(r.contains("syntax|runtime|permission"),
+            "must enumerate diagnosis categories");
+    }
+
+    /// `decompose_task` lists the four known strategy types.
+    #[test]
+    fn decompose_task_lists_strategies() {
+        let r = render("decompose_task", &json!({
+            "task": "fix it", "errors": "x", "file_context": "y"
+        })).unwrap();
+        assert!(r.contains("split_file"));
+        assert!(r.contains("one_error_at_a_time"));
+        assert!(r.contains("rewrite_section"));
+        assert!(r.contains("extract_function"));
+    }
+
+    /// `semantic_merge` truncates large current_content to 3000 chars.
+    #[test]
+    fn semantic_merge_truncates_current_content() {
+        let huge = "Z".repeat(10_000);
+        let r = render("semantic_merge", &json!({
+            "file": "x.rs",
+            "intended_change": "rename foo",
+            "current_content": huge
+        })).unwrap();
+        let zs = r.matches('Z').count();
+        assert!(zs <= 3000, "current_content must be capped at 3000; got {zs}");
+    }
+
+    // ── TTLs ────────────────────────────────────────────────────────────────
+
+    /// `ttl_for` returns longer TTLs for stable prompts, shorter for volatile ones.
+    #[test]
+    fn ttl_ordering_reflects_volatility() {
+        // Summarize/commit are stable — long TTL.
+        assert!(ttl_for("summarize_file") >= Duration::from_secs(1800));
+        assert!(ttl_for("commit_message") >= Duration::from_secs(1800));
+        // Error diagnosis and decompose are volatile — short TTL.
+        assert!(ttl_for("error_diagnosis") < Duration::from_secs(1800));
+        // semantic_merge has shortest TTL (60s).
+        assert!(ttl_for("semantic_merge") <= Duration::from_secs(60));
+        // Unknown gets a sensible default (600s).
+        assert_eq!(ttl_for("anything_else"), Duration::from_secs(600));
+    }
+
+    /// `timeout_for` gives repair_tool_call 15s, everything else 20s.
+    #[test]
+    fn repair_tool_call_has_tighter_timeout() {
+        assert_eq!(timeout_for("repair_tool_call"), Duration::from_millis(15_000));
+        assert_eq!(timeout_for("summarize_file"), Duration::from_millis(20_000));
+        assert_eq!(timeout_for("other"), Duration::from_millis(20_000));
+    }
+
+    /// `derive_key` is stable for same name + rendered text, and differs for
+    /// distinct inputs.
+    #[test]
+    fn derive_key_is_content_addressed() {
+        let k1 = derive_key("p", "hello");
+        let k2 = derive_key("p", "hello");
+        let k3 = derive_key("p", "world");
+        let k4 = derive_key("q", "hello");
+        assert_eq!(k1, k2);
+        assert_ne!(k1, k3);
+        assert_ne!(k1, k4);
+    }
+
+    /// `cache_put` then `cache_get` round-trips when not yet expired.
+    #[test]
+    fn cache_put_then_get_round_trips() {
+        let key = format!("test-key-{}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
+        cache_put(key.clone(), "value".into(), Duration::from_secs(60));
+        assert_eq!(cache_get(&key).as_deref(), Some("value"));
+    }
+
+    /// Expired entries return None and don't surface stale data.
+    #[test]
+    fn cache_expired_entries_return_none() {
+        let key = format!("expired-{}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
+        cache_put(key.clone(), "stale".into(), Duration::from_millis(1));
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(cache_get(&key).is_none(),
+            "expired entry must NOT be returned");
+    }
+}

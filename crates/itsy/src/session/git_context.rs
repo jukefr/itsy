@@ -154,4 +154,63 @@ mod tests {
         assert!(should_inject_git_context("why does the build fail"));
         assert!(!should_inject_git_context("hello there"));
     }
+
+    /// Triggers must NOT false-positive on unrelated text.
+    /// Anti-regression: a casual mention of "test" shouldn't inject git diff.
+    #[test]
+    fn triggers_dont_match_neutral_text() {
+        assert!(!should_inject_git_context("hi"));
+        assert!(!should_inject_git_context("explain quantum mechanics"));
+        assert!(!should_inject_git_context("what is 2+2"));
+        assert!(!should_inject_git_context("write a sorting function"));
+        assert!(!should_inject_git_context(
+            "the test pattern is foo.*bar"),
+            "casual 'test' mention without fix-intent must NOT trigger");
+    }
+
+    /// More fix-intent triggers — covers the broader regex set.
+    #[test]
+    fn triggers_match_more_fix_intents() {
+        assert!(should_inject_git_context("debug failing spec"));
+        assert!(should_inject_git_context("broken check after merge"));
+        assert!(should_inject_git_context("recent commit"));
+        assert!(should_inject_git_context("last edit"));
+        assert!(should_inject_git_context("fix this"));
+    }
+
+    /// Empty / outside-repo cwd returns None — no panic, no fake context.
+    #[test]
+    fn collect_returns_none_outside_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(collect_git_context(tmp.path()).is_none(),
+            "non-git dir must return None");
+        assert!(get_git_diff_context(tmp.path()).is_none(),
+            "no prompt context for non-git dir");
+    }
+
+    /// `format_context` returns empty string when GitContext is empty (no
+    /// recently-changed files): no useless "--- Recent git changes ---" header.
+    #[test]
+    fn format_empty_context_returns_empty_string() {
+        let ctx = GitContext::default();
+        assert_eq!(format_context(&ctx), "");
+    }
+
+    /// `format_context` includes the section headers when fields are set.
+    #[test]
+    fn format_context_includes_section_headers() {
+        let ctx = GitContext {
+            unstaged_stat: Some("a.rs | 5".into()),
+            staged_stat: Some("b.rs | 3".into()),
+            diff_excerpt: Some("@@ +1,3 @@\n+new line".into()),
+            last_commit: Some("abc123 first".into()),
+        };
+        let out = format_context(&ctx);
+        assert!(out.contains("Unstaged changes:"));
+        assert!(out.contains("Staged changes:"));
+        assert!(out.contains("Last commit:"));
+        assert!(out.contains("Recent git changes"));
+        assert!(out.contains("@@ +1,3 @@"),
+            "diff excerpt must be embedded verbatim");
+    }
 }

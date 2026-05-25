@@ -781,4 +781,104 @@ mod tests {
         assert!(s.contains("[ ] A.002"));
         set_current(None);
     }
+
+    /// Use this helper instead of `TEST_LOCK.lock().unwrap()` so a poisoned
+    /// lock from a panicking test doesn't cascade-fail every subsequent test.
+    fn lock_serial() -> std::sync::MutexGuard<'static, ()> {
+        match TEST_LOCK.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    /// `mark_assertion` accepts a failed state with text evidence —
+    /// the contract layer doesn't enforce a minimum evidence length
+    /// (that gate lives at the executor layer). Document that contract here.
+    #[test]
+    fn mark_assertion_accepts_failure_with_text() {
+        let _g = lock_serial();
+        let cwd = tmp_cwd();
+        let _ = create(&cwd, "t".into(), "b".into(),
+            vec![("A.001".into(), "x".into())], vec![]).unwrap();
+        let r = mark_assertion(&cwd, "A.001", AssertionState::Failed,
+            "tried the smoke test, got exit code 1".into(), None);
+        assert!(r.is_ok(), "failed assertion with text evidence must be accepted; got {:?}", r);
+        set_current(None);
+    }
+
+    /// `mark_assertion` rejects unknown assertion id.
+    #[test]
+    fn mark_assertion_rejects_unknown_id() {
+        let _g = lock_serial();
+        let cwd = tmp_cwd();
+        let _ = create(&cwd, "t".into(), "b".into(),
+            vec![("A.001".into(), "x".into())], vec![]).unwrap();
+        let err = mark_assertion(&cwd, "A.999", AssertionState::Passed,
+            "should fail because id unknown".into(),
+            Some(CommandEvidence { command: "x".into(), exit_code: 0, observation: "ok".into(), timestamp: now_iso() })
+        ).unwrap_err();
+        let msg = err.to_string().to_lowercase();
+        assert!(msg.contains("a.999") || msg.contains("not found"),
+            "must error on unknown id; got: {}", err);
+        set_current(None);
+    }
+
+    /// `mark_feature` updates feature state in the contract.
+    #[test]
+    fn mark_feature_updates_state() {
+        let _g = lock_serial();
+        let cwd = tmp_cwd();
+        let _ = create(
+            &cwd, "t".into(), "b".into(),
+            vec![("A.001".into(), "x".into())],
+            vec![("F.001".into(), "implement thing".into(), vec!["A.001".into()])],
+        ).unwrap();
+        let updated = mark_feature(&cwd, "F.001", FeatureState::InProgress).unwrap();
+        assert!(updated.features.iter().any(|f| f.id == "F.001"
+            && f.state == FeatureState::InProgress));
+        set_current(None);
+    }
+
+    /// `make_id` produces a stable, slug-like id from a title.
+    #[test]
+    fn make_id_is_slug_like() {
+        let id1 = make_id("Build Login Flow!");
+        assert!(id1.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_'),
+            "id must be slug-friendly; got {id1:?}");
+        assert!(!id1.is_empty());
+    }
+
+    /// `set_active_id` / `read_active_id` / `clear_active_id` round-trip
+    /// the pointer file. Anti-regression: a partial write would let the
+    /// agent re-attach to a stale contract.
+    #[test]
+    fn active_id_round_trip() {
+        let _g = lock_serial();
+        let cwd = tmp_cwd();
+        set_active_id(&cwd, "abc-123").unwrap();
+        assert_eq!(read_active_id(&cwd).as_deref(), Some("abc-123"));
+        clear_active_id(&cwd).unwrap();
+        assert!(read_active_id(&cwd).is_none(), "clear must remove the pointer");
+        set_current(None);
+    }
+
+    /// `close` refuses if any assertion is still pending — the contract
+    /// gate must be all-passed.
+    #[test]
+    fn close_refused_with_pending_assertion() {
+        let _g = lock_serial();
+        let cwd = tmp_cwd();
+        let _ = create(&cwd, "t".into(), "b".into(),
+            vec![("A.001".into(), "x".into()), ("A.002".into(), "y".into())], vec![]).unwrap();
+        mark_assertion(&cwd, "A.001", AssertionState::Passed,
+            "ran the smoke test and saw ok".into(),
+            Some(CommandEvidence { command: "x".into(), exit_code: 0, observation: "ok".into(), timestamp: now_iso() })
+        ).unwrap();
+        let err = close(&cwd, ContractStatus::Completed).unwrap_err();
+        let msg = err.to_string().to_lowercase();
+        assert!(msg.contains("not yet passed") || msg.contains("pending")
+                || msg.contains("a.002"),
+            "close must report the blocking assertion; got: {}", err);
+        set_current(None);
+    }
 }

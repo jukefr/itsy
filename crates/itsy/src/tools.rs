@@ -302,4 +302,138 @@ mod tests {
         let deduped: std::collections::HashSet<&&str> = names.iter().collect();
         assert_eq!(names.len(), deduped.len(), "duplicate tool names found");
     }
+
+    fn has_tool(tools: &[Value], name: &str) -> bool {
+        tools.iter().any(|t| t.pointer("/function/name").and_then(|v| v.as_str()) == Some(name))
+    }
+
+    /// Regression for the "GPU at 0%" stall: in two-stage routing, category
+    /// filtering can yield a tool set that is missing `propose_contract`.
+    /// The agent's contract-mode system prompt then demands a first call
+    /// that's not in its tool list — it sits silent, model never fires.
+    /// `inject_contract_tools` MUST add propose_contract back into the set
+    /// while no contract is open, regardless of which category we filtered to.
+    #[test]
+    fn inject_contract_tools_adds_propose_contract_when_missing() {
+        let all = TOOLS.clone();
+        let mut filtered: Vec<Value> = all
+            .iter()
+            .filter(|t| t.pointer("/function/name").and_then(|v| v.as_str()) == Some("memory_load"))
+            .cloned()
+            .collect();
+        assert!(!has_tool(&filtered, "propose_contract"),
+            "test setup: filtered set should start without propose_contract");
+
+        // No active contract — `current()` returns None — propose_contract should appear.
+        if crate::session::contract::current().is_none() {
+            inject_contract_tools(&mut filtered, &all);
+            assert!(has_tool(&filtered, "propose_contract"),
+                "propose_contract must be injected when no contract is active");
+        }
+    }
+
+    /// If propose_contract is already in the filtered set, no duplicate
+    /// gets appended (idempotent).
+    #[test]
+    fn inject_contract_tools_is_idempotent() {
+        let all = TOOLS.clone();
+        let mut filtered: Vec<Value> = all
+            .iter()
+            .filter(|t| t.pointer("/function/name").and_then(|v| v.as_str()) == Some("propose_contract"))
+            .cloned()
+            .collect();
+        let before = filtered.len();
+        inject_contract_tools(&mut filtered, &all);
+        assert_eq!(filtered.len(), before,
+            "propose_contract was duplicated by inject");
+    }
+
+    fn test_config() -> crate::Config {
+        use crate::config::{
+            ContextConfig, GitConfig, ModelConfig, ToolsConfig, TuiConfig,
+        };
+        crate::Config {
+            model: ModelConfig {
+                provider: "openai".into(),
+                name: "test".into(),
+                base_url: "http://localhost:0/v1".into(),
+                timeout: 60,
+                api_key: None,
+            },
+            context: ContextConfig {
+                max_budget_pct: 70,
+                detected_window: 32_768,
+                working_memory_tokens: 8192,
+                summary_threshold: 8000,
+            },
+            tools: ToolsConfig {
+                bash_timeout: 30,
+                tool_routing: "direct".into(),
+                web_browse: false,
+                shell_persist: true,
+                shell_contain: false,
+                rtk: true,
+            },
+            tui: TuiConfig { show_token_usage: false, auto_approve: false, theme: "dark".into(), classic: false },
+            git: GitConfig { auto_commit: false },
+            features: crate::config::FeaturesConfig::default(),
+            models: None,
+            limits: crate::config::LimitsConfig::default(),
+            security: crate::config::SecurityConfig::default(),
+            diff: crate::config::DiffConfig::default(),
+            filetree: crate::config::FileTreeConfig::default(),
+            snapshots: crate::config::SnapshotPathsConfig::default(),
+            code_graph: crate::config::CodeGraphConfig::default(),
+            tests: crate::config::TestsConfig::default(),
+            traces: crate::config::TracesConfig::default(),
+            dedup: crate::config::DedupConfig::default(),
+            evidence: crate::config::EvidenceConfig::default(),
+            plugins: crate::config::PluginsConfig::default(),
+            diag: crate::config::DiagConfig::default(),
+            second_opinion: crate::config::SecondOpinionConfig::default(),
+        }
+    }
+
+    /// `get_all_tools` returns a non-empty set for an actionable category
+    /// (`coding`). Anti-regression for routing dropping the toolkit entirely.
+    #[test]
+    fn coding_category_yields_non_empty_toolset() {
+        let cfg = test_config();
+        let tools = get_all_tools(&cfg, Some("coding"), &ToolDeps::default());
+        assert!(!tools.is_empty(), "coding category must return tools");
+    }
+
+    /// `respond` category must yield zero tools — the model must not be
+    /// tempted to call a tool when asked to chat.
+    #[test]
+    fn respond_category_yields_no_tools() {
+        let cfg = test_config();
+        let tools = get_all_tools(&cfg, Some("respond"), &ToolDeps::default());
+        assert!(tools.is_empty(),
+            "respond category must strip tools, got {} tools", tools.len());
+    }
+
+    /// When two-stage routing returns a per-category filtered set, the agent
+    /// loop tops it up via `inject_contract_tools` so `propose_contract`
+    /// survives the filter. Test the combined behavior directly — this is
+    /// the GPU-idle stall regression pinned.
+    #[test]
+    fn two_stage_filtered_set_keeps_propose_contract_after_injection() {
+        use crate::runtime::two_stage_router::get_tools_for_category;
+        let mut all = TOOLS.clone();
+        all.extend(COMPOUND_TOOLS.iter().cloned());
+
+        for cat in ["coding", "plan", "debug", "explore", "read"] {
+            let mut tools = get_tools_for_category(cat, &all);
+            inject_contract_tools(&mut tools, &all);
+
+            // No active contract in test process → propose_contract must be present.
+            if crate::session::contract::current().is_none() {
+                assert!(has_tool(&tools, "propose_contract"),
+                    "category {:?} must include propose_contract after injection; got names: {:?}",
+                    cat,
+                    tools.iter().filter_map(|t| t.pointer("/function/name").and_then(|v| v.as_str())).collect::<Vec<_>>());
+            }
+        }
+    }
 }

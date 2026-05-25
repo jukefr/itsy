@@ -117,3 +117,88 @@ pub fn is_compiled_cognition_available() -> bool {
 pub fn get_compiled_provider() -> Option<Value> {
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Empty message defaults to 0.5 complexity (neutral) — never panics.
+    #[test]
+    fn empty_message_defaults_to_05() {
+        assert_eq!(estimate_complexity(""), 0.5);
+    }
+
+    /// Strong-pattern hits return 0.8 (high complexity).
+    #[test]
+    fn refactor_signals_high_complexity() {
+        assert_eq!(estimate_complexity("refactor the auth module"), 0.8);
+        assert_eq!(estimate_complexity("rewrite the parser in TypeScript"), 0.8);
+        assert_eq!(estimate_complexity("migrate to a new database"), 0.8);
+    }
+
+    /// Multi-file signals also push to strong.
+    #[test]
+    fn multi_file_signals_high_complexity() {
+        assert_eq!(estimate_complexity("change this across files"), 0.8);
+        assert_eq!(estimate_complexity("multi-file edit"), 0.8);
+    }
+
+    /// Very long messages (>500 chars) score as strong regardless of content.
+    #[test]
+    fn long_message_signals_high_complexity() {
+        let msg = "x".repeat(600);
+        assert_eq!(estimate_complexity(&msg), 0.8);
+    }
+
+    /// Short fast-intent messages route to low complexity (0.2).
+    #[test]
+    fn fast_intents_score_low_complexity() {
+        assert_eq!(estimate_complexity("fix typo in readme"), 0.2);
+        assert_eq!(estimate_complexity("explain this"), 0.2);
+        assert_eq!(estimate_complexity("rename foo"), 0.2);
+    }
+
+    /// Long fast-keyword messages DON'T route to fast — they get default.
+    #[test]
+    fn long_fast_keyword_message_is_default() {
+        let msg = format!("explain in detail: {}", "more context ".repeat(20));
+        assert_eq!(estimate_complexity(&msg), 0.5);
+    }
+
+    /// Neutral messages get 0.5 default.
+    #[test]
+    fn neutral_message_is_default() {
+        assert_eq!(estimate_complexity("add a function"), 0.5);
+    }
+
+    /// `route_to_tier` delegates to the cognition router.
+    #[test]
+    fn route_to_tier_dispatches_to_router() {
+        let r = route_to_tier(0.2);
+        assert_eq!(r.tier, "trivial");
+        let r = route_to_tier(0.5);
+        assert_eq!(r.tier, "simple");
+        let r = route_to_tier(0.9);
+        assert_eq!(r.tier, "complex");
+    }
+
+    /// `route_fallback` returns the safe-default MediumCoder.
+    #[test]
+    fn route_fallback_is_medium() {
+        let r = route_fallback();
+        assert_eq!(r.tier, "fallback");
+        assert_eq!(r.model_id, "MediumCoder");
+    }
+
+    /// `is_compiled_cognition_available` is true in this port (cognition is statically linked).
+    #[test]
+    fn compiled_cognition_is_available_in_rust_port() {
+        assert!(is_compiled_cognition_available());
+    }
+
+    /// `get_compiled_provider` returns None — the Rust port has dedicated provider types.
+    #[test]
+    fn get_compiled_provider_is_none() {
+        assert!(get_compiled_provider().is_none());
+    }
+}

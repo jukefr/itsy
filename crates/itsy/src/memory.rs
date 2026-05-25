@@ -659,4 +659,54 @@ mod tests {
         assert_eq!(s.by_type.get("workflow").copied(), Some(1));
     }
 
+    /// Bug #2 regression: ExecCtx::memory was previously rebuilt as a fresh
+    /// `MemoryStore::new(...)` on every tool call. With the JSON backend
+    /// (no shared DB), writes made by one tool call were invisible to the
+    /// next. The fix is to share the same `Arc<Mutex<MemoryStore>>` across
+    /// every tool call in a session. This test pins that contract: cloning
+    /// the Arc and writing through one handle MUST be visible via another.
+    #[test]
+    fn shared_arc_writes_visible_to_clone() {
+        use std::sync::Arc;
+        use parking_lot::Mutex;
+        let dir = tempdir().unwrap();
+        let shared: Arc<Mutex<MemoryStore>> = Arc::new(Mutex::new(MemoryStore::new(dir.path())));
+
+        // ExecCtx instance #1 — writes
+        let ctx_a = shared.clone();
+        let obj = ctx_a.lock().remember("decision", "use rust", "rewrote agent", vec!["rust".into()]);
+
+        // ExecCtx instance #2 — reads, must see #1's write
+        let ctx_b = shared.clone();
+        let items = ctx_b.lock().load_for_task("rust");
+        assert!(items.iter().any(|o| o.id == obj.id),
+            "second Arc handle must see write from first handle; got {} items", items.len());
+
+        // And forgetting via #2 is visible to #1.
+        let removed = ctx_b.lock().forget(&obj.id);
+        assert!(removed);
+        let after = ctx_a.lock().load_for_task("rust");
+        assert!(!after.iter().any(|o| o.id == obj.id),
+            "forget via one handle must be visible to the other");
+    }
+
+    /// Two independent `MemoryStore::new` instances pointing at the same
+    /// `cwd` MUST converge through their shared persistence backend
+    /// (SQLite by default). This documents the cross-process invariant
+    /// the agent relies on when child tools spawn out-of-band.
+    ///
+    /// Uses `new_json_only` so the test is independent of the global
+    /// `~/.config/itsy/projects/<hash>/memory.db` location — the SQLite
+    /// path is keyed by a hash of the cwd and other parallel tests can
+    /// poison the cache in ways that mask the per-instance contract.
+    #[test]
+    fn fresh_stores_on_same_cwd_see_each_others_writes_via_disk() {
+        let dir = tempdir().unwrap();
+        let mut a = MemoryStore::new_json_only(dir.path());
+        let obj = a.remember("note", "persist-me", "across-instances", vec![]);
+        let b = MemoryStore::new_json_only(dir.path());
+        let hits = b.load_for_task("persist-me");
+        assert!(hits.iter().any(|o| o.id == obj.id),
+            "second store on same cwd must see write via shared backend; got {} hits", hits.len());
+    }
 }

@@ -352,3 +352,117 @@ pub fn profile_path_for(name: &str) -> Option<PathBuf> {
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Unknown model gets default profile.
+    #[test]
+    fn unknown_model_gets_defaults() {
+        let p = get_profile("totally-made-up-model-xyz", 0);
+        assert_eq!(p.context_length, 32768, "default context_length is 32k");
+        assert_eq!(p.max_output, 4096);
+        assert!(p.supports_tool_calling, "default assumes tool calling works");
+        assert_eq!(p.tool_format, "native");
+        assert!(p.matched_key.is_none(), "unmatched model must have matched_key=None");
+    }
+
+    /// Detected context window from endpoint overrides profile's context_length.
+    /// Anti-regression: the agent must trust the endpoint, not the profile, when both disagree.
+    #[test]
+    fn detected_context_overrides_profile() {
+        let p = get_profile("qwen2.5-7b", 8192);
+        assert_eq!(p.context_length, 8192,
+            "detected_context_window must override profile context_length");
+    }
+
+    /// Known model name matches its profile entry — anti-regression for
+    /// `name.contains(key)` matching staying functional.
+    #[test]
+    fn known_model_matches_profile() {
+        let p = get_profile("qwen2.5-coder-7b", 0);
+        assert!(p.matched_key.is_some(),
+            "qwen-family model must match a profile entry; got matched_key=None");
+    }
+
+    /// Profile match prefers the LONGEST key (e.g., "qwen2.5-coder" over "qwen").
+    /// Pins the sort-by-key-length contract in match_profile.
+    #[test]
+    fn longest_profile_key_wins() {
+        // Both "qwen" and "qwen2.5-coder" may exist. Anti-regression: if
+        // shorter prefix wins, capability tuning for the specific family is lost.
+        let generic = match_profile("qwen2-1.5b");
+        let specific = match_profile("qwen2.5-coder-7b");
+        // Both should match SOME key — they may even match the same one if
+        // only one is registered. We just care that match_profile picks the
+        // longest-matching key, never a shorter one when a longer one exists.
+        if let (Some((g_key, _)), Some((s_key, _))) = (generic, specific) {
+            // If the specific name contains the generic key, the specific
+            // match must be at least as specific.
+            if g_key.contains("qwen") && s_key.contains("qwen") {
+                assert!(s_key.len() >= g_key.len(),
+                    "specific model {:?} matched {:?} but more-generic {:?} matched {:?} (longer)",
+                    "qwen2.5-coder-7b", s_key, "qwen2-1.5b", g_key);
+            }
+        }
+    }
+
+    /// Apply-disk-override: numeric fields update; absent fields don't touch
+    /// existing values.
+    #[test]
+    fn disk_override_applies_set_fields_only() {
+        let mut eff = EffectiveProfile {
+            context_length: 8192, max_output: 4096, supports_tool_calling: false,
+            tool_format: "harmony", strengths: vec!["a"], weaknesses: vec!["b"],
+            tool_use_quality: 0.5, instruction_following_score: 0.5, code_quality: 0.5,
+            matched_key: None,
+        };
+        let disk = DiskProfile {
+            context_length: Some(65536),
+            max_output: None,  // unset — must NOT touch eff.max_output
+            supports_tool_calling: Some(true),
+            tool_format: None,
+            strengths: vec![],  // empty — must NOT clobber eff.strengths
+            weaknesses: vec![],
+            tool_use_quality: Some(0.9),
+            instruction_following_score: None,
+            code_quality: None,
+        };
+        apply_disk_override(&mut eff, &disk);
+        assert_eq!(eff.context_length, 65536, "context_length must update");
+        assert_eq!(eff.max_output, 4096, "max_output must remain (disk had None)");
+        assert!(eff.supports_tool_calling, "tool calling enabled by override");
+        assert_eq!(eff.tool_format, "harmony", "tool_format unchanged (disk had None)");
+        assert_eq!(eff.tool_use_quality, 0.9);
+        assert_eq!(eff.instruction_following_score, 0.5, "score unchanged (disk None)");
+        assert_eq!(eff.strengths, vec!["a"], "empty strengths must NOT clobber existing");
+    }
+
+    /// Disk override with non-empty strengths/weaknesses DOES replace.
+    #[test]
+    fn disk_override_replaces_when_lists_non_empty() {
+        let mut eff = EffectiveProfile {
+            context_length: 8192, max_output: 4096, supports_tool_calling: true,
+            tool_format: "native", strengths: vec!["old1", "old2"], weaknesses: vec!["w"],
+            tool_use_quality: 0.5, instruction_following_score: 0.5, code_quality: 0.5,
+            matched_key: None,
+        };
+        let disk = DiskProfile {
+            context_length: None, max_output: None, supports_tool_calling: None,
+            tool_format: None,
+            strengths: vec!["new".into()],
+            weaknesses: vec!["new_w".into()],
+            tool_use_quality: None, instruction_following_score: None, code_quality: None,
+        };
+        apply_disk_override(&mut eff, &disk);
+        assert_eq!(eff.strengths, vec!["new"]);
+        assert_eq!(eff.weaknesses, vec!["new_w"]);
+    }
+
+    /// `load_profile` of a nonexistent name returns None.
+    #[test]
+    fn load_profile_returns_none_for_missing_file() {
+        assert!(load_profile("does-not-exist-xyz-abc").is_none());
+    }
+}

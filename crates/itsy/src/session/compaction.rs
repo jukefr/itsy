@@ -115,3 +115,116 @@ pub fn mid_turn_evict(history: &mut [Value]) -> u32 {
     }
     evicted
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Once;
+
+    static SETTINGS_INIT: Once = Once::new();
+
+    /// Tests share a global settings singleton — initialize it once with
+    /// a tight 4k window so the compaction logic actually fires in tests.
+    fn init_test_settings() {
+        SETTINGS_INIT.call_once(|| {
+            let mut s = crate::settings::Settings::defaults();
+            s.detected_window = 4096;
+            s.max_budget_pct = 70;
+            crate::settings::init(s);
+        });
+    }
+
+    fn user_msg(text: &str) -> Value {
+        json!({"role": "user", "content": text})
+    }
+
+    fn assistant_msg(text: &str) -> Value {
+        json!({"role": "assistant", "content": text})
+    }
+
+    fn system_msg(text: &str) -> Value {
+        json!({"role": "system", "content": text})
+    }
+
+    fn tool_msg(content: &str) -> Value {
+        json!({"role": "tool", "tool_call_id": "x", "content": content})
+    }
+
+    /// Empty / short history is left alone — compaction is a no-op.
+    #[test]
+    fn maybe_compact_short_history_is_noop() {
+        init_test_settings();
+        let mut h = vec![system_msg("sys"), user_msg("hi"), assistant_msg("hello")];
+        let before = h.len();
+        let dropped = maybe_compact(&mut h);
+        assert!(!dropped, "short history must not compact");
+        assert_eq!(h.len(), before, "short history length must be preserved");
+    }
+
+    /// When compaction fires, the system message must remain (it's the
+    /// only role that's not removable). Invariant: at least one system
+    /// message at index 0 after compaction.
+    #[test]
+    fn maybe_compact_preserves_system_role() {
+        init_test_settings();
+        // Build a long history with a huge user message to blow past budget.
+        let huge = "x".repeat(60_000);
+        let mut h = vec![system_msg("sys-prompt")];
+        for i in 0..40 {
+            h.push(user_msg(&format!("u{i}: {huge}")));
+            h.push(assistant_msg(&format!("a{i}")));
+        }
+
+        let dropped = maybe_compact(&mut h);
+        assert!(dropped, "huge history must trigger compaction");
+        assert_eq!(h[0].get("role").and_then(|r| r.as_str()), Some("system"),
+            "head of history must still be a system role after compaction");
+    }
+
+    /// Compaction must not panic on a history without any non-system
+    /// messages (degenerate case).
+    #[test]
+    fn maybe_compact_handles_only_system_messages() {
+        init_test_settings();
+        let mut h = vec![system_msg("a"), system_msg("b"), system_msg("c")];
+        let _ = maybe_compact(&mut h); // Must not panic.
+        assert!(h.iter().all(|m| m.get("role").and_then(|r| r.as_str()) == Some("system")));
+    }
+
+    /// `mid_turn_evict` returns 0 when under budget — no churn for small
+    /// histories.
+    #[test]
+    fn mid_turn_evict_returns_zero_under_budget() {
+        init_test_settings();
+        let mut h = vec![system_msg("s"), user_msg("hi"), assistant_msg("ok")];
+        assert_eq!(mid_turn_evict(&mut h), 0,
+            "under-budget history must produce zero evictions");
+    }
+
+    /// When over budget, `mid_turn_evict` replaces tool results in the
+    /// first half with stubs (preserves role + tool_call_id, mutates content).
+    #[test]
+    fn mid_turn_evict_replaces_tool_content_with_stub() {
+        init_test_settings();
+        let big = "Z".repeat(40_000); // ~10k tokens
+        let mut h: Vec<Value> = Vec::new();
+        h.push(system_msg("s"));
+        for _ in 0..20 {
+            h.push(assistant_msg("calling tool"));
+            h.push(tool_msg(&big));
+        }
+        // Add a fresh assistant message at the end so older content is "old".
+        h.push(assistant_msg("latest"));
+
+        let evicted = mid_turn_evict(&mut h);
+        assert!(evicted > 0, "over-budget history must evict tool messages");
+
+        // Some tool message in the first half must now have an `[evicted: ...]` stub.
+        let stub_count = h.iter()
+            .filter(|m| m.get("content").and_then(|c| c.as_str())
+                .map(|s| s.starts_with("[evicted:"))
+                .unwrap_or(false))
+            .count();
+        assert!(stub_count > 0, "expected at least one [evicted: ...] stub");
+    }
+}

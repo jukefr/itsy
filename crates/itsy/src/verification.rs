@@ -358,4 +358,99 @@ mod tests {
         assert!(block.contains("verification assets"));
         assert!(block.contains("preferred commands"));
     }
+
+    /// Empty directory → no commands, no assets, no prompt block.
+    /// Anti-regression: discover() must not hallucinate verifier commands
+    /// for projects that don't have them.
+    #[test]
+    fn empty_directory_yields_no_targets() {
+        let dir = tmp_dir();
+        let targets = discover(&dir);
+        assert!(!targets.has_authoritative_commands(),
+            "empty dir must have no commands, got: {:?}", targets.recommended_commands());
+        assert!(targets.prompt_block().is_none(),
+            "empty dir must not produce a prompt block");
+    }
+
+    /// Removed-feature regression: the previous implementation looked at
+    /// `/tests` (root of the filesystem) for an external mount that
+    /// terminal-bench tasks never use. The fix removed that probe. Pin
+    /// that discover() does NOT pick up files outside the cwd it's given.
+    #[test]
+    fn discover_does_not_reach_outside_cwd() {
+        let scope = tmp_dir();
+        // A sibling dir containing test files — discover should NOT see these.
+        let sibling = tmp_dir();
+        fs::create_dir_all(sibling.join("tests")).unwrap();
+        fs::write(sibling.join("tests/test_x.py"), "def test():\n    pass\n").unwrap();
+        fs::write(sibling.join("Cargo.toml"), "[package]\nname='x'\n").unwrap();
+
+        let targets = discover(&scope);
+        assert!(!targets.has_authoritative_commands(),
+            "scope dir is empty — discover must not pick up sibling tempdir contents; got {:?}",
+            targets.recommended_commands());
+    }
+
+    /// `go.mod` triggers `go test ./...`. Tests the Go branch wasn't broken
+    /// by recent refactors.
+    #[test]
+    fn detects_go_module() {
+        let dir = tmp_dir();
+        fs::write(dir.join("go.mod"), "module example.com/x\n").unwrap();
+        let targets = discover(&dir);
+        assert!(targets.recommended_commands().iter().any(|c| c == "go test ./..."),
+            "go.mod must yield `go test ./...`, got {:?}", targets.recommended_commands());
+        assert!(targets.matches_command("go test ./..."));
+    }
+
+    /// A Makefile with a `test:` target produces `make test`. A Makefile
+    /// with only `check:` produces `make check`. A Makefile with neither
+    /// produces nothing.
+    #[test]
+    fn detects_makefile_targets() {
+        let dir = tmp_dir();
+        fs::write(dir.join("Makefile"), "test:\n\techo ok\n").unwrap();
+        let targets = discover(&dir);
+        assert!(targets.recommended_commands().iter().any(|c| c == "make test"));
+
+        let dir2 = tmp_dir();
+        fs::write(dir2.join("Makefile"), "check:\n\techo ok\n").unwrap();
+        let targets2 = discover(&dir2);
+        assert!(targets2.recommended_commands().iter().any(|c| c == "make check"));
+
+        let dir3 = tmp_dir();
+        fs::write(dir3.join("Makefile"), "build:\n\techo ok\n").unwrap();
+        let targets3 = discover(&dir3);
+        assert!(!targets3.has_authoritative_commands(),
+            "Makefile with neither test nor check must yield nothing");
+    }
+
+    /// `package.json` with NO `test` script must NOT advertise a test command.
+    /// Anti-regression for over-eager discovery on JS projects.
+    #[test]
+    fn package_json_without_test_script_yields_nothing() {
+        let dir = tmp_dir();
+        fs::write(dir.join("package.json"), "{\"name\":\"x\"}").unwrap();
+        let targets = discover(&dir);
+        assert!(!targets.recommended_commands().iter().any(|c| c.ends_with(" test")),
+            "package.json without test script must not advertise *test; got {:?}",
+            targets.recommended_commands());
+    }
+
+    /// `matches_command` must not match an unrelated tool that happens to
+    /// share a prefix. e.g. detecting `cargo test` should not match
+    /// `cargo testify` or `cargo testbed`. Pins the word-boundary contract.
+    #[test]
+    fn matches_command_respects_word_boundary() {
+        let dir = tmp_dir();
+        fs::write(dir.join("Cargo.toml"), "[package]\nname='x'\n").unwrap();
+        let targets = discover(&dir);
+        assert!(targets.matches_command("cargo test"));
+        assert!(targets.matches_command("cargo test --release"));
+        assert!(!targets.matches_command("cargo testify"),
+            "cargo testify should NOT match cargo test (no word boundary)");
+        assert!(!targets.matches_command("cargo testbed --foo"),
+            "cargo testbed should NOT match cargo test");
+        assert!(!targets.matches_command("cargo build"));
+    }
 }

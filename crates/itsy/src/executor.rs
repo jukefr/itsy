@@ -1535,4 +1535,357 @@ mod tests {
         assert!(!text.contains("line4"), "got: {text}");
         assert!(text.contains("line10"), "got: {text}");  // end_line is exclusive stop, line 10 is included
     }
+
+    // ── exec_read_original ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn read_original_rejects_missing_path() {
+        let args = json!({});
+        let r = exec_read_original(&args, Path::new(".")).await;
+        assert!(r["error"].as_str().unwrap().contains("path missing"));
+    }
+
+    #[tokio::test]
+    async fn read_original_errors_for_never_read_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("never-read.txt");
+        std::fs::write(&f, "hi").unwrap();
+        let args = json!({"path": f.to_str().unwrap()});
+        let r = exec_read_original(&args, dir.path()).await;
+        assert!(r["error"].as_str().unwrap().contains("No original content"),
+            "must error when file wasn't read first; got {:?}", r);
+    }
+
+    // ── exec_append_file ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn append_file_rejects_missing_path() {
+        let args = json!({});
+        let r = exec_append_file(&args, Path::new(".")).await;
+        assert!(r["error"].as_str().unwrap().contains("path missing"));
+    }
+
+    #[tokio::test]
+    async fn append_file_rejects_nonexistent_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = json!({"path": dir.path().join("nope.txt").to_str().unwrap(), "content": "x"});
+        let r = exec_append_file(&args, dir.path()).await;
+        assert!(r["error"].as_str().unwrap().contains("not found"),
+            "must reject append to nonexistent file; got {:?}", r);
+    }
+
+    #[tokio::test]
+    async fn append_file_appends_with_separator() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("a.txt");
+        std::fs::write(&f, "line1").unwrap();   // no trailing newline
+        let args = json!({"path": f.to_str().unwrap(), "content": "line2"});
+        let r = exec_append_file(&args, dir.path()).await;
+        assert!(r.get("error").is_none(), "append must succeed: {:?}", r);
+        let after = std::fs::read_to_string(&f).unwrap();
+        assert!(after.contains("line1"));
+        assert!(after.contains("line2"));
+        assert!(after.contains("\n"), "must insert separator when prior file had no trailing newline");
+    }
+
+    #[tokio::test]
+    async fn append_file_rejects_oversized_chunk() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("a.txt");
+        std::fs::write(&f, "seed").unwrap();
+        let huge = "x".repeat(9000);
+        let args = json!({"path": f.to_str().unwrap(), "content": huge});
+        let r = exec_append_file(&args, dir.path()).await;
+        assert!(r["error"].as_str().unwrap().contains("too large"));
+    }
+
+    // ── exec_write_file ────────────────────────────────────────────────────
+
+    fn min_config() -> crate::Config {
+        use crate::config::{
+            ContextConfig, GitConfig, ModelConfig, ToolsConfig, TuiConfig,
+        };
+        crate::Config {
+            model: ModelConfig { provider: "x".into(), name: "y".into(), base_url: "http://0".into(), timeout: 60, api_key: None },
+            context: ContextConfig { max_budget_pct: 70, detected_window: 32768, working_memory_tokens: 8192, summary_threshold: 8000 },
+            tools: ToolsConfig { bash_timeout: 30, tool_routing: "direct".into(), web_browse: false, shell_persist: true, shell_contain: false, rtk: true },
+            tui: TuiConfig { show_token_usage: false, auto_approve: false, theme: "dark".into(), classic: false },
+            git: GitConfig { auto_commit: false },
+            features: Default::default(), models: None,
+            limits: Default::default(), security: Default::default(),
+            diff: Default::default(), filetree: Default::default(),
+            snapshots: Default::default(), code_graph: Default::default(),
+            tests: Default::default(), traces: Default::default(),
+            dedup: Default::default(), evidence: Default::default(),
+            plugins: Default::default(), diag: Default::default(),
+            second_opinion: Default::default(),
+        }
+    }
+
+    fn min_flags() -> crate::config::Flags {
+        crate::config::Flags::default()
+    }
+
+    fn min_ctx_dir() -> tempfile::TempDir { tempfile::tempdir().unwrap() }
+
+    macro_rules! mk_ctx {
+        ($dir:expr, $cfg:ident, $flags:ident, $mem:ident, $rt:ident, $fs:ident, $sm:ident) => {
+            let $cfg = min_config();
+            let $flags = min_flags();
+            let $mem = Arc::new(Mutex::new(crate::memory::MemoryStore::new_json_only($dir.path())));
+            let $rt = crate::tools_impl::read_tracker::ReadTracker::new();
+            let $fs = crate::session::file_state::FileStateTracker::new();
+            let $sm = crate::session::snapshot::SnapshotManager::new($dir.path().to_path_buf());
+        };
+    }
+
+    #[tokio::test]
+    async fn write_file_rejects_missing_path() {
+        let dir = min_ctx_dir();
+        mk_ctx!(dir, cfg, flags, mem, rt, fs, sm);
+        let ctx = ExecCtx { config: &cfg, flags: &flags, memory: mem, mcp_bridge: None, mcp_client: None, fullscreen: None, read_tracker: &rt, file_state: &fs, snapshot_manager: &sm };
+        let r = exec_write_file(&json!({}), dir.path(), &ctx).await;
+        assert!(r["error"].as_str().unwrap().contains("path missing"));
+    }
+
+    #[tokio::test]
+    async fn write_file_rejects_oversized_content() {
+        let dir = min_ctx_dir();
+        mk_ctx!(dir, cfg, flags, mem, rt, fs, sm);
+        let ctx = ExecCtx { config: &cfg, flags: &flags, memory: mem, mcp_bridge: None, mcp_client: None, fullscreen: None, read_tracker: &rt, file_state: &fs, snapshot_manager: &sm };
+        let huge = "x".repeat(9000);
+        let args = json!({"path": dir.path().join("new.txt").to_str().unwrap(), "content": huge});
+        let r = exec_write_file(&args, dir.path(), &ctx).await;
+        assert!(r["error"].as_str().unwrap().contains("too large"));
+    }
+
+    #[tokio::test]
+    async fn write_file_rejects_existing_file() {
+        let dir = min_ctx_dir();
+        mk_ctx!(dir, cfg, flags, mem, rt, fs, sm);
+        let ctx = ExecCtx { config: &cfg, flags: &flags, memory: mem, mcp_bridge: None, mcp_client: None, fullscreen: None, read_tracker: &rt, file_state: &fs, snapshot_manager: &sm };
+        let f = dir.path().join("exists.txt");
+        std::fs::write(&f, "old").unwrap();
+        let args = json!({"path": f.to_str().unwrap(), "content": "new"});
+        let r = exec_write_file(&args, dir.path(), &ctx).await;
+        assert!(r["error"].as_str().unwrap().contains("already exists"),
+            "write_file must refuse to clobber existing files; got {:?}", r);
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "old",
+            "clobber refused, original content must be intact");
+    }
+
+    // ── exec_read_and_patch ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn read_and_patch_rejects_missing_path() {
+        let r = exec_read_and_patch(&json!({}), Path::new(".")).await;
+        assert!(r["error"].as_str().unwrap().contains("path missing"));
+    }
+
+    #[tokio::test]
+    async fn read_and_patch_rejects_nonexistent_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = json!({
+            "path": dir.path().join("nope.txt").to_str().unwrap(),
+            "old_str": "x", "new_str": "y"
+        });
+        let r = exec_read_and_patch(&args, dir.path()).await;
+        assert!(r["error"].as_str().unwrap().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn read_and_patch_rejects_when_old_str_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("x.rs");
+        std::fs::write(&f, "fn main() {}").unwrap();
+        let args = json!({"path": f.to_str().unwrap(), "old_str": "nonexistent", "new_str": "x"});
+        let r = exec_read_and_patch(&args, dir.path()).await;
+        assert!(r["error"].as_str().unwrap().contains("not found"),
+            "must error when old_str is absent; got {:?}", r);
+    }
+
+    #[tokio::test]
+    async fn read_and_patch_rejects_when_old_str_ambiguous() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("x.rs");
+        std::fs::write(&f, "foo\nfoo\nfoo").unwrap();
+        let args = json!({"path": f.to_str().unwrap(), "old_str": "foo", "new_str": "bar"});
+        let r = exec_read_and_patch(&args, dir.path()).await;
+        assert!(r["error"].as_str().unwrap().contains("matches"),
+            "ambiguous old_str must be rejected (force a unique anchor); got {:?}", r);
+    }
+
+    #[tokio::test]
+    async fn read_and_patch_applies_unique_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("x.rs");
+        std::fs::write(&f, "fn one() {}\nfn two() {}\n").unwrap();
+        let args = json!({"path": f.to_str().unwrap(), "old_str": "fn two", "new_str": "fn three"});
+        let r = exec_read_and_patch(&args, dir.path()).await;
+        assert!(r.get("error").is_none(), "expected success: {:?}", r);
+        let after = std::fs::read_to_string(&f).unwrap();
+        assert!(after.contains("fn three"));
+        assert!(!after.contains("fn two"));
+    }
+
+    // ── exec_find_files ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn find_files_empty_pattern_returns_smart_listing() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "hi").unwrap();
+        let r = exec_find_files(&json!({}), dir.path()).await;
+        // Smart listing kicks in for empty/wildcard patterns — must produce SOME output.
+        assert!(r.get("result").is_some(), "smart listing must return a result");
+    }
+
+    // ── exec_create_and_run ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn create_and_run_rejects_missing_path() {
+        let r = exec_create_and_run(&json!({}), Path::new(".")).await;
+        assert!(r["error"].as_str().unwrap().contains("path missing"));
+    }
+
+    #[tokio::test]
+    async fn create_and_run_rejects_oversized_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let huge = "x".repeat(9000);
+        let args = json!({"path": dir.path().join("x.py").to_str().unwrap(), "content": huge});
+        let r = exec_create_and_run(&args, dir.path()).await;
+        assert!(r["error"].as_str().unwrap().contains("too large"));
+    }
+
+    #[tokio::test]
+    async fn create_and_run_creates_file_without_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("hello.txt");
+        let args = json!({"path": f.to_str().unwrap(), "content": "hi"});
+        let r = exec_create_and_run(&args, dir.path()).await;
+        assert!(r.get("error").is_none(), "no command → no error path; got {:?}", r);
+        assert!(f.exists());
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "hi");
+    }
+
+    /// `create_and_run` detects interactive-input scripts and SKIPS execution
+    /// (file is still created). Anti-regression: must never block waiting on stdin.
+    #[tokio::test]
+    async fn create_and_run_skips_interactive_input_scripts() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("ask.py");
+        let args = json!({
+            "path": f.to_str().unwrap(),
+            "content": "x = input('? ')\nprint(x)",
+            "command": "python3 ask.py"
+        });
+        let r = exec_create_and_run(&args, dir.path()).await;
+        assert!(f.exists(), "file should still be created");
+        let result = r["result"].as_str().unwrap_or("");
+        assert!(result.contains("interactive") || result.contains("Skipping"),
+            "must report skipping interactive execution; got {result:?}");
+    }
+
+    // ── exec_search ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn search_returns_result_field() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "hello world\nfoo bar").unwrap();
+        let r = exec_search(&json!({"pattern": "hello"}), dir.path()).await;
+        // Either matches or "No matches" — both go to result, not error.
+        assert!(r.get("result").is_some());
+        assert!(r.get("error").is_none());
+    }
+
+    /// `search` with a path argument resolves it safely.
+    #[tokio::test]
+    async fn search_rejects_path_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = exec_search(&json!({"pattern": "x", "path": "../../etc/passwd"}), dir.path()).await;
+        // Must reject (escape outside cwd is unsafe).
+        assert!(r.get("error").is_some()
+                || !r["result"].as_str().unwrap_or("").contains("/etc/"),
+            "must reject path traversal; got {:?}", r);
+    }
+
+    // ── exec_run ───────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn run_rejects_missing_command() {
+        let r = exec_run(&json!({}), Path::new(".")).await;
+        assert!(r["error"].as_str().unwrap().contains("missing"));
+    }
+
+    /// `exec_run` on a script with `input(` detects the interactive pattern
+    /// and refuses.
+    #[tokio::test]
+    async fn run_refuses_interactive_script() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("ask.py");
+        std::fs::write(&f, "x = input('? ')\n").unwrap();
+        let r = exec_run(&json!({"command": "python3 ask.py"}), dir.path()).await;
+        // Must include either "Refused" or "interactive" indicator.
+        assert!(r["error"].as_str().map(|s| s.contains("nteractive")).unwrap_or(false)
+            || r["result"].as_str().map(|s| s.contains("Refused")).unwrap_or(false),
+            "must refuse interactive scripts; got {:?}", r);
+    }
+
+    // ── exec_find_and_read ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn find_and_read_returns_no_match_message_for_nothing_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = exec_find_and_read(&json!({"pattern": "*.nope-extension"}), dir.path()).await;
+        let result = r["result"].as_str().unwrap();
+        assert!(result.contains("No files found"),
+            "expected 'No files found' on empty match; got {result:?}");
+    }
+
+    // ── exec_memory via ExecCtx ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn memory_load_returns_no_memory_when_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        mk_ctx!(dir, cfg, flags, mem, rt, fs, sm);
+        let ctx = ExecCtx { config: &cfg, flags: &flags, memory: mem, mcp_bridge: None, mcp_client: None, fullscreen: None, read_tracker: &rt, file_state: &fs, snapshot_manager: &sm };
+        let r = exec_memory("memory_load", &json!({"task": "anything"}), &ctx).await;
+        assert!(r["result"].as_str().unwrap().contains("No relevant memory"));
+    }
+
+    #[tokio::test]
+    async fn memory_remember_then_load_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        mk_ctx!(dir, cfg, flags, mem, rt, fs, sm);
+        let ctx = ExecCtx { config: &cfg, flags: &flags, memory: mem, mcp_bridge: None, mcp_client: None, fullscreen: None, read_tracker: &rt, file_state: &fs, snapshot_manager: &sm };
+        // Remember.
+        let r1 = exec_memory("memory_remember", &json!({
+            "type": "decision",
+            "title": "use rust",
+            "content": "Rewriting agent in Rust for memory safety"
+        }), &ctx).await;
+        assert!(r1["result"].as_str().unwrap().contains("Remembered"));
+        // Load.
+        let r2 = exec_memory("memory_load", &json!({"task": "rust safety"}), &ctx).await;
+        let txt = r2["result"].as_str().unwrap();
+        assert!(txt.contains("use rust") || txt.contains("memory safety"),
+            "load must see the remember; got {txt:?}");
+    }
+
+    #[tokio::test]
+    async fn memory_forget_returns_not_found_for_unknown_id() {
+        let dir = tempfile::tempdir().unwrap();
+        mk_ctx!(dir, cfg, flags, mem, rt, fs, sm);
+        let ctx = ExecCtx { config: &cfg, flags: &flags, memory: mem, mcp_bridge: None, mcp_client: None, fullscreen: None, read_tracker: &rt, file_state: &fs, snapshot_manager: &sm };
+        let r = exec_memory("memory_forget", &json!({"id": "no-such-id"}), &ctx).await;
+        assert!(r["result"].as_str().unwrap().to_lowercase().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn memory_list_with_empty_store_reports_no_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        mk_ctx!(dir, cfg, flags, mem, rt, fs, sm);
+        let ctx = ExecCtx { config: &cfg, flags: &flags, memory: mem, mcp_bridge: None, mcp_client: None, fullscreen: None, read_tracker: &rt, file_state: &fs, snapshot_manager: &sm };
+        let r = exec_memory("memory_list", &json!({}), &ctx).await;
+        assert!(r["result"].as_str().unwrap().to_lowercase().contains("no memory"));
+    }
 }

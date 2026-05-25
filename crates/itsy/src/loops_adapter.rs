@@ -122,3 +122,155 @@ pub async fn execute_flow<C>(_name: &str, mut steps: Vec<FlowStep<C>>, ctx: &mut
         error: None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+
+    /// `run_bounded_validation` returns passed=true on first-try success
+    /// without spinning more attempts.
+    #[tokio::test]
+    async fn bounded_validation_stops_on_pass() {
+        let attempts = Arc::new(AtomicU32::new(0));
+        let a2 = attempts.clone();
+        let r = run_bounded_validation(
+            move |_path| {
+                let c = a2.clone();
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    Some(ValidationOutcome { passed: true, errors: vec![] })
+                }
+            },
+            "x.rs",
+            5,
+        ).await;
+        assert!(r.passed);
+        assert_eq!(r.attempts, 1, "must stop on first pass; spent {} attempts", r.attempts);
+        assert!(!r.exhausted);
+    }
+
+    /// `run_bounded_validation` keeps retrying until the budget runs out.
+    #[tokio::test]
+    async fn bounded_validation_exhausts_when_never_passes() {
+        let attempts = Arc::new(AtomicU32::new(0));
+        let a2 = attempts.clone();
+        let r = run_bounded_validation(
+            move |_p| {
+                let c = a2.clone();
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    Some(ValidationOutcome { passed: false, errors: vec!["err".into()] })
+                }
+            },
+            "x.rs",
+            3,
+        ).await;
+        assert!(!r.passed);
+        assert_eq!(r.attempts, 3, "must use full budget");
+        assert!(r.exhausted);
+        assert_eq!(r.last_errors, vec!["err".to_string()],
+            "last_errors must reflect the final failure");
+    }
+
+    /// `run_bounded_validation` with `None` outcome treats it as success
+    /// (validator reported no signal to test).
+    #[tokio::test]
+    async fn bounded_validation_none_outcome_is_pass() {
+        let r = run_bounded_validation(
+            |_| async { None },
+            "x.rs", 3,
+        ).await;
+        assert!(r.passed, "None outcome must be treated as pass (no signal)");
+        assert_eq!(r.attempts, 1);
+    }
+
+    /// `execute_flow` runs all steps in order and reports ok=true on success.
+    #[tokio::test]
+    async fn flow_runs_all_steps_in_order_on_success() {
+        let order: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        fn step(label: &str, order: Arc<std::sync::Mutex<Vec<String>>>) -> FlowStep<()> {
+            let label_owned = label.to_string();
+            FlowStep {
+                name: label.to_string(),
+                action: Box::new(move |_ctx| {
+                    let l = label_owned.clone();
+                    let o = order.clone();
+                    Box::pin(async move {
+                        o.lock().unwrap().push(l);
+                        Ok::<(), anyhow::Error>(())
+                    })
+                }),
+                compensate: None,
+            }
+        }
+
+        let steps = vec![
+            step("a", order.clone()),
+            step("b", order.clone()),
+            step("c", order.clone()),
+        ];
+        let mut ctx = ();
+        let r = execute_flow("test", steps, &mut ctx).await;
+        assert!(r.ok);
+        assert!(r.failed_step.is_none());
+        assert_eq!(*order.lock().unwrap(), vec!["a", "b", "c"]);
+    }
+
+    /// When a step fails, prior steps are compensated in REVERSE order.
+    #[tokio::test]
+    async fn flow_compensates_in_reverse_on_failure() {
+        let compensated: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        fn ok_step(name: &str, compensated: Arc<std::sync::Mutex<Vec<String>>>) -> FlowStep<()> {
+            let n = name.to_string();
+            FlowStep {
+                name: name.to_string(),
+                action: Box::new(|_ctx| Box::pin(async { Ok(()) })),
+                compensate: Some(Box::new(move |_ctx| {
+                    let n = n.clone();
+                    let c = compensated.clone();
+                    Box::pin(async move {
+                        c.lock().unwrap().push(n);
+                        Ok::<(), anyhow::Error>(())
+                    })
+                })),
+            }
+        }
+
+        fn bad_step(name: &str) -> FlowStep<()> {
+            let n = name.to_string();
+            FlowStep {
+                name: n.clone(),
+                action: Box::new(move |_ctx| {
+                    let err = format!("{n}-failed");
+                    Box::pin(async move { Err(anyhow::anyhow!(err)) })
+                }),
+                compensate: None,
+            }
+        }
+
+        let steps = vec![
+            ok_step("step1", compensated.clone()),
+            ok_step("step2", compensated.clone()),
+            bad_step("step3"),
+        ];
+        let mut ctx = ();
+        let r = execute_flow("test", steps, &mut ctx).await;
+        assert!(!r.ok);
+        assert_eq!(r.failed_step.as_deref(), Some("step3"));
+        // compensated in reverse: step2 first, then step1.
+        assert_eq!(*compensated.lock().unwrap(), vec!["step2", "step1"]);
+        assert!(r.error.unwrap().contains("step3-failed"));
+    }
+
+    /// Empty flow trivially succeeds.
+    #[tokio::test]
+    async fn empty_flow_returns_ok() {
+        let mut ctx = ();
+        let r: FlowResult = execute_flow("nothing", Vec::<FlowStep<()>>::new(), &mut ctx).await;
+        assert!(r.ok);
+    }
+}

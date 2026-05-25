@@ -117,3 +117,158 @@ pub fn route_model(config: &Config, task_type: &str) -> String {
         _ => models.default.clone(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Refactor/redesign signals route to `strong`.
+    #[test]
+    fn refactor_signals_strong() {
+        assert_eq!(estimate_complexity("refactor the auth module"), Complexity::Strong);
+        assert_eq!(estimate_complexity("rewrite the parser"), Complexity::Strong);
+        assert_eq!(estimate_complexity("redesign the database schema"), Complexity::Strong);
+    }
+
+    /// Multi-file signals route to `strong`.
+    #[test]
+    fn multi_file_signals_strong() {
+        assert_eq!(estimate_complexity("change this across files"), Complexity::Strong);
+        assert_eq!(estimate_complexity("multi-file refactor"), Complexity::Strong);
+    }
+
+    /// Very long messages (>500 chars) route to `strong` regardless of content.
+    /// Anti-regression: a complex request shouldn't slip through to `fast`
+    /// just because it lacks specific trigger keywords.
+    #[test]
+    fn very_long_message_routes_to_strong() {
+        let msg = "do something ".repeat(50); // ~650 chars
+        assert_eq!(estimate_complexity(&msg), Complexity::Strong);
+    }
+
+    /// Quick/small intents route to `fast` — but only when the message is short.
+    #[test]
+    fn fast_intents_route_to_fast_when_short() {
+        assert_eq!(estimate_complexity("fix typo in readme"), Complexity::Fast);
+        assert_eq!(estimate_complexity("explain this"), Complexity::Fast);
+        assert_eq!(estimate_complexity("what is X"), Complexity::Fast);
+    }
+
+    /// Fast-keyword + long message → still `default`, not `fast`.
+    /// Avoids a "explain everything about the entire codebase" → fast misroute.
+    #[test]
+    fn fast_keyword_long_message_routes_default() {
+        let msg = format!("explain this thoroughly {}", "and ".repeat(40));
+        assert_eq!(estimate_complexity(&msg), Complexity::Default,
+            "long messages must not route to fast just because they contain a fast keyword");
+    }
+
+    /// Unmatched messages default to `default`.
+    #[test]
+    fn unmatched_routes_to_default() {
+        assert_eq!(estimate_complexity("add a feature to handle x"), Complexity::Default);
+    }
+
+    /// `route_model_for_message` falls back to the base model when no tiered
+    /// config is set. This is the single-model deployment path.
+    #[test]
+    fn route_model_falls_back_to_single_model_when_no_tiers() {
+        use crate::config::ModelConfig;
+        let mut cfg = make_test_config();
+        cfg.model = ModelConfig {
+            provider: "openai".into(),
+            name: "only-model".into(),
+            base_url: "http://localhost".into(),
+            timeout: 60,
+            api_key: None,
+        };
+        cfg.models = None;
+        assert_eq!(route_model_for_message("anything", &cfg), "only-model");
+    }
+
+    /// When tiers are configured, message routes to the right tier.
+    #[test]
+    fn route_model_picks_correct_tier_from_complexity() {
+        use crate::config::{ModelConfig, MultiModels};
+        let mut cfg = make_test_config();
+        cfg.model = ModelConfig {
+            provider: "openai".into(),
+            name: "fallback".into(),
+            base_url: "http://localhost".into(),
+            timeout: 60,
+            api_key: None,
+        };
+        cfg.models = Some(MultiModels {
+            fast: "fast-m".into(),
+            default: "default-m".into(),
+            strong: "strong-m".into(),
+        });
+        assert_eq!(route_model_for_message("refactor everything", &cfg), "strong-m");
+        assert_eq!(route_model_for_message("fix typo", &cfg), "fast-m");
+        assert_eq!(route_model_for_message("add a feature", &cfg), "default-m");
+    }
+
+    /// If a tier has an empty model name, route falls through to the next
+    /// non-empty option — never returns an empty string when any tier is set.
+    #[test]
+    fn route_model_falls_through_empty_tier() {
+        use crate::config::{ModelConfig, MultiModels};
+        let mut cfg = make_test_config();
+        cfg.model = ModelConfig {
+            provider: "openai".into(),
+            name: "fallback".into(),
+            base_url: "http://localhost".into(),
+            timeout: 60,
+            api_key: None,
+        };
+        cfg.models = Some(MultiModels {
+            fast: "".into(),  // empty → must fall through
+            default: "default-m".into(),
+            strong: "".into(), // empty → must fall through
+        });
+        // fast empty → default
+        assert_eq!(route_model_for_message("fix typo", &cfg), "default-m");
+        // strong empty → default
+        assert_eq!(route_model_for_message("refactor everything", &cfg), "default-m");
+    }
+
+    fn make_test_config() -> Config {
+        use crate::config::{
+            ContextConfig, GitConfig, ModelConfig, ToolsConfig, TuiConfig,
+        };
+        Config {
+            model: ModelConfig {
+                provider: "openai".into(),
+                name: "x".into(),
+                base_url: "http://localhost".into(),
+                timeout: 60,
+                api_key: None,
+            },
+            context: ContextConfig {
+                max_budget_pct: 70, detected_window: 32_768,
+                working_memory_tokens: 8192, summary_threshold: 8000,
+            },
+            tools: ToolsConfig {
+                bash_timeout: 30, tool_routing: "direct".into(),
+                web_browse: false, shell_persist: true, shell_contain: false, rtk: true,
+            },
+            tui: TuiConfig { show_token_usage: false, auto_approve: false, theme: "dark".into(), classic: false },
+            git: GitConfig { auto_commit: false },
+            features: crate::config::FeaturesConfig::default(),
+            models: None,
+            limits: crate::config::LimitsConfig::default(),
+            security: crate::config::SecurityConfig::default(),
+            diff: crate::config::DiffConfig::default(),
+            filetree: crate::config::FileTreeConfig::default(),
+            snapshots: crate::config::SnapshotPathsConfig::default(),
+            code_graph: crate::config::CodeGraphConfig::default(),
+            tests: crate::config::TestsConfig::default(),
+            traces: crate::config::TracesConfig::default(),
+            dedup: crate::config::DedupConfig::default(),
+            evidence: crate::config::EvidenceConfig::default(),
+            plugins: crate::config::PluginsConfig::default(),
+            diag: crate::config::DiagConfig::default(),
+            second_opinion: crate::config::SecondOpinionConfig::default(),
+        }
+    }
+}

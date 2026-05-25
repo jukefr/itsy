@@ -406,3 +406,142 @@ pub async fn classify_task_async(user_message: &str) -> &'static str {
     // dispatch it from `crate::model::router`.
     classify_task(user_message)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── classify_task: each branch ────────────────────────────────────────
+
+    #[test]
+    fn classifies_python_create_as_coding_not_backend() {
+        // Python (non-node backend) creating an API stays in `coding`, not `backend`.
+        // The backend branch is reserved for node/typescript stacks.
+        assert_eq!(classify_task("create a python API"), "coding");
+    }
+
+    #[test]
+    fn classifies_node_api_as_backend() {
+        assert_eq!(classify_task("create a node API"), "backend");
+        assert_eq!(classify_task("build a typescript express server"), "backend");
+    }
+
+    #[test]
+    fn classifies_explanation_intents() {
+        for msg in ["explain what this does", "how does X work", "why is this failing", "describe the architecture"] {
+            assert_eq!(classify_task(msg), "explanation", "msg: {msg}");
+        }
+    }
+
+    #[test]
+    fn classifies_search_intents() {
+        for msg in ["find the auth code", "search for foo", "where is bar defined"] {
+            assert_eq!(classify_task(msg), "search", "msg: {msg}");
+        }
+    }
+
+    #[test]
+    fn classifies_editing_intents() {
+        for msg in ["fix the bug", "rename foo to bar", "patch this function"] {
+            // These match EDITING/DEBUGGING; "fix" hits debugging-style words too,
+            // but EDITING comes first in the chain.
+            let r = classify_task(msg);
+            assert!(r == "editing" || r == "debugging", "msg={msg} got {r}");
+        }
+    }
+
+    #[test]
+    fn default_is_coding_for_uncategorized() {
+        // Generic short messages with no triggers fall through to default.
+        assert_eq!(classify_task("hmm interesting"), "coding");
+    }
+
+    // ── pick_decompose_strategy: branches ────────────────────────────────
+
+    #[test]
+    fn decompose_picks_split_file_for_large_files() {
+        let big = (0..120).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let s = pick_decompose_strategy(&big, &["x".into()], "huge.py");
+        assert_eq!(s.kind, "split_file",
+            "files >80 lines must use split_file; got {}", s.kind);
+        assert!(s.instruction.contains("huge.py"));
+    }
+
+    #[test]
+    fn decompose_picks_one_error_at_a_time_for_multiple_errors() {
+        let small = "def f():\n    pass\n";
+        let errs = vec!["err A".to_string(), "err B".to_string(), "err C".to_string()];
+        let s = pick_decompose_strategy(small, &errs, "small.py");
+        assert_eq!(s.kind, "one_error_at_a_time",
+            "small file with >1 errors must use one_error_at_a_time; got {}", s.kind);
+        assert!(s.instruction.contains("err A"),
+            "instruction must include the first error");
+    }
+
+    #[test]
+    fn decompose_picks_rewrite_section_for_single_persistent_error() {
+        let small = "def f():\n    pass\n";
+        let errs = vec!["only error".to_string()];
+        let s = pick_decompose_strategy(small, &errs, "small.py");
+        assert_eq!(s.kind, "rewrite_section",
+            "small file with one error must use rewrite_section; got {}", s.kind);
+        assert!(s.instruction.contains("only error"));
+    }
+
+    // ── ToolScore confidence math ─────────────────────────────────────────
+
+    #[test]
+    fn record_success_raises_confidence_above_default() {
+        // Use Default to avoid loading from disk; we only test in-memory math.
+        let mut s = ToolScorer::default();
+        for _ in 0..5 {
+            s.record_success("bash", "coding", 100);
+        }
+        let score = s.get_score("bash", "coding");
+        assert!(score > 0.5, "5 successes should push score above 0.5, got {score}");
+    }
+
+    #[test]
+    fn record_failure_lowers_confidence() {
+        let mut s = ToolScorer::default();
+        for _ in 0..5 {
+            s.record_failure("bash", "coding", "boom");
+        }
+        let score = s.get_score("bash", "coding");
+        assert!(score < 0.5, "5 failures should push score below 0.5, got {score}");
+    }
+
+    #[test]
+    fn should_avoid_only_triggers_after_three_calls() {
+        let mut s = ToolScorer::default();
+        // 2 failures: not enough samples to avoid yet.
+        s.record_failure("bash", "coding", "x");
+        s.record_failure("bash", "coding", "x");
+        assert!(!s.should_avoid("bash", "coding"),
+            "should_avoid requires >=3 calls AND confidence<0.35; 2 samples shouldn't trigger");
+
+        // 3rd+ failure: now confidence sinks low enough.
+        s.record_failure("bash", "coding", "x");
+        s.record_failure("bash", "coding", "x");
+        assert!(s.should_avoid("bash", "coding"),
+            "4 failures must trigger should_avoid");
+    }
+
+    #[test]
+    fn get_score_returns_default_for_unknown_tool() {
+        let s = ToolScorer::default();
+        assert_eq!(s.get_score("never_called", "coding"), 0.65,
+            "unknown tool/task must return the 0.65 default");
+    }
+
+    #[test]
+    fn get_score_caps_at_95() {
+        let mut s = ToolScorer::default();
+        for _ in 0..1000 {
+            s.record_success("bash", "coding", 1);
+        }
+        let score = s.get_score("bash", "coding");
+        assert!(score <= 0.95,
+            "score must cap at 0.95, got {score}");
+    }
+}

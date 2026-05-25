@@ -221,3 +221,137 @@ pub fn repair_code_assist_message(
         output_type: "string",
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ── repair_json ────────────────────────────────────────────────────────
+
+    /// Strips ```json fences and re-serialises canonically.
+    #[test]
+    fn repair_strips_json_fence() {
+        let s = "```json\n{\"a\":1}\n```";
+        let out = repair_json(s);
+        let v: Value = serde_json::from_str(&out).expect("output must parse");
+        assert_eq!(v, json!({"a": 1}));
+    }
+
+    /// Strips bare ``` fences too.
+    #[test]
+    fn repair_strips_bare_fence() {
+        let s = "```\n{\"x\":42}\n```";
+        let out = repair_json(s);
+        let v: Value = serde_json::from_str(&out).expect("output must parse");
+        assert_eq!(v, json!({"x": 42}));
+    }
+
+    /// Trailing commas before `}` are dropped.
+    #[test]
+    fn repair_strips_trailing_commas() {
+        let s = "{\"a\": 1, \"b\": 2,}";
+        let out = repair_json(s);
+        let v: Value = serde_json::from_str(&out).expect("output must parse");
+        assert_eq!(v, json!({"a": 1, "b": 2}));
+    }
+
+    /// Unquoted keys are quoted, then parsed.
+    #[test]
+    fn repair_quotes_unquoted_keys() {
+        let s = "{a: 1, b: \"text\"}";
+        let out = repair_json(s);
+        let v: Value = serde_json::from_str(&out).expect("output must parse");
+        assert_eq!(v, json!({"a": 1, "b": "text"}));
+    }
+
+    /// Already-valid JSON survives a roundtrip (no false repairs).
+    #[test]
+    fn repair_is_idempotent_on_valid_json() {
+        let s = "{\"a\":1,\"b\":[1,2,3]}";
+        let out = repair_json(s);
+        let v: Value = serde_json::from_str(&out).expect("output must parse");
+        assert_eq!(v, json!({"a": 1, "b": [1, 2, 3]}));
+    }
+
+    /// Empty / whitespace-only input is returned unchanged (no panic).
+    #[test]
+    fn repair_handles_empty_input() {
+        assert_eq!(repair_json(""), "");
+        assert_eq!(repair_json("   "), "   ");
+    }
+
+    // ── build_repair_message ────────────────────────────────────────────────
+
+    fn opts<'a>(issues: &'a [String]) -> RepairOpts<'a> {
+        static INPUT: Lazy<Value> = Lazy::new(|| json!({"task": "do thing"}));
+        static BAD: Lazy<Value> = Lazy::new(|| json!("garbage output"));
+        RepairOpts {
+            prompt_name: "test",
+            original_input: &INPUT,
+            bad_output: &BAD,
+            issues,
+            output_type: "json",
+        }
+    }
+
+    /// Repair message includes original input, bad output, and issues.
+    #[test]
+    fn repair_message_includes_all_sections() {
+        let issues = vec!["missing required field 'name'".to_string()];
+        let msg = build_repair_message(&opts(&issues));
+        assert!(msg.contains("Expected output type: json"));
+        assert!(msg.contains("Original input:"));
+        assert!(msg.contains("Your previous output:"));
+        assert!(msg.contains("Validation issues:"));
+        assert!(msg.contains("missing required field"));
+    }
+
+    /// Empty issues list falls back to a generic fallback message.
+    #[test]
+    fn repair_message_handles_no_issues() {
+        let issues: Vec<String> = vec![];
+        let msg = build_repair_message(&opts(&issues));
+        assert!(msg.contains("output failed validation"));
+    }
+
+    /// Long issue lists are capped at 5 entries (anti-bloat regression).
+    #[test]
+    fn repair_message_caps_issue_list_at_five() {
+        let issues: Vec<String> = (0..20).map(|i| format!("issue {i}")).collect();
+        let msg = build_repair_message(&opts(&issues));
+        assert!(msg.contains("issue 0"));
+        assert!(msg.contains("issue 4"));
+        assert!(!msg.contains("issue 7"),
+            "issues 5+ must be dropped, msg was:\n{msg}");
+    }
+
+    /// Specific guidance for "Unterminated template literal" appears in output.
+    #[test]
+    fn repair_message_includes_template_literal_guidance() {
+        let issues = vec!["TypeError: Unterminated template literal at line 42".to_string()];
+        let msg = build_repair_message(&opts(&issues));
+        assert!(msg.contains("backtick"),
+            "template-literal guidance must mention backticks; got:\n{msg}");
+    }
+
+    /// Specific guidance for "Cannot find module" appears.
+    #[test]
+    fn repair_message_includes_missing_module_guidance() {
+        let issues = vec!["Error: Cannot find module 'frobnicate'".to_string()];
+        let msg = build_repair_message(&opts(&issues));
+        assert!(msg.contains("doesn't exist") || msg.contains("real package"),
+            "missing-module guidance expected; got:\n{msg}");
+    }
+
+    /// `repair_code_assist_message` is a thin shim — produces same shape.
+    #[test]
+    fn code_assist_shim_produces_string_output_type() {
+        let input = json!({"q": "x"});
+        let bad = json!("bad");
+        let issues = vec!["err".to_string()];
+        let msg = repair_code_assist_message(&input, &bad, &issues);
+        assert!(msg.contains("Expected output type: string"),
+            "shim must use string output_type");
+    }
+}

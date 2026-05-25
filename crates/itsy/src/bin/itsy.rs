@@ -725,13 +725,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     // The model legitimately runs the same verify command after each
                     // edit cycle (patch → coqc → patch → coqc …); only consecutive
                     // bash calls with no mutation in between indicate a stuck loop.
-                    {
-                        let mut locked = session.mutable.lock();
-                        let keys: Vec<String> = locked.bash_loop_keys.drain().collect();
-                        for k in keys {
-                            locked.tool_repeat_counts.remove(&k);
-                        }
-                    }
+                    session.mutable.lock().reset_bash_loop_after_mutation();
                 }
 
                 // Pretty-print outcome.

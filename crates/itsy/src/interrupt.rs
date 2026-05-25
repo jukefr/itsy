@@ -111,3 +111,78 @@ impl Drop for WizardGuard {
         WIZARD_ACTIVE.store(self.prev, Ordering::SeqCst);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Serialise interrupt-counter tests — they all read/write the same global.
+    static LOCK: Mutex<()> = Mutex::new(());
+
+    /// `take` returns the count and resets to zero in one operation.
+    /// Anti-regression: a non-atomic read-then-clear could drop signals.
+    #[test]
+    fn take_returns_count_and_resets() {
+        let _g = LOCK.lock().unwrap();
+        reset();
+        PRESSED.fetch_add(3, Ordering::SeqCst);
+        assert_eq!(take(), 3, "take must return the count");
+        assert_eq!(pending(), 0, "take must reset to zero");
+        // A second take after no presses returns 0.
+        assert_eq!(take(), 0);
+    }
+
+    /// `reset` clears the counter without observing the value.
+    #[test]
+    fn reset_clears_without_observing() {
+        let _g = LOCK.lock().unwrap();
+        reset();
+        PRESSED.fetch_add(5, Ordering::SeqCst);
+        reset();
+        assert_eq!(pending(), 0);
+    }
+
+    /// `pending` is a non-clearing read.
+    #[test]
+    fn pending_does_not_clear() {
+        let _g = LOCK.lock().unwrap();
+        reset();
+        PRESSED.fetch_add(2, Ordering::SeqCst);
+        assert_eq!(pending(), 2);
+        assert_eq!(pending(), 2, "pending must NOT clear; got differing reads");
+        take();
+    }
+
+    /// `WizardGuard::enter` flips the flag; drop restores prior state.
+    #[test]
+    fn wizard_guard_restores_prior_state() {
+        // Prior state could be either; we only require restoration.
+        let prior = WIZARD_ACTIVE.load(Ordering::SeqCst);
+        {
+            let _g = WizardGuard::enter();
+            assert!(WIZARD_ACTIVE.load(Ordering::SeqCst),
+                "guard must set wizard-active to true");
+        }
+        assert_eq!(WIZARD_ACTIVE.load(Ordering::SeqCst), prior,
+            "drop must restore prior wizard-active state");
+    }
+
+    /// Nested guards restore inner state on drop.
+    #[test]
+    fn wizard_guard_handles_nesting() {
+        WIZARD_ACTIVE.store(false, Ordering::SeqCst);
+        let g1 = WizardGuard::enter();
+        assert!(WIZARD_ACTIVE.load(Ordering::SeqCst));
+        {
+            let _g2 = WizardGuard::enter();
+            assert!(WIZARD_ACTIVE.load(Ordering::SeqCst));
+        }
+        // After inner drop, state is what g1 saw (true) — anti-regression
+        // for an inner drop accidentally clearing.
+        assert!(WIZARD_ACTIVE.load(Ordering::SeqCst),
+            "inner guard drop must NOT clear when outer is still active");
+        drop(g1);
+        assert!(!WIZARD_ACTIVE.load(Ordering::SeqCst));
+    }
+}

@@ -233,3 +233,92 @@ pub fn reset_traces() {
 pub fn is_disabled() -> bool {
     WRITER.disabled
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `TraceBuffer::record` and `dump` round-trip an event.
+    #[test]
+    fn buffer_record_then_dump() {
+        let b = TraceBuffer::new(10);
+        b.record("t1", "test_kind", serde_json::json!({"x": 1}));
+        let evs = b.dump();
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].trace_id, "t1");
+        assert_eq!(evs[0].kind, "test_kind");
+        assert_eq!(evs[0].data, serde_json::json!({"x": 1}));
+    }
+
+    /// When `capacity` is exceeded, oldest entries are evicted (ring-buffer
+    /// invariant). Anti-regression: never grow unboundedly.
+    #[test]
+    fn buffer_evicts_oldest_when_full() {
+        let b = TraceBuffer::new(3);
+        for i in 0..5 {
+            b.record("t", "k", serde_json::json!({"i": i}));
+        }
+        let evs = b.dump();
+        assert_eq!(evs.len(), 3, "buffer must cap at capacity=3");
+        // Oldest (i=0,1) evicted; we keep i=2, 3, 4.
+        let ids: Vec<i64> = evs.iter()
+            .filter_map(|e| e.data.get("i").and_then(|v| v.as_i64()))
+            .collect();
+        assert_eq!(ids, vec![2, 3, 4]);
+    }
+
+    /// `random_span_id` produces 32-hex-char strings and is collision-resistant.
+    #[test]
+    fn random_span_id_format() {
+        let a = random_span_id();
+        let b = random_span_id();
+        assert_eq!(a.len(), 32);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()),
+            "span_id must be pure hex; got {a:?}");
+        assert_ne!(a, b, "two consecutive span_ids must differ");
+    }
+
+    /// `write_span` returns a span_id and appends to the in-memory mirror.
+    /// Filter by a unique trace_id to isolate from other parallel tests.
+    #[test]
+    fn write_span_appends_to_in_memory_mirror() {
+        let trace = format!("test-trace-{}", random_span_id());
+        let _id = write_span(SpanInit {
+            trace_id: trace.clone(),
+            workflow: "wf".into(),
+            step: "step".into(),
+            kind: "test".into(),
+            latency_ms: 42,
+            status: "ok".into(),
+            ..Default::default()
+        });
+        let spans = load_trace(&trace);
+        assert_eq!(spans.len(), 1, "must record exactly one span for this trace");
+        assert_eq!(spans[0].latency_ms, 42);
+        assert_eq!(spans[0].status, "ok");
+        assert_eq!(spans[0].step, "step");
+    }
+
+    /// Spans returned by `load_trace` are sorted by `finished_at`.
+    #[test]
+    fn load_trace_returns_sorted_by_finished_at() {
+        let trace = format!("sort-trace-{}", random_span_id());
+        let _ = write_span(SpanInit {
+            trace_id: trace.clone(),
+            step: "first".into(),
+            status: "ok".into(),
+            ..Default::default()
+        });
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let _ = write_span(SpanInit {
+            trace_id: trace.clone(),
+            step: "second".into(),
+            status: "ok".into(),
+            ..Default::default()
+        });
+        let spans = load_trace(&trace);
+        assert_eq!(spans.len(), 2);
+        assert!(spans[0].finished_at <= spans[1].finished_at,
+            "spans must be sorted by finished_at");
+    }
+}

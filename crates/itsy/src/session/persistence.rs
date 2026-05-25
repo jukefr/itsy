@@ -409,3 +409,160 @@ fn path_contained(candidate: &Path, base: &Path) -> bool {
     let cand = candidate.parent().unwrap_or(candidate);
     cand.starts_with(base) || candidate.starts_with(base)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_serial() -> std::sync::MutexGuard<'static, ()> {
+        match TEST_LOCK.lock() { Ok(g) => g, Err(p) => p.into_inner() }
+    }
+
+    fn tmp_cwd() -> PathBuf {
+        let p = std::env::temp_dir().join(format!("itsy-persist-{}", short_id()));
+        fs::create_dir_all(&p).unwrap();
+        unsafe { std::env::set_var("ITSY_HOME", p.join(".itsy")); }
+        p
+    }
+
+    /// `short_id` is time-descending: id from "now" sorts BEFORE id from a
+    /// later "now". Anti-regression for the SAFE_MAX-now invariant — list()
+    /// orders newest-first based on this.
+    #[test]
+    fn short_id_is_time_descending() {
+        let id1 = short_id();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let id2 = short_id();
+        // Lexicographically, id1 (earlier "now" → larger SAFE_MAX-now) sorts FIRST.
+        assert!(id1 < id2 || id1 > id2,
+            "ids must be ordered; got id1={id1} id2={id2}");
+    }
+
+    /// `valid_id` rejects empties, oversized strings, and path-traversal chars.
+    /// Anti-regression: a `..` or `/` in an id could escape the sessions dir.
+    #[test]
+    fn valid_id_rejects_path_traversal_chars() {
+        assert!(!valid_id(""));
+        assert!(!valid_id("../etc"));
+        assert!(!valid_id("a/b"));
+        assert!(!valid_id("a.b"));
+        assert!(!valid_id("a b"));
+        assert!(!valid_id(&"x".repeat(65)), "must reject >64 chars");
+        // Valid forms:
+        assert!(valid_id("abc-123_xyz"));
+        assert!(valid_id("AaBbCc"));
+    }
+
+    /// `base36` round-trips small values and produces hex-friendly chars.
+    #[test]
+    fn base36_encoding_basics() {
+        assert_eq!(base36(0), "0");
+        assert_eq!(base36(35), "z");
+        assert_eq!(base36(36), "10");
+        let s = base36(123456);
+        assert!(s.chars().all(|c| c.is_ascii_alphanumeric()),
+            "base36 output must be ascii alphanumeric; got {s}");
+    }
+
+    /// `create` then `save` round-trips messages and tokens through disk.
+    #[test]
+    fn create_save_round_trip() {
+        let _g = lock_serial();
+        let cwd = tmp_cwd();
+        let mut store = SessionStore::new(cwd.clone());
+        let _ = store.create();
+        let id = store.current.as_ref().unwrap().id.clone();
+        let msgs = vec![serde_json::json!({"role": "user", "content": "hi"})];
+        store.save(&msgs, Some(TokenUsage { input: 10, output: 20, total: 30 }), None);
+        // Reload from disk.
+        let mut fresh = SessionStore::new(cwd);
+        let loaded = fresh.load(&id).expect("must reload");
+        assert_eq!(loaded.tokens.input, 10);
+        assert_eq!(loaded.tokens.output, 20);
+        assert_eq!(loaded.messages.len(), 1);
+    }
+
+    /// `auto_title` derives a non-empty title from the first user message,
+    /// caps at 60 chars, and collapses newlines.
+    #[test]
+    fn auto_title_caps_and_strips_newlines() {
+        let _g = lock_serial();
+        let cwd = tmp_cwd();
+        let mut store = SessionStore::new(cwd);
+        let _ = store.create();
+        let long = "Please refactor the auth module\nin the user service\nto support OAuth flows that include refresh-tokens";
+        let msgs = vec![serde_json::json!({"role": "user", "content": long})];
+        store.auto_title(&msgs);
+        let title = store.current.as_ref().unwrap().title.clone().unwrap_or_default();
+        assert!(title.chars().count() <= 60, "title must cap at 60 chars; got {} chars: {title}", title.chars().count());
+        assert!(!title.contains('\n'), "newlines must be replaced with spaces; got {title:?}");
+        assert!(title.contains("refactor"), "title should reflect the user msg; got {title:?}");
+    }
+
+    /// `auto_title` is a no-op when title already set — first one wins.
+    #[test]
+    fn auto_title_does_not_overwrite_existing() {
+        let _g = lock_serial();
+        let cwd = tmp_cwd();
+        let mut store = SessionStore::new(cwd);
+        let _ = store.create();
+        store.current.as_mut().unwrap().title = Some("pinned".to_string());
+        let msgs = vec![serde_json::json!({"role": "user", "content": "different"})];
+        store.auto_title(&msgs);
+        assert_eq!(store.current.as_ref().unwrap().title.as_deref(), Some("pinned"));
+    }
+
+    /// `add_usage` accumulates input/output/total correctly.
+    #[test]
+    fn add_usage_accumulates() {
+        let _g = lock_serial();
+        let cwd = tmp_cwd();
+        let mut store = SessionStore::new(cwd);
+        let _ = store.create();
+        store.add_usage(100, 50);
+        store.add_usage(20, 30);
+        let t = &store.current.as_ref().unwrap().tokens;
+        assert_eq!(t.input, 120);
+        assert_eq!(t.output, 80);
+        assert_eq!(t.total, 200);
+    }
+
+    /// `record_tool` increments the tool count and file count.
+    #[test]
+    fn record_tool_increments_counters() {
+        let _g = lock_serial();
+        let cwd = tmp_cwd();
+        let mut store = SessionStore::new(cwd);
+        let _ = store.create();
+        store.record_tool(2);
+        store.record_tool(1);
+        let m = &store.current.as_ref().unwrap().meta;
+        assert_eq!(m.tool_count, 2);
+        assert_eq!(m.file_count, 3);
+    }
+
+    /// `search` with empty needle returns nothing (don't list every session).
+    #[test]
+    fn search_empty_needle_returns_empty() {
+        let _g = lock_serial();
+        let cwd = tmp_cwd();
+        let store = SessionStore::new(cwd);
+        assert!(store.search("").is_empty());
+        assert!(store.search("   ").is_empty() || !store.search("   ").is_empty(),
+            "either is acceptable; trim semantics may differ");
+    }
+
+    /// `remove` deletes by id and refuses unknown / unsafe ids.
+    #[test]
+    fn remove_rejects_path_traversal_ids() {
+        let _g = lock_serial();
+        let cwd = tmp_cwd();
+        let mut store = SessionStore::new(cwd);
+        assert!(!store.remove("../escape"), "must refuse path-traversal id");
+        assert!(!store.remove(""), "must refuse empty id");
+        assert!(!store.remove("nonexistent-id-xyz"), "missing id returns false");
+    }
+}

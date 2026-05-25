@@ -84,3 +84,70 @@ impl ExtensionRegistry {
         self.extensions.get(name)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// `tmpl_classify_task` interpolates the user message and lists the
+    /// known category set. Anti-regression for category drift.
+    #[test]
+    fn classify_template_interpolates_message_and_lists_categories() {
+        let p = tmpl_classify_task("fix the failing tests");
+        assert!(p.contains("fix the failing tests"));
+        // All 8 known categories must appear:
+        for cat in ["coding", "editing", "search", "shell", "explanation",
+                    "multi_step", "debugging", "backend"] {
+            assert!(p.contains(cat), "category {cat} missing from prompt");
+        }
+        assert!(p.contains("ONLY the category name"),
+            "must instruct the model to reply with only the category");
+    }
+
+    /// `tmpl_compress_history` includes the max_tokens cap and the history text.
+    #[test]
+    fn compress_template_includes_cap_and_history() {
+        let p = tmpl_compress_history("user: hi\nassistant: hello", 2048);
+        assert!(p.contains("2048"));
+        assert!(p.contains("user: hi"));
+        assert!(p.contains("assistant: hello"));
+    }
+
+    /// `tmpl_code_assist` omits the Context block when context is empty
+    /// — anti-bloat regression so the prompt doesn't ship a useless "Context:" header.
+    #[test]
+    fn code_assist_template_omits_empty_context() {
+        let p = tmpl_code_assist("write fizzbuzz", "", "default");
+        assert!(p.contains("write fizzbuzz"));
+        assert!(!p.contains("Context:\n\n"),
+            "empty context must not produce an empty Context: block");
+    }
+
+    /// With non-empty context, the Context: block is included.
+    #[test]
+    fn code_assist_template_includes_context() {
+        let p = tmpl_code_assist("task", "ctx data", "default");
+        assert!(p.contains("Context:"));
+        assert!(p.contains("ctx data"));
+    }
+
+    // ── ExtensionRegistry ─────────────────────────────────────────────────
+
+    #[test]
+    fn registry_register_and_get_round_trip() {
+        let mut r = ExtensionRegistry::new();
+        r.register("foo", json!({"key": "value"}));
+        assert_eq!(r.get("foo"), Some(&json!({"key": "value"})));
+        assert!(r.get("missing").is_none());
+    }
+
+    /// Re-registering replaces the previous value.
+    #[test]
+    fn registry_register_overwrites() {
+        let mut r = ExtensionRegistry::new();
+        r.register("foo", json!(1));
+        r.register("foo", json!(2));
+        assert_eq!(r.get("foo"), Some(&json!(2)));
+    }
+}

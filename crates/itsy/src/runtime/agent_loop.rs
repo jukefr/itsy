@@ -66,6 +66,20 @@ pub struct AgentSessionMutable {
     pub snapshot_manager: Arc<SnapshotManager>,
 }
 
+impl AgentSessionMutable {
+    /// After a successful mutating tool call, retire the bash-loop tracking
+    /// keys: drain `bash_loop_keys` and remove each of those keys from
+    /// `tool_repeat_counts` so the next identical bash invocation isn't
+    /// instantly flagged as a stuck loop. Both maps are mutated in place;
+    /// this used to be implemented against a discarded clone (bug #3).
+    pub fn reset_bash_loop_after_mutation(&mut self) {
+        let keys: Vec<String> = self.bash_loop_keys.drain().collect();
+        for k in keys {
+            self.tool_repeat_counts.remove(&k);
+        }
+    }
+}
+
 /// Bundle of state that lives across user turns within a single agent run.
 pub struct AgentSession {
     pub ro: AgentSessionReadOnly,
@@ -546,5 +560,67 @@ impl TurnState {
     /// Check whether the outer turn loop should stop.
     pub fn should_stop(&self) -> bool {
         self.tool_calls_this_turn >= self.max_tool_calls
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fresh_mutable(cwd: &std::path::Path) -> AgentSessionMutable {
+        AgentSessionMutable {
+            history: Vec::new(),
+            scorer: ToolScorer::new(),
+            verification: VerificationHistory::default(),
+            early_stop: EarlyStopDetector::new(),
+            trace: TraceRecorder::new(cwd.to_path_buf()),
+            current_tool_category: None,
+            fullscreen: None,
+            tool_repeat_counts: HashMap::new(),
+            mutated_paths: HashSet::new(),
+            bash_loop_keys: HashSet::new(),
+            readonly_turn_count: 0,
+            total_mutating_calls: 0,
+            snapshot_manager: Arc::new(SnapshotManager::new(cwd.to_path_buf())),
+        }
+    }
+
+    /// Bug #3 regression: the previous implementation cloned
+    /// `tool_repeat_counts`, removed keys from the clone, and discarded it
+    /// — so the next bash call would still see the old counter and trigger
+    /// a false stuck-loop detection. The fix mutates the real maps; this
+    /// test pins that behaviour.
+    #[test]
+    fn reset_bash_loop_actually_clears_counts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut m = fresh_mutable(tmp.path());
+
+        m.tool_repeat_counts.insert("bash:cargo test".into(), 4);
+        m.tool_repeat_counts.insert("bash:ls".into(), 1);
+        m.tool_repeat_counts.insert("read:foo.rs".into(), 2);
+        m.bash_loop_keys.insert("bash:cargo test".into());
+        m.bash_loop_keys.insert("bash:ls".into());
+
+        m.reset_bash_loop_after_mutation();
+
+        assert!(m.bash_loop_keys.is_empty(), "bash_loop_keys must be drained");
+        assert!(m.tool_repeat_counts.get("bash:cargo test").is_none(),
+            "bash counter must be removed (not just zeroed in a clone)");
+        assert!(m.tool_repeat_counts.get("bash:ls").is_none(),
+            "second bash counter must be removed");
+        // Non-bash counters are untouched — only the tracked bash keys reset.
+        assert_eq!(m.tool_repeat_counts.get("read:foo.rs").copied(), Some(2),
+            "non-tracked counters must survive the reset");
+    }
+
+    /// Calling `reset_bash_loop_after_mutation` on empty state is a no-op
+    /// and does not panic.
+    #[test]
+    fn reset_bash_loop_on_empty_is_noop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut m = fresh_mutable(tmp.path());
+        m.reset_bash_loop_after_mutation();
+        assert!(m.bash_loop_keys.is_empty());
+        assert!(m.tool_repeat_counts.is_empty());
     }
 }

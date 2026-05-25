@@ -213,3 +213,160 @@ pub fn format_references_for_prompt(files: &[ResolvedRef]) -> String {
     }
     output
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `slice_lines` returns the closed range [start, end].
+    #[test]
+    fn slice_lines_returns_inclusive_range() {
+        let content = "a\nb\nc\nd\ne";
+        assert_eq!(slice_lines(content, 2, Some(4)), "b\nc\nd",
+            "lines 2..=4 should yield b,c,d");
+    }
+
+    /// `slice_lines` with no end returns just the start line.
+    #[test]
+    fn slice_lines_single_line_when_no_end() {
+        let content = "a\nb\nc";
+        assert_eq!(slice_lines(content, 2, None), "b");
+    }
+
+    /// `slice_lines` clamps to file length without panic.
+    #[test]
+    fn slice_lines_clamps_oversized_end() {
+        let content = "a\nb";
+        assert_eq!(slice_lines(content, 1, Some(100)), "a\nb",
+            "end past EOF must clamp, not panic");
+    }
+
+    /// `slice_lines` returns empty when end <= start.
+    #[test]
+    fn slice_lines_returns_empty_when_end_le_start() {
+        assert_eq!(slice_lines("a\nb\nc", 5, Some(2)), "");
+    }
+
+    /// User input with no `@` references resolves to nothing.
+    #[test]
+    fn no_references_in_plain_text() {
+        let cwd = tempfile::tempdir().unwrap();
+        let refs = resolve_references("hello world, no refs here", cwd.path());
+        assert!(refs.is_empty());
+    }
+
+    /// `@path` inside backticks must NOT be treated as a reference.
+    /// Anti-regression: an inline-code mention of @foo shouldn't pull file content.
+    #[test]
+    fn backtick_paths_are_not_resolved() {
+        let cwd = tempfile::tempdir().unwrap();
+        std::fs::write(cwd.path().join("foo.txt"), "secret").unwrap();
+        let refs = resolve_references("check `@foo.txt` for the answer", cwd.path());
+        assert!(refs.is_empty(),
+            "@path inside backticks must not resolve; got {} refs", refs.len());
+    }
+
+    /// `@file` after a space resolves and loads content.
+    #[test]
+    fn at_path_after_space_resolves_file() {
+        let cwd = tempfile::tempdir().unwrap();
+        std::fs::write(cwd.path().join("foo.txt"), "hello world").unwrap();
+        let refs = resolve_references("read @foo.txt please", cwd.path());
+        assert_eq!(refs.len(), 1);
+        assert!(refs[0].content.contains("hello world"));
+        assert!(matches!(refs[0].kind, RefKind::File));
+    }
+
+    /// Trailing punctuation (`,`, `;`, `.`) is stripped from the path.
+    #[test]
+    fn trailing_punctuation_stripped() {
+        let cwd = tempfile::tempdir().unwrap();
+        std::fs::write(cwd.path().join("foo.txt"), "x").unwrap();
+        let refs = resolve_references("see @foo.txt, then continue", cwd.path());
+        assert_eq!(refs.len(), 1, "comma after path must be stripped");
+    }
+
+    /// Duplicate refs are de-duplicated.
+    #[test]
+    fn duplicate_refs_deduped() {
+        let cwd = tempfile::tempdir().unwrap();
+        std::fs::write(cwd.path().join("foo.txt"), "x").unwrap();
+        let refs = resolve_references("@foo.txt and @foo.txt again", cwd.path());
+        assert_eq!(refs.len(), 1,
+            "duplicate @foo.txt must be deduplicated; got {} refs", refs.len());
+    }
+
+    /// Directory references resolve and list entries.
+    #[test]
+    fn directory_reference_lists_entries() {
+        let cwd = tempfile::tempdir().unwrap();
+        std::fs::create_dir(cwd.path().join("sub")).unwrap();
+        std::fs::write(cwd.path().join("sub/a.txt"), "1").unwrap();
+        std::fs::write(cwd.path().join("sub/b.txt"), "2").unwrap();
+        let refs = resolve_references("look in @sub/", cwd.path());
+        assert_eq!(refs.len(), 1);
+        assert!(matches!(refs[0].kind, RefKind::Directory));
+        assert!(refs[0].content.contains("a.txt"));
+        assert!(refs[0].content.contains("b.txt"));
+    }
+
+    /// Dot-prefixed and node_modules entries are filtered from dir listings.
+    #[test]
+    fn directory_listing_filters_dots_and_node_modules() {
+        let cwd = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(cwd.path().join("dir/node_modules")).unwrap();
+        std::fs::write(cwd.path().join("dir/.hidden"), "x").unwrap();
+        std::fs::write(cwd.path().join("dir/visible.txt"), "v").unwrap();
+        let refs = resolve_references("@dir/", cwd.path());
+        assert_eq!(refs.len(), 1);
+        let listing = &refs[0].content;
+        assert!(listing.contains("visible.txt"));
+        assert!(!listing.contains(".hidden"));
+        assert!(!listing.contains("node_modules"));
+    }
+
+    /// Line ranges resolve and slice content.
+    #[test]
+    fn line_range_slices_file() {
+        let cwd = tempfile::tempdir().unwrap();
+        let content = (1..=20).map(|i| format!("l{i}")).collect::<Vec<_>>().join("\n");
+        std::fs::write(cwd.path().join("nums.txt"), content).unwrap();
+        let refs = resolve_references("@nums.txt:5-7", cwd.path());
+        assert_eq!(refs.len(), 1);
+        assert!(refs[0].content.contains("l5"));
+        assert!(refs[0].content.contains("l7"));
+        assert!(!refs[0].content.contains("l4"));
+        assert!(!refs[0].content.contains("l8"));
+    }
+
+    /// Missing files silently skip (model gets nothing, no error injected).
+    #[test]
+    fn missing_files_silently_skipped() {
+        let cwd = tempfile::tempdir().unwrap();
+        let refs = resolve_references("read @nonexistent.txt", cwd.path());
+        assert!(refs.is_empty(),
+            "missing file must produce zero refs, not a fake one");
+    }
+
+    /// Empty refs list → empty formatted output.
+    #[test]
+    fn format_empty_refs_returns_empty_string() {
+        assert_eq!(format_references_for_prompt(&[]), "");
+    }
+
+    /// Single file ref is formatted with a code fence.
+    #[test]
+    fn format_single_file_uses_code_fence() {
+        let r = ResolvedRef {
+            raw: "@foo.txt".into(),
+            path: "foo.txt".into(),
+            kind: RefKind::File,
+            content: "hello".into(),
+            lines: 1,
+        };
+        let out = format_references_for_prompt(&[r]);
+        assert!(out.contains("[file] foo.txt"));
+        assert!(out.contains("```\nhello\n```"));
+        assert!(out.contains("Referenced files"));
+    }
+}

@@ -153,3 +153,106 @@ where
         attempts,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+
+    /// `run_loop` stops as soon as `validate` returns true — doesn't waste
+    /// further iterations. This is the early-exit invariant.
+    #[tokio::test]
+    async fn run_loop_stops_on_first_valid() {
+        let counter = Arc::new(AtomicU32::new(0));
+        let c2 = counter.clone();
+        let cfg = LoopConfig::new(
+            "test", 5, "t",
+            move |i| {
+                let cc = c2.clone();
+                async move {
+                    cc.fetch_add(1, Ordering::SeqCst);
+                    Ok::<u32, String>(i)
+                }
+            },
+            |v: &u32| { let v = *v; async move { v >= 2 } },
+        );
+        let out = run_loop(cfg).await;
+        assert!(!out.exhausted, "must not exhaust when valid is reached");
+        assert_eq!(out.attempts, 3, "must stop on the iteration where validate becomes true (i=2)");
+        assert_eq!(counter.load(Ordering::SeqCst), 3);
+    }
+
+    /// `run_loop` exhausts and returns the last value when validation
+    /// never succeeds within `max_iterations`.
+    #[tokio::test]
+    async fn run_loop_exhausts_when_never_valid() {
+        let cfg = LoopConfig::new(
+            "test", 3, "t",
+            |i| async move { Ok::<u32, String>(i) },
+            |_| async { false },
+        );
+        let out = run_loop(cfg).await;
+        assert!(out.exhausted);
+        assert_eq!(out.attempts, 3);
+        assert_eq!(out.final_value, Some(2));
+    }
+
+    /// Step errors don't abort the loop — they just skip the iteration.
+    /// Anti-regression: a single transient error must not poison the loop.
+    #[tokio::test]
+    async fn run_loop_skips_step_errors() {
+        let cfg = LoopConfig::new(
+            "test", 5, "t",
+            |i| async move {
+                if i == 0 || i == 2 {
+                    Err::<u32, String>("transient".to_string())
+                } else {
+                    Ok(i)
+                }
+            },
+            |v: &u32| { let v = *v; async move { v == 1 } },
+        );
+        let out = run_loop(cfg).await;
+        // i=0 errors (skip), i=1 succeeds and validates → loop exits
+        assert!(!out.exhausted);
+        assert_eq!(out.attempts, 2);
+        assert_eq!(out.final_value, Some(1));
+    }
+
+    /// `run_with_retry` returns Ok on the first successful attempt.
+    #[tokio::test]
+    async fn run_with_retry_succeeds_first_try() {
+        let cfg = RetryConfig { max_attempts: 3, backoff_ms: 1, jitter_ms: 1 };
+        let result = run_with_retry(cfg, |_| async { Ok::<i32, String>(42) }).await;
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    /// `run_with_retry` retries on Err and surfaces the success.
+    #[tokio::test]
+    async fn run_with_retry_recovers_after_transient_failure() {
+        let cfg = RetryConfig { max_attempts: 3, backoff_ms: 1, jitter_ms: 1 };
+        let counter = Arc::new(AtomicU32::new(0));
+        let c2 = counter.clone();
+        let result = run_with_retry(cfg, move |_| {
+            let cc = c2.clone();
+            async move {
+                let n = cc.fetch_add(1, Ordering::SeqCst);
+                if n < 2 { Err::<i32, String>("transient".into()) } else { Ok(99) }
+            }
+        }).await;
+        assert_eq!(result.unwrap(), 99);
+        assert_eq!(counter.load(Ordering::SeqCst), 3);
+    }
+
+    /// `run_with_retry` gives up after `max_attempts` and surfaces the last error.
+    #[tokio::test]
+    async fn run_with_retry_returns_last_error_on_exhaustion() {
+        let cfg = RetryConfig { max_attempts: 2, backoff_ms: 1, jitter_ms: 1 };
+        let result: Result<i32, String> = run_with_retry(cfg, |attempt| async move {
+            Err(format!("err-{attempt}"))
+        }).await;
+        assert_eq!(result.unwrap_err(), "err-1",
+            "must surface the LAST attempt's error, not the first");
+    }
+}

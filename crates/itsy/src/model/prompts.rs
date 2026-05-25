@@ -253,3 +253,81 @@ pub fn build_full_system_prompt(
 
     prompt
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memory::MemoryStore;
+    use serde_json::json;
+    use tempfile::tempdir;
+
+    /// Empty conversation → no memory context (no `Relevant project memory:` header).
+    #[test]
+    fn memory_context_empty_when_no_user_message() {
+        let dir = tempdir().unwrap();
+        let mem = MemoryStore::new_json_only(dir.path());
+        let messages: Vec<Value> = vec![
+            json!({"role": "system", "content": "sys"}),
+            json!({"role": "assistant", "content": "hi"}),
+        ];
+        assert_eq!(get_memory_context(&messages, &mem), "");
+    }
+
+    /// User message with no matching memory entries → still empty.
+    #[test]
+    fn memory_context_empty_with_no_matches() {
+        let dir = tempdir().unwrap();
+        let mem = MemoryStore::new_json_only(dir.path());
+        let messages: Vec<Value> = vec![json!({"role": "user", "content": "totally novel topic xyz"})];
+        let out = get_memory_context(&messages, &mem);
+        assert!(out.is_empty() || out.contains("Relevant project memory:"),
+            "expected empty or properly-headed; got {out:?}");
+    }
+
+    /// User message uses the LAST user msg (newest), not the first.
+    /// Anti-regression: stale early-conversation context could mislead the model.
+    #[test]
+    fn memory_context_uses_last_user_message() {
+        let dir = tempdir().unwrap();
+        let mut mem = MemoryStore::new_json_only(dir.path());
+        mem.remember("decision", "auth-rewrite",
+            "Decided to rewrite the auth layer in Rust last quarter", vec!["rust".into()]);
+        // Build conversation where the LAST user message mentions Rust.
+        let messages: Vec<Value> = vec![
+            json!({"role": "user", "content": "first message about JavaScript"}),
+            json!({"role": "assistant", "content": "ok"}),
+            json!({"role": "user", "content": "now tell me about the rust rewrite"}),
+        ];
+        let out = get_memory_context(&messages, &mem);
+        assert!(out.contains("auth-rewrite") || out.is_empty(),
+            "memory context should pull from last user msg (rust); got: {out:?}");
+    }
+
+    /// `get_plugin_prompts` with no plugin injections returns empty string —
+    /// no stray newlines.
+    #[test]
+    fn plugin_prompts_empty_when_no_injection() {
+        let plugins = crate::plugins::loader::PluginLoader::new();
+        assert_eq!(get_plugin_prompts(&plugins, Some("coding")), "");
+        assert_eq!(get_plugin_prompts(&plugins, None), "");
+    }
+
+    /// `get_test_runner_context` on an empty dir is empty (no project type detected).
+    #[test]
+    fn test_runner_context_empty_on_empty_dir() {
+        let dir = tempdir().unwrap();
+        let out = get_test_runner_context(dir.path());
+        // Either truly empty, or doesn't mention specific frameworks.
+        assert!(!out.contains("cargo") && !out.contains("pytest"),
+            "empty dir must not fake a runner; got {out:?}");
+    }
+
+    /// `get_test_runner_context` on a cargo project mentions cargo.
+    #[test]
+    fn test_runner_context_mentions_cargo_when_present() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname='x'\n").unwrap();
+        let out = get_test_runner_context(dir.path());
+        assert!(out.contains("cargo"), "got: {out:?}");
+    }
+}

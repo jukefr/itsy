@@ -72,3 +72,89 @@ pub fn get_tools_for_category(category: &str, all_tools: &[Value]) -> Vec<Value>
         .cloned()
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 16384 is the boundary: at-or-below picks TwoStage, above picks Direct.
+    /// Pins the routing threshold so a future tweak can't silently flip
+    /// large-context models into the wrong mode.
+    #[test]
+    fn routing_mode_threshold_at_16k() {
+        assert_eq!(get_routing_mode(8192, None), RoutingMode::TwoStage);
+        assert_eq!(get_routing_mode(16384, None), RoutingMode::TwoStage);
+        assert_eq!(get_routing_mode(16385, None), RoutingMode::Direct);
+        assert_eq!(get_routing_mode(131072, None), RoutingMode::Direct);
+        assert_eq!(get_routing_mode(0, None), RoutingMode::TwoStage,
+            "zero context (unknown) defaults to two-stage — safer for small models");
+    }
+
+    /// Env override beats the window-based heuristic in both directions.
+    #[test]
+    fn env_override_takes_precedence() {
+        assert_eq!(get_routing_mode(131072, Some("two_stage")), RoutingMode::TwoStage,
+            "two_stage override must force two-stage on large contexts");
+        assert_eq!(get_routing_mode(8192, Some("direct")), RoutingMode::Direct,
+            "direct override must force direct on small contexts");
+    }
+
+    /// Unknown env values fall through to the window-based heuristic — no panic.
+    #[test]
+    fn unknown_env_override_falls_through() {
+        assert_eq!(get_routing_mode(8192, Some("garbage")), RoutingMode::TwoStage);
+        assert_eq!(get_routing_mode(131072, Some("garbage")), RoutingMode::Direct);
+        assert_eq!(get_routing_mode(8192, Some("")), RoutingMode::TwoStage);
+    }
+
+    /// `get_tools_for_category` filters strictly: only tools listed in the
+    /// matching category survive.
+    #[test]
+    fn filter_returns_only_category_tools() {
+        let all = vec![
+            json!({"type":"function","function":{"name":"read_file"}}),
+            json!({"type":"function","function":{"name":"write_file"}}),
+            json!({"type":"function","function":{"name":"bash"}}),
+            json!({"type":"function","function":{"name":"find_files"}}),
+        ];
+        let read_tools = get_tools_for_category("read", &all);
+        let names: Vec<&str> = read_tools.iter()
+            .filter_map(|t| t.pointer("/function/name").and_then(|v| v.as_str()))
+            .collect();
+        assert!(names.contains(&"read_file"));
+        assert!(names.contains(&"find_files"));
+        assert!(!names.contains(&"write_file"), "write_file must NOT leak into read category");
+        assert!(!names.contains(&"bash"), "bash must NOT leak into read category");
+    }
+
+    /// Unknown category returns the full toolkit (fail-open) — never an
+    /// empty set, otherwise the agent would have no tools and stall.
+    #[test]
+    fn unknown_category_returns_full_set() {
+        let all = vec![
+            json!({"type":"function","function":{"name":"read_file"}}),
+            json!({"type":"function","function":{"name":"write_file"}}),
+        ];
+        let out = get_tools_for_category("nonexistent_category", &all);
+        assert_eq!(out.len(), all.len(),
+            "unknown category must fall back to full set, not empty");
+    }
+
+    /// The selector tool's schema must include every defined category.
+    /// Anti-regression for missing/stale category list in the schema.
+    #[test]
+    fn selector_schema_lists_all_categories() {
+        let sel = get_category_selector_tool();
+        let enum_arr = sel
+            .pointer("/function/parameters/properties/category/enum")
+            .and_then(|v| v.as_array())
+            .expect("selector schema must expose an enum");
+        let enum_strs: Vec<&str> = enum_arr.iter().filter_map(|v| v.as_str()).collect();
+        for cat in TOOL_CATEGORIES {
+            assert!(enum_strs.contains(&cat.key),
+                "selector enum missing category {:?}", cat.key);
+        }
+        assert_eq!(enum_strs.len(), TOOL_CATEGORIES.len(),
+            "selector enum length must equal the category table");
+    }
+}

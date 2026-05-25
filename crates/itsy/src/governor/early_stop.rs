@@ -269,4 +269,134 @@ mod tests {
         detector.record_read("./src/lib.rs");
         assert!(detector.check_patch_blocked("src/lib.rs").is_none());
     }
+
+    /// A successful patch decrements the failure count — recovery should be
+    /// possible without hitting the spiral threshold.
+    #[test]
+    fn successful_patch_decrements_failure_count() {
+        let mut detector = EarlyStopDetector::new();
+        // 3 fails — short of the 4 threshold.
+        let _ = detector.record_patch_result("a.rs", false, "x", "y");
+        let _ = detector.record_patch_result("a.rs", false, "x", "y");
+        let _ = detector.record_patch_result("a.rs", false, "x", "y");
+        // A successful patch lowers fail count by 1.
+        assert!(detector.record_patch_result("a.rs", true, "x", "y").is_none(),
+            "successful patch must not produce a stop signal");
+        // Now another failure shouldn't trigger spiral yet — fail count is back at 3.
+        assert!(detector.record_patch_result("a.rs", false, "x", "y").is_none(),
+            "after recovery, one more failure must not yet trigger spiral");
+    }
+
+    /// A no-op patch (old_str == new_str) does NOT count as success, so it
+    /// shouldn't decrement the failure counter. Anti-regression for the
+    /// case where the model patches text → identical text in a loop.
+    #[test]
+    fn noop_patch_does_not_recover_failures() {
+        let mut detector = EarlyStopDetector::new();
+        // 3 fails.
+        let _ = detector.record_patch_result("a.rs", false, "x", "y");
+        let _ = detector.record_patch_result("a.rs", false, "x", "y");
+        let _ = detector.record_patch_result("a.rs", false, "x", "y");
+        // No-op patch: success=true but old_str==new_str → counts as failure.
+        let signal = detector.record_patch_result("a.rs", true, "same", "same");
+        assert!(signal.is_some(),
+            "no-op patch on top of 3 failures must trigger spiral (still 4 effective failures)");
+    }
+
+    /// Bash failure loop: N consecutive non-zero exits triggers the
+    /// inject_correction signal. A successful exit resets the counter.
+    #[test]
+    fn bash_failure_loop_triggers_correction() {
+        let mut d = EarlyStopDetector::new();
+        let n = d.max_consecutive_bash_failures;
+        for _ in 0..(n - 1) {
+            let s = d.record_bash_result(1, "false");
+            assert!(s.is_none(), "{} failures not yet enough to trigger", n - 1);
+        }
+        let s = d.record_bash_result(1, "false").expect("Nth failure must trigger");
+        assert_eq!(s.reason, "bash_failure_loop");
+    }
+
+    /// A successful bash exit resets the consecutive-failure counter.
+    #[test]
+    fn bash_success_resets_failure_counter() {
+        let mut d = EarlyStopDetector::new();
+        let n = d.max_consecutive_bash_failures;
+        for _ in 0..(n - 1) {
+            let _ = d.record_bash_result(1, "false");
+        }
+        // Success resets.
+        let _ = d.record_bash_result(0, "true");
+        // Now the (n-1)+1 isn't a loop — one fresh failure must NOT trigger.
+        assert!(d.record_bash_result(1, "false").is_none(),
+            "after a success, one fresh failure must not re-trigger immediately");
+    }
+
+    /// Greeting detection only fires when there are tool calls this turn
+    /// (otherwise a user "hi" → assistant greeting is expected behavior).
+    #[test]
+    fn greeting_only_detected_during_active_turn() {
+        let d = EarlyStopDetector::new();
+        // Without active tool calls — greeting is fine.
+        assert!(d.check_greeting("hello! how can i help", false).is_none(),
+            "greeting must NOT fire without tool calls this turn");
+        // With active tool calls — same greeting is suspicious.
+        let s = d.check_greeting("hello! how can i help", true);
+        assert!(s.is_some(), "greeting mid-task must fire");
+        assert_eq!(s.unwrap().reason, "greeting_regression");
+    }
+
+    /// Greeting detection ignores irrelevant content.
+    #[test]
+    fn greeting_detection_does_not_false_positive() {
+        let d = EarlyStopDetector::new();
+        let s = d.check_greeting("Editing the auth module to add input validation.", true);
+        assert!(s.is_none(), "task narration must not be flagged as greeting");
+    }
+
+    /// Disabled greeting detection short-circuits even with a clear greeting.
+    #[test]
+    fn disabled_greeting_detection_short_circuits() {
+        let mut d = EarlyStopDetector::new();
+        d.enable_greeting_detection = false;
+        assert!(d.check_greeting("hello! how can i help", true).is_none());
+    }
+
+    /// `new_turn` resets per-turn counters but PRESERVES patch_blocked_files
+    /// — the lock only lifts on a successful read.
+    #[test]
+    fn new_turn_preserves_patch_block() {
+        let mut d = EarlyStopDetector::new();
+        for _ in 0..d.max_patch_failures {
+            let _ = d.record_patch_result("locked.rs", false, "x", "y");
+        }
+        assert!(d.check_patch_blocked("locked.rs").is_some(),
+            "file should be locked after spiral");
+        d.new_turn();
+        assert!(d.check_patch_blocked("locked.rs").is_some(),
+            "new_turn must NOT lift the block — only successful read does");
+    }
+
+    /// Repetition detection fires when the buffer's tail contains many
+    /// instances of the trailing window — e.g. a model stuck emitting the
+    /// same short phrase repeatedly.
+    #[test]
+    fn repetition_loop_detected_in_long_buffer() {
+        let d = EarlyStopDetector::new();
+        // 500 chars; tail = last 200; pattern = last 50; "abcd" repeats so
+        // the 50-char pattern is itself a repeating sequence found ≥3 times
+        // when stepping by 1 in the tail (self-overlap is permitted).
+        let buf = "abcd".repeat(125); // 500 chars
+        let s = d.check_repetition(&buf);
+        assert!(s.is_some(), "long buffer of self-similar text must trigger");
+        assert_eq!(s.unwrap().reason, "repetition_loop");
+    }
+
+    /// Short buffers never trigger repetition detection (under threshold).
+    #[test]
+    fn repetition_not_detected_in_short_buffer() {
+        let d = EarlyStopDetector::new();
+        let buf = "hello".repeat(5); // ~25 chars, far below the 400-char min
+        assert!(d.check_repetition(&buf).is_none());
+    }
 }

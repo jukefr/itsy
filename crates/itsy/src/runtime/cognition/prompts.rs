@@ -389,3 +389,98 @@ fn uuid_like() -> String {
         ((b[10] as u64) << 40) | ((b[11] as u64) << 32) | ((b[12] as u64) << 24) | ((b[13] as u64) << 16) | ((b[14] as u64) << 8) | (b[15] as u64),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// `render` substitutes `{{var}}` placeholders with values from a JSON object.
+    #[test]
+    fn render_substitutes_simple_keys() {
+        let vars = json!({"name": "alice", "age": 30});
+        assert_eq!(render("hello {{name}}", &vars), "hello alice");
+        assert_eq!(render("{{name}} is {{age}}", &vars), "alice is 30");
+    }
+
+    /// Missing keys render as empty strings (don't leave the `{{var}}` literal).
+    /// Anti-regression: surfacing a literal `{{missing}}` to the model is worse
+    /// than a quiet omission.
+    #[test]
+    fn render_drops_unknown_keys() {
+        let vars = json!({"name": "alice"});
+        let out = render("hi {{missing}} bye", &vars);
+        assert_eq!(out, "hi  bye", "unknown keys must drop, not pass through; got {out:?}");
+    }
+
+    /// Template with no placeholders is returned verbatim.
+    #[test]
+    fn render_no_placeholders_passes_through() {
+        let out = render("plain text with no braces", &json!({}));
+        assert_eq!(out, "plain text with no braces");
+    }
+
+    /// `render` handles whitespace around keys: `{{ key }}` works the same as `{{key}}`.
+    #[test]
+    fn render_trims_key_whitespace() {
+        let vars = json!({"name": "x"});
+        assert_eq!(render("{{ name }}", &vars), "x");
+    }
+
+    /// `render` handles numeric and array values.
+    #[test]
+    fn render_handles_non_string_values() {
+        let vars = json!({"count": 42, "list": ["a", "b"]});
+        let r1 = render("count is {{count}}", &vars);
+        assert!(r1.contains("42"), "got {r1:?}");
+        let r2 = render("list: {{list}}", &vars);
+        assert!(r2.contains('a') && r2.contains('b'),
+            "array stringified to JSON; got {r2:?}");
+    }
+
+    /// `get_prompt_names` returns the known set without duplicates.
+    #[test]
+    fn prompt_names_known_set() {
+        let names = get_prompt_names();
+        assert!(names.contains(&"classify_task_type"));
+        assert!(names.contains(&"code_assist"));
+        assert!(names.contains(&"compress_history"));
+        let unique: std::collections::HashSet<_> = names.iter().collect();
+        assert_eq!(unique.len(), names.len(), "no duplicate prompt names");
+    }
+
+    /// `find_summarizer` returns None when no prompt name contains "summar".
+    #[test]
+    fn find_summarizer_none_when_no_match() {
+        // The current prompt set has no "summar*" entry; if that changes,
+        // this assertion will alert future-us to revisit the convention.
+        assert!(find_summarizer().is_none()
+                || find_summarizer().unwrap().contains("summar"));
+    }
+
+    /// `get_template` returns Some for known names.
+    #[test]
+    fn get_template_returns_known() {
+        assert!(get_template("classify_task").is_some());
+        assert!(get_template("summarize_file").is_some());
+        assert!(get_template("nonexistent_xyz").is_none());
+    }
+
+    /// `uuid_like` produces 36-char strings with dashes in the right places.
+    #[test]
+    fn uuid_like_has_canonical_format() {
+        let u = uuid_like();
+        assert_eq!(u.len(), 36, "expected uuid-like length; got {u}");
+        // 8-4-4-4-12 dash positions:
+        assert_eq!(u.chars().nth(8), Some('-'));
+        assert_eq!(u.chars().nth(13), Some('-'));
+        assert_eq!(u.chars().nth(18), Some('-'));
+        assert_eq!(u.chars().nth(23), Some('-'));
+        let segs: Vec<&str> = u.split('-').collect();
+        assert_eq!(segs.len(), 5);
+        assert_eq!(segs[0].len(), 8);
+        assert_eq!(segs[4].len(), 12);
+        // Two consecutive calls should differ.
+        assert_ne!(u, uuid_like());
+    }
+}

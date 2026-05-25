@@ -64,3 +64,76 @@ pub fn get_router(name: &str) -> Option<Router> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Complexity ≤ 0.3 → trivial tier (TinyClassifier).
+    #[test]
+    fn low_complexity_routes_to_tiny_classifier() {
+        let r = coding_router_route(&json!({"complexity": 0.2}));
+        assert_eq!(r.model_id, "TinyClassifier");
+        assert_eq!(r.tier, "trivial");
+    }
+
+    /// 0.3 < complexity ≤ 0.6 → simple tier (SmallCoder).
+    #[test]
+    fn mid_complexity_routes_to_small_coder() {
+        let r = coding_router_route(&json!({"complexity": 0.5}));
+        assert_eq!(r.model_id, "SmallCoder");
+        assert_eq!(r.tier, "simple");
+    }
+
+    /// Threshold boundary: exactly 0.3 stays in trivial.
+    #[test]
+    fn exactly_03_is_trivial() {
+        assert_eq!(coding_router_route(&json!({"complexity": 0.3})).tier, "trivial");
+    }
+
+    /// Threshold boundary: exactly 0.6 stays in simple.
+    #[test]
+    fn exactly_06_is_simple() {
+        assert_eq!(coding_router_route(&json!({"complexity": 0.6})).tier, "simple");
+    }
+
+    /// High complexity → complex tier (MediumCoder).
+    #[test]
+    fn high_complexity_routes_to_medium_coder() {
+        let r = coding_router_route(&json!({"complexity": 0.9}));
+        assert_eq!(r.tier, "complex");
+    }
+
+    /// Missing `complexity` field defaults to complex (fail-safe).
+    /// Anti-regression: an absent field must NOT silently route to trivial.
+    #[test]
+    fn missing_complexity_defaults_to_complex() {
+        let r = coding_router_route(&json!({}));
+        assert_eq!(r.tier, "complex",
+            "missing complexity must fail to the most capable tier, not the smallest");
+    }
+
+    /// Escalation walks the tier ladder: trivial → simple → complex → None.
+    #[test]
+    fn escalate_walks_ladder() {
+        assert_eq!(coding_router_escalate("trivial").unwrap().tier, "simple");
+        assert_eq!(coding_router_escalate("simple").unwrap().tier, "complex");
+        assert!(coding_router_escalate("complex").is_none(),
+            "complex is the top tier — must return None");
+    }
+
+    /// Unknown tier returns None (no panic, no wraparound).
+    #[test]
+    fn escalate_unknown_tier_returns_none() {
+        assert!(coding_router_escalate("nonexistent").is_none());
+    }
+
+    /// `get_router` only knows the coding_router name.
+    #[test]
+    fn get_router_knows_only_coding_router() {
+        assert!(get_router("coding_router").is_some());
+        assert!(get_router("other").is_none());
+        assert!(get_router("").is_none());
+    }
+}

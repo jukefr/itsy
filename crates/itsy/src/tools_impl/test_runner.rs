@@ -651,4 +651,159 @@ mod tests {
         let out = "test result: ok. 12 passed; 0 failed; 1 ignored; 0 measured";
         assert_eq!(parse_counts("cargo-test", out), (12, 0, 1));
     }
+
+    /// Cargo: multiple `test result:` lines (one per crate in a workspace)
+    /// are summed correctly.
+    #[test]
+    fn parse_cargo_workspace_sums_multiple_result_lines() {
+        let out = "running 5 tests\ntest result: ok. 5 passed; 0 failed; 0 ignored\n\
+                   running 7 tests\ntest result: ok. 6 passed; 1 failed; 2 ignored";
+        assert_eq!(parse_counts("cargo-test", out), (11, 1, 2));
+    }
+
+    /// Jest counts respect "passed" / "failed" / "skipped" or "todo".
+    #[test]
+    fn parse_jest_output() {
+        let out = "Tests: 1 failed, 2 passed, 1 todo, 4 total";
+        assert_eq!(parse_counts("jest", out), (2, 1, 1));
+    }
+
+    /// Vitest output uses the same shape as Jest.
+    #[test]
+    fn parse_vitest_output() {
+        let out = "Tests:       8 passed, 2 failed, 1 skipped (11 total)";
+        assert_eq!(parse_counts("vitest", out), (8, 2, 1));
+    }
+
+    /// Mocha uses passing/failing/pending wording.
+    #[test]
+    fn parse_mocha_output() {
+        let out = "  10 passing (1s)\n  2 failing\n  3 pending";
+        assert_eq!(parse_counts("mocha", out), (10, 2, 3));
+    }
+
+    /// Go test output: count `--- PASS/FAIL/SKIP` lines per subtest.
+    #[test]
+    fn parse_go_output() {
+        let out = "--- PASS: TestA\n--- PASS: TestB\n--- FAIL: TestC\n--- SKIP: TestD\n--- PASS: TestE\n";
+        assert_eq!(parse_counts("go-test", out), (3, 1, 1));
+    }
+
+    /// RSpec: total - failures - pending = passed.
+    #[test]
+    fn parse_rspec_output() {
+        let out = "Finished in 0.1 seconds\n10 examples, 2 failures, 3 pending";
+        // 10 total - 2 fail - 3 pending = 5 passed
+        assert_eq!(parse_counts("rspec", out), (5, 2, 3));
+    }
+
+    /// Pytest: "errors" count is folded into the failure tally.
+    /// Anti-regression: a collection error must not be silently treated as success.
+    #[test]
+    fn parse_pytest_collection_errors_count_as_failures() {
+        let out = "===== 3 passed, 1 errors in 2.0s =====";
+        let (p, f, _s) = parse_counts("pytest", out);
+        assert_eq!(p, 3);
+        assert_eq!(f, 1, "pytest errors must be counted as failures, not ignored");
+    }
+
+    /// Unknown framework falls through to the generic passed/failed/skipped parse.
+    #[test]
+    fn parse_unknown_framework_uses_generic() {
+        let out = "5 passed 1 failed 0 skipped";
+        let counts = parse_counts("phpunit", out);
+        assert!(counts.0 == 5 && counts.1 == 1);
+    }
+
+    /// Empty output → all zeros (don't panic).
+    #[test]
+    fn parse_empty_output_is_zeros() {
+        assert_eq!(parse_counts("pytest", ""), (0, 0, 0));
+        assert_eq!(parse_counts("cargo-test", ""), (0, 0, 0));
+    }
+
+    // ── Framework detection ────────────────────────────────────────────────
+
+    /// pytest detected via `pyproject.toml [tool.pytest.ini_options]`.
+    #[test]
+    fn detects_pytest_via_pyproject() {
+        let _g = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var("ITSY_TEST_RUNNER"); }
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("pyproject.toml"),
+            "[tool.pytest.ini_options]\ntestpaths=[\"tests\"]").unwrap();
+        std::fs::create_dir_all(tmp.path().join("tests")).unwrap();
+        std::fs::write(tmp.path().join("tests/test_x.py"), "def test_ok(): pass").unwrap();
+        let d = detect_full(tmp.path()).expect("pyproject pytest should be detected");
+        assert!(d.framework.contains("pytest"),
+            "framework should mention pytest; got {}", d.framework);
+    }
+
+    /// pytest detected via standalone pytest.ini.
+    #[test]
+    fn detects_pytest_via_ini() {
+        let _g = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var("ITSY_TEST_RUNNER"); }
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("pytest.ini"), "[pytest]\n").unwrap();
+        let d = detect_full(tmp.path()).expect("pytest.ini should be detected");
+        assert!(d.framework.contains("pytest"));
+    }
+
+    /// Node package.json `test` script picks the right framework
+    /// (jest/vitest/mocha) from the script line.
+    #[test]
+    fn detects_node_jest_from_package_json() {
+        let _g = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var("ITSY_TEST_RUNNER"); }
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("package.json"),
+            "{\"scripts\":{\"test\":\"jest\"}}").unwrap();
+        let d = detect_full(tmp.path()).expect("node project should be detected");
+        assert_eq!(d.framework, "jest");
+    }
+
+    #[test]
+    fn detects_node_vitest_from_package_json() {
+        let _g = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var("ITSY_TEST_RUNNER"); }
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("package.json"),
+            "{\"scripts\":{\"test\":\"vitest run\"}}").unwrap();
+        let d = detect_full(tmp.path()).expect("node project should be detected");
+        assert_eq!(d.framework, "vitest");
+    }
+
+    #[test]
+    fn detects_node_mocha_from_package_json() {
+        let _g = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var("ITSY_TEST_RUNNER"); }
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("package.json"),
+            "{\"scripts\":{\"test\":\"mocha test/**/*.js\"}}").unwrap();
+        let d = detect_full(tmp.path()).expect("node project should be detected");
+        assert_eq!(d.framework, "mocha");
+    }
+
+    /// Empty directory → no runner detected.
+    #[test]
+    fn detects_nothing_in_empty_dir() {
+        let _g = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var("ITSY_TEST_RUNNER"); }
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(detect_full(tmp.path()).is_none(),
+            "empty dir must not produce a fake runner");
+    }
+
+    /// `format_for_prompt` produces a non-empty marker when a runner is detected.
+    #[test]
+    fn format_for_prompt_mentions_detected_runner() {
+        let _g = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var("ITSY_TEST_RUNNER"); }
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("Cargo.toml"), "[package]").unwrap();
+        let out = format_for_prompt(tmp.path());
+        assert!(!out.is_empty(), "format_for_prompt must return content");
+        assert!(out.contains("cargo"), "must mention cargo; got: {out}");
+    }
 }

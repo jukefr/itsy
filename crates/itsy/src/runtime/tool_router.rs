@@ -342,3 +342,67 @@ mod classify_user_examples {
         }
     }
 }
+
+#[cfg(test)]
+mod routing_decision_tests {
+    use super::*;
+
+    /// Bug #4 regression: an affirmation ("yes", "ok", "go ahead") after a
+    /// concrete prior category MUST inherit that category so the agent keeps
+    /// the right tool set instead of dropping back to `plan` (which has
+    /// almost no tools and stalls the agent).
+    #[test]
+    fn affirmation_inherits_prior_category() {
+        for affirm in ["yes", "ok", "sure", "do it", "yep", "proceed", "continue"] {
+            let r = classify_and_filter(affirm, Some("coding"));
+            assert_eq!(r.category, "coding",
+                "affirm {:?} with prior=coding must stay in coding, got {}", affirm, r.category);
+            assert!(r.needs_tools, "coding category must need tools");
+        }
+    }
+
+    /// Affirmation with no prior category falls back to `plan` (safe default).
+    #[test]
+    fn affirmation_without_prior_falls_to_plan() {
+        let r = classify_and_filter("yes", None);
+        assert_eq!(r.category, "plan");
+        assert!(r.needs_tools);
+    }
+
+    /// Affirmation with prior=respond does NOT inherit "respond" — it
+    /// promotes to `plan` so the agent can actually do work after agreement.
+    #[test]
+    fn affirmation_with_respond_prior_promotes_to_plan() {
+        let r = classify_and_filter("yes", Some("respond"));
+        assert_eq!(r.category, "plan");
+    }
+
+    /// Bug #5 regression: confidence must be plumbed through — the trace
+    /// recording call site previously hard-coded 0.0, masking misclassifications.
+    #[test]
+    fn confidence_is_non_zero_for_clear_intents() {
+        let r = classify_and_filter("write a python script that prints 42", None);
+        assert!(r.confidence > 0.0,
+            "clear coding intent must have positive confidence, got {} category={}",
+            r.confidence, r.category);
+    }
+
+    /// Affirmation routes report confidence=1.0 (no ambiguity).
+    #[test]
+    fn affirmation_confidence_is_one() {
+        let r = classify_and_filter("yes", Some("coding"));
+        assert_eq!(r.confidence, 1.0);
+    }
+
+    /// `respond` override carries the underlying classifier's confidence,
+    /// not 0 — otherwise we can't distinguish a strong "say hello" from
+    /// a borderline misclassification at trace time.
+    #[test]
+    fn respond_override_keeps_classifier_confidence() {
+        let r = classify_and_filter("say hello", None);
+        assert_eq!(r.category, "respond");
+        assert!(r.confidence > 0.0,
+            "respond override must carry classifier confidence, got {}", r.confidence);
+        assert!(!r.needs_tools, "respond category must NOT need tools");
+    }
+}

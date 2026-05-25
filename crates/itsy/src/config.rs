@@ -1014,3 +1014,89 @@ pub fn provider_env_map() -> HashMap<&'static str, &'static str> {
 pub fn deps_ok() -> Result<()> {
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── normalize_base_url ───────────────────────────────────────────────
+
+    #[test]
+    fn normalize_empty_returns_default() {
+        assert_eq!(normalize_base_url(""), "http://localhost:1234/v1");
+        assert_eq!(normalize_base_url("   "), "http://localhost:1234/v1");
+    }
+
+    #[test]
+    fn normalize_strips_trailing_slash() {
+        assert_eq!(normalize_base_url("http://api.openai.com/"), "http://api.openai.com");
+        assert_eq!(normalize_base_url("http://api.openai.com/v1/"), "http://api.openai.com/v1");
+    }
+
+    #[test]
+    fn normalize_preserves_http_scheme() {
+        assert_eq!(normalize_base_url("http://localhost:8080"), "http://localhost:8080");
+        assert_eq!(normalize_base_url("https://api.example.com/v1"), "https://api.example.com/v1");
+    }
+
+    #[test]
+    fn normalize_preserves_unix_scheme() {
+        // Unix socket scheme is recognised — anti-regression for local proxies.
+        assert_eq!(normalize_base_url("unix:///tmp/api.sock"), "unix:///tmp/api.sock");
+    }
+
+    #[test]
+    fn normalize_adds_http_scheme_when_missing() {
+        assert_eq!(normalize_base_url("localhost:8080"), "http://localhost:8080");
+        assert_eq!(normalize_base_url("api.example.com/v1"), "http://api.example.com/v1");
+    }
+
+    // ── provider_env_map ─────────────────────────────────────────────────
+
+    #[test]
+    fn provider_env_map_covers_main_providers() {
+        let m = provider_env_map();
+        assert_eq!(m.get("openai").copied(), Some("OPENAI_API_KEY"));
+        assert_eq!(m.get("anthropic").copied(), Some("ANTHROPIC_API_KEY"));
+        assert_eq!(m.get("deepseek").copied(), Some("DEEPSEEK_API_KEY"));
+    }
+
+    // ── build_auth_headers_for ──────────────────────────────────────────
+
+    #[test]
+    fn auth_headers_include_content_type() {
+        let h = build_auth_headers_for(None, "http://localhost");
+        assert_eq!(h.get(CONTENT_TYPE).unwrap(), "application/json");
+    }
+
+    #[test]
+    fn auth_headers_include_bearer_when_api_key_provided() {
+        let h = build_auth_headers_for(Some("sk-test123"), "http://localhost");
+        let auth = h.get(AUTHORIZATION).unwrap().to_str().unwrap();
+        assert_eq!(auth, "Bearer sk-test123");
+    }
+
+    #[test]
+    fn auth_headers_omit_bearer_when_no_key_anywhere() {
+        // Only assert if no env keys are set — otherwise env could provide one.
+        if env_str("OPENAI_API_KEY").is_some() || env_str("ANTHROPIC_API_KEY").is_some()
+            || env_str("DEEPSEEK_API_KEY").is_some() { return; }
+        let h = build_auth_headers_for(None, "http://localhost");
+        assert!(h.get(AUTHORIZATION).is_none(),
+            "no key configured anywhere → no Authorization header");
+    }
+
+    #[test]
+    fn auth_headers_add_openrouter_title() {
+        let h = build_auth_headers_for(Some("x"), "https://openrouter.ai/api/v1");
+        assert_eq!(h.get("X-Title").unwrap(), "itsy",
+            "openrouter must get the X-Title courtesy header");
+    }
+
+    #[test]
+    fn auth_headers_omit_openrouter_title_for_other_endpoints() {
+        let h = build_auth_headers_for(Some("x"), "https://api.openai.com/v1");
+        assert!(h.get("X-Title").is_none(),
+            "non-openrouter endpoints must NOT get the X-Title header");
+    }
+}
