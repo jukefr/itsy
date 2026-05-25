@@ -123,3 +123,120 @@ impl TokenMonitor {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// First call creates a new turn implicitly.
+    #[test]
+    fn first_call_creates_turn() {
+        let mut m = TokenMonitor::new();
+        m.record_call(10, 20, CallMetadata::default());
+        assert_eq!(m.turns.len(), 1);
+        assert_eq!(m.turns[0].calls, 1);
+        assert_eq!(m.turns[0].prompt_tokens, 10);
+        assert_eq!(m.turns[0].completion_tokens, 20);
+    }
+
+    /// `new_turn=true` starts a new turn each time.
+    #[test]
+    fn new_turn_flag_starts_fresh_turn() {
+        let mut m = TokenMonitor::new();
+        m.record_call(10, 5, CallMetadata::default());
+        m.record_call(20, 10, CallMetadata { new_turn: true, is_tool_call: false });
+        assert_eq!(m.turns.len(), 2);
+        assert_eq!(m.turns[0].calls, 1);
+        assert_eq!(m.turns[1].calls, 1);
+        assert_eq!(m.turns[1].prompt_tokens, 20);
+    }
+
+    /// `mark_next_call_new_turn` triggers a turn boundary on the next call.
+    #[test]
+    fn mark_next_call_new_turn_takes_effect_once() {
+        let mut m = TokenMonitor::new();
+        m.record_call(1, 1, CallMetadata::default());
+        m.mark_next_call_new_turn();
+        m.record_call(2, 2, CallMetadata::default());
+        m.record_call(3, 3, CallMetadata::default());
+        // First → turn 0, second → turn 1 (mark), third → still turn 1 (mark consumed).
+        assert_eq!(m.turns.len(), 2);
+        assert_eq!(m.turns[1].calls, 2);
+    }
+
+    /// `is_tool_call=true` increments the per-turn tool-call counter.
+    #[test]
+    fn is_tool_call_bumps_tool_counter() {
+        let mut m = TokenMonitor::new();
+        m.record_call(10, 5, CallMetadata { new_turn: false, is_tool_call: true });
+        m.record_call(10, 5, CallMetadata { new_turn: false, is_tool_call: false });
+        m.record_call(10, 5, CallMetadata { new_turn: false, is_tool_call: true });
+        assert_eq!(m.turns[0].tool_calls, 2);
+        assert_eq!(m.turns[0].calls, 3);
+    }
+
+    /// Totals accumulate across all calls.
+    #[test]
+    fn totals_accumulate() {
+        let mut m = TokenMonitor::new();
+        m.record_call(100, 50, CallMetadata::default());
+        m.record_call(200, 75, CallMetadata::default());
+        assert_eq!(m.total_prompt, 300);
+        assert_eq!(m.total_completion, 125);
+        assert_eq!(m.total_calls, 2);
+    }
+
+    /// `record_compaction` / `record_eviction` increment dedicated counters.
+    #[test]
+    fn compaction_and_eviction_counters() {
+        let mut m = TokenMonitor::new();
+        m.record_compaction();
+        m.record_compaction();
+        m.record_eviction();
+        assert_eq!(m.compactions, 2);
+        assert_eq!(m.evictions, 1);
+    }
+
+    /// `get_metrics` on empty monitor returns zeros without divide-by-zero panic.
+    #[test]
+    fn metrics_on_empty_no_div_by_zero() {
+        let m = TokenMonitor::new();
+        let metrics = m.get_metrics();
+        assert_eq!(metrics.total_calls, 0);
+        assert_eq!(metrics.avg_prompt_per_call, 0);
+        assert_eq!(metrics.avg_completion_per_call, 0);
+        assert_eq!(metrics.efficiency, "0.0%");
+    }
+
+    /// Efficiency is correctly computed as completion / prompt ratio.
+    #[test]
+    fn efficiency_ratio_correct() {
+        let mut m = TokenMonitor::new();
+        m.record_call(1000, 500, CallMetadata::default());
+        let metrics = m.get_metrics();
+        assert_eq!(metrics.efficiency, "50.0%");
+    }
+
+    /// `format_short` summarises totals.
+    #[test]
+    fn format_short_summarises() {
+        let mut m = TokenMonitor::new();
+        m.record_call(100, 50, CallMetadata::default());
+        let s = m.format_short();
+        assert!(s.contains("150"), "total tokens must appear; got {s}");
+        assert!(s.contains("1"), "call count must appear; got {s}");
+    }
+
+    /// `format_full` includes all metric labels.
+    #[test]
+    fn format_full_includes_labels() {
+        let mut m = TokenMonitor::new();
+        m.record_call(100, 50, CallMetadata::default());
+        m.record_compaction();
+        let s = m.format_full();
+        for label in ["Token Usage Report", "Total:", "Calls:", "Avg/call:",
+                      "Efficiency:", "Compactions:", "Evictions:"] {
+            assert!(s.contains(label), "{label} missing from full report; got: {s}");
+        }
+    }
+}

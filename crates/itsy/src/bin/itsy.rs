@@ -54,6 +54,11 @@ fn max_tool_calls_per_turn() -> u32 {
 
 use itsy::runtime::agent_helpers::recency_tool_hint;
 use itsy::runtime::evaluator::{evaluator_read_file, evaluator_run_bash};
+use itsy::runtime::mcp_server::{
+    apply_unique_patch, build_error_response, build_initialize_response,
+    build_tool_text_result, build_tools_list_response, is_destructive_command,
+    METHOD_NOT_FOUND, PARSE_ERROR,
+};
 /// Maximum auto-improvement iterations per file before we DECOMPOSE.
 const MAX_IMPROVE_ITERATIONS: u32 = 4;
 
@@ -1613,11 +1618,7 @@ async fn run_mcp(session: Arc<AgentSession>) -> Result<()> {
     while let Ok(Some(line)) = reader.next_line().await {
         let response = match serde_json::from_str::<Value>(&line) {
             Ok(req) => handle_mcp_request(req, &session).await,
-            Err(_) => json!({
-                "jsonrpc": "2.0",
-                "id": Value::Null,
-                "error": { "code": -32700, "message": "Parse error" },
-            }),
+            Err(_) => build_error_response(Value::Null, PARSE_ERROR, "Parse error"),
         };
         println!("{response}");
     }
@@ -1632,36 +1633,10 @@ async fn handle_mcp_request(request: Value, session: &AgentSession) -> Value {
         .unwrap_or("")
         .to_string();
     match method.as_str() {
-        "initialize" => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": { "tools": {} },
-                "serverInfo": { "name": "itsy", "version": env!("CARGO_PKG_VERSION") },
-            }
-        }),
-        "tools/list" => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": {
-                "tools": [
-                    {"name": "itsy_read_file", "description": "Read file contents", "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}},
-                    {"name": "itsy_search", "description": "Search code with regex", "inputSchema": {"type": "object", "properties": {"pattern": {"type": "string"}, "path": {"type": "string"}}, "required": ["pattern"]}},
-                    {"name": "itsy_patch", "description": "Edit file via search-and-replace", "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}, "old_str": {"type": "string"}, "new_str": {"type": "string"}}, "required": ["path", "old_str", "new_str"]}},
-                    {"name": "itsy_bash", "description": "Run shell command", "inputSchema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
-                    {"name": "itsy_memory_load", "description": "Load relevant project memory", "inputSchema": {"type": "object", "properties": {"task": {"type": "string"}}, "required": ["task"]}},
-                    {"name": "itsy_memory_remember", "description": "Save knowledge to project memory", "inputSchema": {"type": "object", "properties": {"type": {"type": "string"}, "title": {"type": "string"}, "content": {"type": "string"}}, "required": ["type", "title", "content"]}},
-                    {"name": "itsy_agent", "description": "Send a prompt to itsy", "inputSchema": {"type": "object", "properties": {"message": {"type": "string"}}, "required": ["message"]}},
-                ]
-            }
-        }),
+        "initialize" => build_initialize_response(id, env!("CARGO_PKG_VERSION")),
+        "tools/list" => build_tools_list_response(id),
         "tools/call" => handle_mcp_tool_call(id, request.get("params").cloned(), session).await,
-        _ => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": { "code": -32601, "message": format!("Unknown method: {method}") }
-        }),
+        _ => build_error_response(id, METHOD_NOT_FOUND, &format!("Unknown method: {method}")),
     }
 }
 
@@ -1685,11 +1660,7 @@ async fn handle_mcp_tool_call(id: Value, params: Option<Value>, session: &AgentS
         }
         "itsy_bash" => {
             let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
-            if regex::Regex::new(r"rm\s+-rf\s+/[^.]").expect("valid regex literal")
-                .is_match(command)
-                || regex::Regex::new(r"(?i)format\s+c:").expect("valid regex literal")
-                    .is_match(command)
-            {
+            if is_destructive_command(command) {
                 "Error: destructive command blocked".into()
             } else {
                 let out = Command::new("sh")
@@ -1729,18 +1700,12 @@ async fn handle_mcp_tool_call(id: Value, params: Option<Value>, session: &AgentS
             let new_str = args.get("new_str").and_then(|v| v.as_str()).unwrap_or("");
             let full = cwd.join(path);
             match std::fs::read_to_string(&full) {
-                Ok(content) => {
-                    if !content.contains(old_str) {
-                        "Error: old_str not found".into()
-                    } else if content.matches(old_str).count() > 1 {
-                        "Error: old_str matches multiple locations".into()
-                    } else {
-                        let updated = content.replace(old_str, new_str);
-                        std::fs::write(&full, updated)
-                            .map(|_| format!("Patched {path}"))
-                            .unwrap_or_else(|e| format!("Error: {e}"))
-                    }
-                }
+                Ok(content) => match apply_unique_patch(&content, old_str, new_str) {
+                    Ok(updated) => std::fs::write(&full, updated)
+                        .map(|_| format!("Patched {path}"))
+                        .unwrap_or_else(|e| format!("Error: {e}")),
+                    Err(msg) => format!("Error: {msg}"),
+                },
                 Err(e) => format!("Error: {e}"),
             }
         }
@@ -1777,11 +1742,7 @@ async fn handle_mcp_tool_call(id: Value, params: Option<Value>, session: &AgentS
         other => format!("Unknown tool: {other}"),
     };
 
-    json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "result": { "content": [{ "type": "text", "text": result_text }] }
-    })
+    build_tool_text_result(id, &result_text)
 }
 
 // ── Eval mode ────────────────────────────────────────────────────────────────

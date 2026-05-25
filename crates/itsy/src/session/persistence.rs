@@ -413,12 +413,11 @@ fn path_contained(candidate: &Path, base: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
-
+    /// Use the shared `paths::env_lock` so any test mutating `ITSY_HOME`
+    /// across the crate serialises with us.
     fn lock_serial() -> std::sync::MutexGuard<'static, ()> {
-        match TEST_LOCK.lock() { Ok(g) => g, Err(p) => p.into_inner() }
+        crate::paths::env_lock()
     }
 
     fn tmp_cwd() -> PathBuf {

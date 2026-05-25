@@ -658,11 +658,6 @@ pub fn close(cwd: &Path, status: ContractStatus) -> Result<Contract> {
 mod tests {
     use super::*;
     use std::env;
-    use std::sync::Mutex;
-
-    // These tests mutate the shared `ITSY_HOME` env var and the
-    // process-wide CURRENT cache, so they must run serially.
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn tmp_cwd() -> PathBuf {
         let p = env::temp_dir().join(format!("itsy-contract-test-{}", uuid_like()));
@@ -687,7 +682,7 @@ mod tests {
 
     #[test]
     fn create_round_trip() {
-        let _g = TEST_LOCK.lock().unwrap();
+        let _g = lock_serial();
         let cwd = tmp_cwd();
         let c = create(
             &cwd,
@@ -714,7 +709,7 @@ mod tests {
 
     #[test]
     fn cannot_create_without_assertions() {
-        let _g = TEST_LOCK.lock().unwrap();
+        let _g = lock_serial();
         let cwd = tmp_cwd();
         let err = create(&cwd, "t".into(), "b".into(), vec![], vec![]).unwrap_err();
         assert!(err.to_string().contains("at least one assertion"));
@@ -723,7 +718,7 @@ mod tests {
 
     #[test]
     fn mark_then_close() {
-        let _g = TEST_LOCK.lock().unwrap();
+        let _g = lock_serial();
         let cwd = tmp_cwd();
         let c = create(
             &cwd,
@@ -765,7 +760,7 @@ mod tests {
 
     #[test]
     fn render_for_prompt_is_compact() {
-        let _g = TEST_LOCK.lock().unwrap();
+        let _g = lock_serial();
         let cwd = tmp_cwd();
         let c = create(
             &cwd,
@@ -782,13 +777,10 @@ mod tests {
         set_current(None);
     }
 
-    /// Use this helper instead of `TEST_LOCK.lock().unwrap()` so a poisoned
-    /// lock from a panicking test doesn't cascade-fail every subsequent test.
+    /// Use the shared `paths::env_lock` so any test mutating `ITSY_HOME`
+    /// across the whole crate serialises with us.
     fn lock_serial() -> std::sync::MutexGuard<'static, ()> {
-        match TEST_LOCK.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        }
+        crate::paths::env_lock()
     }
 
     /// `mark_assertion` accepts a failed state with text evidence —

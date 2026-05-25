@@ -504,3 +504,163 @@ pub fn from_full_config(cfg: &Config) -> Settings {
     s.tui_classic = cfg.tui.classic;
     s
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `defaults()` produces sensible values for all fields.
+    #[test]
+    fn defaults_have_sensible_values() {
+        let d = Settings::defaults();
+        assert!(d.max_tool_calls_per_turn >= 50, "default budget must be meaningful");
+        assert!(d.request_timeout_ms >= 5_000, "default timeout must allow real network");
+        assert!(d.bash_timeout >= 10, "default bash timeout must be reasonable");
+        // The public-endpoints gate is OFF by default — anti-regression for the
+        // SSRF default. (allow_outside_paths is intentionally true for now so
+        // home-dir refs work; that's pinned by the next test.)
+        assert!(!d.allow_public_endpoints, "default must refuse public endpoints");
+        assert!(!d.web_browse, "web browsing off by default");
+    }
+
+    /// `allow_outside_paths` defaults to true — anti-regression: changing this
+    /// to false would break `@~/...` home-dir references. If it's intentional
+    /// to change, this test forces an explicit update.
+    #[test]
+    fn allow_outside_paths_default_pins_current_value() {
+        assert!(Settings::defaults().allow_outside_paths,
+            "default allow_outside_paths is true (home-dir refs depend on it)");
+    }
+
+    // ── apply_set_override: boolean parsing ────────────────────────────────
+
+    #[test]
+    fn override_bool_accepts_truthy_values() {
+        for truthy in ["true", "TRUE", "1", "yes", "YES", "on", "On"] {
+            let mut s = Settings::defaults();
+            assert!(s.apply_set_override("verbose", truthy).is_ok(),
+                "value {truthy:?} must parse as true");
+            assert!(s.verbose, "verbose must be set to true for {truthy:?}");
+        }
+    }
+
+    #[test]
+    fn override_bool_accepts_falsy_values() {
+        for falsy in ["false", "FALSE", "0", "no", "NO", "off", "Off"] {
+            let mut s = Settings::defaults();
+            s.verbose = true;
+            assert!(s.apply_set_override("verbose", falsy).is_ok());
+            assert!(!s.verbose, "verbose must be false for {falsy:?}");
+        }
+    }
+
+    #[test]
+    fn override_bool_rejects_garbage() {
+        let mut s = Settings::defaults();
+        let err = s.apply_set_override("verbose", "maybe").unwrap_err();
+        assert!(err.contains("boolean"));
+        // Original unchanged on error.
+        assert!(!s.verbose);
+    }
+
+    // ── apply_set_override: integer parsing ────────────────────────────────
+
+    #[test]
+    fn override_u32_parses_decimal() {
+        let mut s = Settings::defaults();
+        s.apply_set_override("max_tool_calls_per_turn", "500").unwrap();
+        assert_eq!(s.max_tool_calls_per_turn, 500);
+    }
+
+    #[test]
+    fn override_u64_parses_decimal() {
+        let mut s = Settings::defaults();
+        s.apply_set_override("request_timeout_ms", "30000").unwrap();
+        assert_eq!(s.request_timeout_ms, 30_000);
+    }
+
+    #[test]
+    fn override_usize_parses_decimal() {
+        let mut s = Settings::defaults();
+        s.apply_set_override("filetree.max", "500").unwrap();
+        assert_eq!(s.filetree_max, 500);
+    }
+
+    #[test]
+    fn override_f64_parses_decimal() {
+        let mut s = Settings::defaults();
+        s.apply_set_override("diff.max_ratio", "0.75").unwrap();
+        assert!((s.diff_max_ratio - 0.75).abs() < 1e-9);
+    }
+
+    #[test]
+    fn override_int_rejects_non_numeric() {
+        let mut s = Settings::defaults();
+        assert!(s.apply_set_override("max_tool_calls_per_turn", "abc").is_err());
+        assert!(s.apply_set_override("request_timeout_ms", "1.5").is_err());
+    }
+
+    // ── apply_set_override: dotted-path equivalence ─────────────────────────
+
+    /// `security.allow_outside_paths` and bare `allow_outside_paths` both work.
+    /// Anti-regression: removing the alias would silently break docs/scripts.
+    #[test]
+    fn override_dotted_and_bare_paths_equivalent() {
+        let mut a = Settings::defaults();
+        let mut b = Settings::defaults();
+        a.apply_set_override("security.allow_outside_paths", "true").unwrap();
+        b.apply_set_override("allow_outside_paths", "true").unwrap();
+        assert_eq!(a.allow_outside_paths, b.allow_outside_paths);
+        assert!(a.allow_outside_paths);
+    }
+
+    #[test]
+    fn override_contract_alias_works() {
+        let mut a = Settings::defaults();
+        let mut b = Settings::defaults();
+        a.apply_set_override("features.contract", "true").unwrap();
+        b.apply_set_override("contract", "true").unwrap();
+        assert_eq!(a.contract, b.contract);
+    }
+
+    // ── apply_set_override: string fields ───────────────────────────────────
+
+    #[test]
+    fn override_string_field() {
+        let mut s = Settings::defaults();
+        s.apply_set_override("tool_routing", "two_stage").unwrap();
+        assert_eq!(s.tool_routing, "two_stage");
+    }
+
+    #[test]
+    fn override_optional_string_field() {
+        let mut s = Settings::defaults();
+        s.apply_set_override("profile", "qwen3-iq2").unwrap();
+        assert_eq!(s.profile.as_deref(), Some("qwen3-iq2"));
+    }
+
+    /// PathBuf-typed field gets wrapped.
+    #[test]
+    fn override_path_field() {
+        let mut s = Settings::defaults();
+        s.apply_set_override("snapshots.dir", "/tmp/snaps").unwrap();
+        assert_eq!(s.snapshot_dir.as_ref().unwrap(), &PathBuf::from("/tmp/snaps"));
+    }
+
+    /// Comma-separated list field parses correctly.
+    #[test]
+    fn override_csv_list_field() {
+        let mut s = Settings::defaults();
+        s.apply_set_override("dedup.noisy_extra", "foo, bar ,baz").unwrap();
+        assert_eq!(s.dedup_noisy_extra, vec!["foo", "bar", "baz"]);
+    }
+
+    /// Unknown key returns a descriptive error.
+    #[test]
+    fn override_unknown_key_errors() {
+        let mut s = Settings::defaults();
+        let err = s.apply_set_override("nonexistent.key", "value").unwrap_err();
+        assert!(err.contains("unknown setting"));
+        assert!(err.contains("nonexistent.key"));
+    }
+}

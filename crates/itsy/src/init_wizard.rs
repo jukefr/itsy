@@ -663,4 +663,142 @@ mod tests {
         assert_eq!(h.quant.as_deref(), Some("Q5_K_M"));
         assert_eq!(h.quant_tier, "good");
     }
+
+    // ── quant_tier_for ─────────────────────────────────────────────────────
+
+    #[test]
+    fn quant_tier_classification() {
+        assert_eq!(quant_tier_for("IQ1_S"), "tiny");
+        assert_eq!(quant_tier_for("IQ2_XXS"), "tiny");
+        assert_eq!(quant_tier_for("Q2_K"), "tiny");
+        assert_eq!(quant_tier_for("IQ3_XS"), "low");
+        assert_eq!(quant_tier_for("Q3_K_M"), "low");
+        assert_eq!(quant_tier_for("IQ4_XS"), "balanced");
+        assert_eq!(quant_tier_for("Q4_K_M"), "balanced");
+        assert_eq!(quant_tier_for("Q5_K_M"), "good");
+        assert_eq!(quant_tier_for("Q6_K"), "good");
+        assert_eq!(quant_tier_for("Q8_0"), "high");
+        assert_eq!(quant_tier_for("F16"), "high");
+        assert_eq!(quant_tier_for("BF16"), "high");
+        assert_eq!(quant_tier_for("F32"), "high");
+        assert_eq!(quant_tier_for("nonsense"), "unknown");
+        assert_eq!(quant_tier_for(""), "unknown");
+    }
+
+    /// Case-insensitive quant tier classification.
+    #[test]
+    fn quant_tier_is_case_insensitive() {
+        assert_eq!(quant_tier_for("q5_k_m"), "good");
+        assert_eq!(quant_tier_for("iq2_xxs"), "tiny");
+        assert_eq!(quant_tier_for("f16"), "high");
+    }
+
+    // ── budget_pct_for ─────────────────────────────────────────────────────
+
+    /// Budget pct scales with context window size.
+    /// Anti-regression: a tiny window with a too-high budget fills context too fast.
+    #[test]
+    fn budget_pct_scales_with_window() {
+        assert_eq!(budget_pct_for(4096), 50);   // tiny: <16k
+        assert_eq!(budget_pct_for(8192), 50);
+        assert_eq!(budget_pct_for(16_000), 60); // medium: 16k-32k
+        assert_eq!(budget_pct_for(32_768), 70); // large: >=32k
+        assert_eq!(budget_pct_for(131_072), 70);
+    }
+
+    // ── routing_for ────────────────────────────────────────────────────────
+
+    /// Small windows route through two_stage (less prompt overhead).
+    #[test]
+    fn routing_picks_two_stage_for_small_windows() {
+        assert_eq!(routing_for(4096), "two_stage");
+        assert_eq!(routing_for(16_000), "two_stage");
+        assert_eq!(routing_for(16_001), "direct");
+        assert_eq!(routing_for(32_768), "direct");
+        assert_eq!(routing_for(131_072), "direct");
+    }
+
+    // ── family_default_window ──────────────────────────────────────────────
+
+    /// Gemma-4 gets 32k by default.
+    #[test]
+    fn family_default_window_gemma4() {
+        assert_eq!(family_default_window(Some("gemma"), "gemma-4-26b-a4b"), 32_768);
+    }
+
+    /// Qwen3 gets 32k.
+    #[test]
+    fn family_default_window_qwen3() {
+        assert_eq!(family_default_window(Some("qwen"), "qwen3-30b-a3b"), 32_768);
+    }
+
+    /// Mistral Nemo gets 128k.
+    #[test]
+    fn family_default_window_mistral_nemo() {
+        assert_eq!(family_default_window(Some("mistral"), "mistral-nemo-12b"), 128_000);
+    }
+
+    /// Unknown family falls back to 8k.
+    #[test]
+    fn family_default_window_unknown_fallback() {
+        assert_eq!(family_default_window(None, "unknown-model"), 8_192);
+        assert_eq!(family_default_window(Some("phi"), "phi-3-mini"), 8_192);
+    }
+
+    // ── provider_for ───────────────────────────────────────────────────────
+
+    /// `provider_for` returns (display_name, Provider) for choice keys.
+    /// Just verify it doesn't panic on common inputs.
+    #[test]
+    fn provider_for_recognises_choices() {
+        for choice in ["1", "2", "3", "4", "5", "openai", "anthropic", "deepseek"] {
+            let (name, _) = provider_for(choice);
+            assert!(!name.is_empty(), "choice {choice} must return a non-empty display name");
+        }
+    }
+
+    /// Unknown choice falls through to a safe default.
+    #[test]
+    fn provider_for_unknown_choice_falls_through() {
+        let (name, _) = provider_for("nonsense");
+        // No panic; some default name returned.
+        assert!(!name.is_empty());
+    }
+
+    // ── Misc detect_model_hints ────────────────────────────────────────────
+
+    /// Empty model name doesn't panic.
+    #[test]
+    fn detect_model_hints_empty() {
+        let h = detect_model_hints("");
+        assert!(h.family.is_none());
+        assert!(h.quant.is_none());
+        assert_eq!(h.quant_tier, "unknown");
+        assert!(!h.is_reasoning);
+    }
+
+    /// Dense-total picks the LARGEST B-marker when no MoE / Active markers present.
+    #[test]
+    fn detect_dense_picks_largest_b() {
+        // 35B + 7B → must pick 35B.
+        let h = detect_model_hints("foo-35B-with-7B-extras");
+        assert_eq!(h.dense_total_b, Some(35.0));
+    }
+
+    /// Family detection picks the first match in FAMILIES iteration order.
+    /// Note: CodeLlama contains "llama", and "llama" comes before "codellama"
+    /// in FAMILIES — so it matches as "llama". This documents the current
+    /// behavior; reordering FAMILIES to put more-specific families first
+    /// would change this.
+    #[test]
+    fn detect_family_recognises_known() {
+        assert_eq!(detect_model_hints("gemma-7b").family.as_deref(), Some("gemma"));
+        assert_eq!(detect_model_hints("llama-3-70b").family.as_deref(), Some("llama"));
+        assert_eq!(detect_model_hints("mistral-7b").family.as_deref(), Some("mistral"));
+        assert_eq!(detect_model_hints("phi-3-mini").family.as_deref(), Some("phi"));
+        assert_eq!(detect_model_hints("deepseek-coder").family.as_deref(), Some("deepseek"));
+        // CodeLlama matches "llama" first due to iteration order — pin that.
+        assert_eq!(detect_model_hints("CodeLlama-13b").family.as_deref(), Some("llama"));
+        assert!(detect_model_hints("brand-new-unknown-model").family.is_none());
+    }
 }

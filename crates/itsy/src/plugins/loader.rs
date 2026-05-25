@@ -553,4 +553,153 @@ mod tests {
         let r = rt.block_on(l.execute_tool("noop", json!({})));
         assert!(r.is_none());
     }
+
+    /// Empty plugin loader has no tools.
+    #[test]
+    fn new_loader_is_empty() {
+        let l = PluginLoader::new();
+        assert!(l.get_tools().is_empty());
+        assert!(l.list().is_empty());
+        assert_eq!(l.get_prompt_injections(None), "");
+    }
+
+    /// `get_tools` returns the OpenAI-tool-schema shape.
+    #[test]
+    fn get_tools_returns_openai_schema_shape() {
+        let mut l = PluginLoader::new();
+        l.tools.push(ToolDef {
+            name: "foo".into(),
+            description: "demo".into(),
+            parameters: json!({"type":"object"}),
+            cmd: None,
+            handler: None,
+        });
+        let tools = l.get_tools();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["type"], "function");
+        assert_eq!(tools[0]["function"]["name"], "foo");
+        assert_eq!(tools[0]["function"]["description"], "demo");
+        assert!(tools[0]["function"]["parameters"].is_object());
+    }
+
+    /// Prompts targeting a different task type are NOT injected.
+    #[test]
+    fn prompt_filtering_excludes_other_task_types() {
+        let mut l = PluginLoader::new();
+        l.prompts.push((PromptInjection { inject: "backend".into(), content: "B".into() }, "p".into()));
+        let s = l.get_prompt_injections(Some("coding"));
+        assert!(!s.contains('B'),
+            "backend-only prompt must NOT inject for coding task");
+    }
+
+    /// `None` task type still gets the `"always"` prompts.
+    #[test]
+    fn always_prompts_inject_with_none_task_type() {
+        let mut l = PluginLoader::new();
+        l.prompts.push((PromptInjection { inject: "always".into(), content: "ALWAYS".into() }, "p".into()));
+        let s = l.get_prompt_injections(None);
+        assert!(s.contains("ALWAYS"),
+            "always-prompts must inject regardless of task type; got {s:?}");
+    }
+
+    /// `execute_tool` for an unknown name returns None.
+    #[test]
+    fn execute_unknown_tool_returns_none() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let l = PluginLoader::new();
+        let r = rt.block_on(l.execute_tool("nonexistent", json!({})));
+        assert!(r.is_none());
+    }
+
+    /// `execute_command` for an unknown name returns None.
+    #[test]
+    fn execute_unknown_command_returns_none() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let l = PluginLoader::new();
+        let r = rt.block_on(l.execute_command("nonexistent", json!({})));
+        assert!(r.is_none());
+    }
+
+    /// `validate_manifest` rejects empty plugin name.
+    #[test]
+    fn validate_manifest_rejects_empty_name() {
+        let bad = PluginManifest {
+            name: "".into(), version: "".into(), description: "".into(),
+            tools: vec![], commands: vec![], hooks: vec![], prompts: vec![],
+            enabled: true,
+            dir: None,
+        };
+        assert!(!validate_manifest(&bad));
+    }
+
+    /// `validate_manifest` rejects empty tool name.
+    #[test]
+    fn validate_manifest_rejects_empty_tool_name() {
+        let bad = PluginManifest {
+            name: "p".into(), version: "1".into(), description: "".into(),
+            tools: vec![ToolDef { name: "".into(), description: "".into(),
+                parameters: default_params(), cmd: None, handler: None }],
+            commands: vec![], hooks: vec![], prompts: vec![],
+            enabled: true,
+            dir: None,
+        };
+        assert!(!validate_manifest(&bad));
+    }
+
+    /// `validate_manifest` rejects empty hook event name.
+    #[test]
+    fn validate_manifest_rejects_empty_hook_event() {
+        let bad = PluginManifest {
+            name: "p".into(), version: "1".into(), description: "".into(),
+            tools: vec![], commands: vec![],
+            hooks: vec![HookDef { event: "".into(), filter: vec![], cmd: Some(vec!["true".into()]), handler: None }],
+            prompts: vec![],
+            enabled: true,
+            dir: None,
+        };
+        assert!(!validate_manifest(&bad));
+    }
+
+    /// Valid manifest passes.
+    #[test]
+    fn validate_manifest_accepts_valid() {
+        let ok = PluginManifest {
+            name: "p".into(), version: "1".into(), description: "d".into(),
+            tools: vec![ToolDef { name: "foo".into(), description: "".into(),
+                parameters: default_params(), cmd: Some(vec!["echo".into()]), handler: None }],
+            commands: vec![], hooks: vec![], prompts: vec![],
+            enabled: true,
+            dir: None,
+        };
+        assert!(validate_manifest(&ok));
+    }
+
+    /// `list` returns one PluginInfo per loaded plugin.
+    #[test]
+    fn list_returns_plugin_info() {
+        let mut l = PluginLoader::new();
+        l.plugins.push(PluginManifest {
+            name: "myplug".into(), version: "0.1".into(), description: "".into(),
+            tools: vec![ToolDef { name: "t1".into(), description: "".into(),
+                parameters: default_params(), cmd: None, handler: None }],
+            commands: vec![CommandDef { name: "c1".into(),
+                description: "".into(), cmd: None, handler: None }],
+            hooks: vec![], prompts: vec![],
+            enabled: true,
+            dir: None,
+        });
+        let infos = l.list();
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].name, "myplug");
+        assert_eq!(infos[0].tools, vec!["t1"]);
+        assert_eq!(infos[0].commands, vec!["c1"]);
+    }
+
+    /// `load_from` on a non-existent directory is a no-op (doesn't panic).
+    #[test]
+    fn load_from_missing_dir_is_noop() {
+        let mut l = PluginLoader::new();
+        l.load_from(std::path::Path::new("/nonexistent/path/xyz"));
+        assert!(l.list().is_empty());
+    }
 }

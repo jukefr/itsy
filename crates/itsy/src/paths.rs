@@ -24,6 +24,21 @@
 use std::path::{Path, PathBuf};
 
 
+/// Shared lock for tests that need to mutate `ITSY_HOME` or `XDG_CONFIG_HOME`.
+/// Multiple test modules mutate these globals; without a single shared lock
+/// they race and corrupt each other's tempdirs. Use as:
+///
+/// ```ignore
+/// let _g = crate::paths::env_lock();
+/// ```
+pub fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    match ENV_LOCK.lock() {
+        Ok(g) => g,
+        Err(poison) => poison.into_inner(),
+    }
+}
+
 /// Root of all itsy state.
 pub fn config_dir() -> PathBuf {
     if let Ok(over) = std::env::var("ITSY_HOME") {

@@ -1099,4 +1099,175 @@ mod tests {
         assert!(h.get("X-Title").is_none(),
             "non-openrouter endpoints must NOT get the X-Title header");
     }
+
+    // ── Config migrations ──────────────────────────────────────────────────
+
+    #[test]
+    fn migration_already_current_is_noop() {
+        let mut v: toml::Value = toml::from_str(&format!(r#"version = "{CURRENT_CONFIG_VERSION}""#)).unwrap();
+        ConfigFile::apply_migrations(&mut v).unwrap();
+        assert_eq!(v.get("version").and_then(|x| x.as_str()), Some(CURRENT_CONFIG_VERSION));
+    }
+
+    /// v1 file gets every new section added with empty-table defaults.
+    /// Anti-regression: a missing section would break deserialisation.
+    #[test]
+    fn v1_to_v2_inserts_new_sections() {
+        let mut v: toml::Value = toml::from_str(r#"
+version = "1"
+[model]
+provider = "openai"
+name = "test"
+base_url = "x"
+timeout = 60
+[context]
+max_budget_pct = 70
+detected_window = 32768
+working_memory_tokens = 8192
+summary_threshold = 8000
+[tools]
+bash_timeout = 30
+tool_routing = "direct"
+web_browse = false
+shell_persist = true
+[tui]
+show_token_usage = false
+auto_approve = false
+theme = "dark"
+classic = false
+[git]
+auto_commit = false
+"#).unwrap();
+        ConfigFile::apply_migrations(&mut v).unwrap();
+        assert_eq!(v.get("version").and_then(|x| x.as_str()), Some("2"));
+        // All new sections present.
+        for sec in ["limits", "security", "diff", "filetree", "snapshots", "code_graph",
+                    "tests", "traces", "dedup", "evidence", "plugins", "diag"] {
+            assert!(v.get(sec).is_some(),
+                "v1→v2 must add section [{sec}]; got {v:?}");
+        }
+        // [tools] picked up shell_contain + rtk.
+        let tools = v.get("tools").and_then(|x| x.as_table()).unwrap();
+        assert_eq!(tools.get("shell_contain").and_then(|x| x.as_bool()), Some(false));
+        assert_eq!(tools.get("rtk").and_then(|x| x.as_bool()), Some(true));
+    }
+
+    /// v1 with already-present `shell_contain` / `rtk` is NOT overwritten —
+    /// migration is additive only.
+    #[test]
+    fn v1_to_v2_preserves_existing_values() {
+        let mut v: toml::Value = toml::from_str(r#"
+version = "1"
+[tools]
+shell_contain = true
+rtk = false
+"#).unwrap();
+        ConfigFile::apply_migrations(&mut v).unwrap();
+        let tools = v.get("tools").and_then(|x| x.as_table()).unwrap();
+        assert_eq!(tools.get("shell_contain").and_then(|x| x.as_bool()), Some(true),
+            "existing value must be preserved");
+        assert_eq!(tools.get("rtk").and_then(|x| x.as_bool()), Some(false));
+    }
+
+    /// v1 with existing [features] gets `bootstrap_max_chars` added.
+    #[test]
+    fn v1_to_v2_adds_bootstrap_max_to_features() {
+        let mut v: toml::Value = toml::from_str(r#"
+version = "1"
+[features]
+temp_adapt = true
+"#).unwrap();
+        ConfigFile::apply_migrations(&mut v).unwrap();
+        let features = v.get("features").and_then(|x| x.as_table()).unwrap();
+        assert_eq!(features.get("temp_adapt").and_then(|x| x.as_bool()), Some(true),
+            "existing field must survive");
+        assert_eq!(features.get("bootstrap_max_chars").and_then(|x| x.as_integer()), Some(4000));
+    }
+
+    /// Migration on a non-table root errors cleanly.
+    #[test]
+    fn migration_on_non_table_root_errors() {
+        // Non-table root explicitly.
+        let mut v = toml::Value::String("nope".into());
+        let r = ConfigFile::apply_migrations(&mut v);
+        // The first migration attempt will hit the non-table branch and bail.
+        assert!(r.is_err());
+    }
+
+    /// Unknown version with no migration in the chain returns an error.
+    #[test]
+    fn unknown_version_returns_error() {
+        let mut v: toml::Value = toml::from_str(r#"version = "999""#).unwrap();
+        let err = ConfigFile::apply_migrations(&mut v).unwrap_err();
+        let s = err.to_string();
+        assert!(s.contains("999") || s.contains("no migration"),
+            "must point at the unknown version; got: {s}");
+    }
+
+    /// Missing version defaults to "1" (assumes old file).
+    #[test]
+    fn missing_version_assumed_v1() {
+        let mut v: toml::Value = toml::from_str("# empty\n[tools]\nbash_timeout = 30\n").unwrap();
+        ConfigFile::apply_migrations(&mut v).unwrap();
+        assert_eq!(v.get("version").and_then(|x| x.as_str()), Some(CURRENT_CONFIG_VERSION),
+            "no-version file must be migrated to current");
+    }
+
+    // ── env_str ─────────────────────────────────────────────────────────────
+
+    /// `env_str` returns None when env var is unset OR empty.
+    /// Anti-regression: empty string from env shouldn't be treated as "set".
+    #[test]
+    fn env_str_treats_empty_as_unset() {
+        // Use a name that's overwhelmingly unlikely to be set in any test env.
+        let name = "ITSY_TEST_UNLIKELY_VAR_NAME_THAT_IS_NEVER_SET_999";
+        assert!(env_str(name).is_none());
+    }
+
+    // ── resolve_api_key ────────────────────────────────────────────────────
+
+    /// Without any env keys, the config's own api_key is used.
+    #[test]
+    fn resolve_api_key_uses_config_when_env_empty() {
+        // Only assert when env is clean.
+        if env_str("OPENAI_API_KEY").is_some()
+            || env_str("ANTHROPIC_API_KEY").is_some()
+            || env_str("DEEPSEEK_API_KEY").is_some() { return; }
+        use crate::config::{
+            ContextConfig, GitConfig, ModelConfig, ToolsConfig, TuiConfig,
+        };
+        let cfg = Config {
+            model: ModelConfig {
+                provider: "openai".into(),
+                name: "x".into(),
+                base_url: "http://localhost".into(),
+                timeout: 60,
+                api_key: Some("cfg-key".into()),
+            },
+            context: ContextConfig { max_budget_pct: 70, detected_window: 32_768, working_memory_tokens: 8192, summary_threshold: 8000 },
+            tools: ToolsConfig { bash_timeout: 30, tool_routing: "direct".into(), web_browse: false, shell_persist: true, shell_contain: false, rtk: true },
+            tui: TuiConfig { show_token_usage: false, auto_approve: false, theme: "dark".into(), classic: false },
+            git: GitConfig { auto_commit: false },
+            features: Default::default(), models: None, limits: Default::default(),
+            security: Default::default(), diff: Default::default(), filetree: Default::default(),
+            snapshots: Default::default(), code_graph: Default::default(),
+            tests: Default::default(), traces: Default::default(),
+            dedup: Default::default(), evidence: Default::default(),
+            plugins: Default::default(), diag: Default::default(),
+            second_opinion: Default::default(),
+        };
+        assert_eq!(resolve_api_key(&cfg).as_deref(), Some("cfg-key"));
+    }
+
+    // ── default helper functions ───────────────────────────────────────────
+
+    #[test]
+    fn default_constants_have_sensible_values() {
+        assert!(default_max_tool_calls_per_turn() >= 50, "must allow meaningful tool budget");
+        assert!(default_request_timeout_ms() >= 10_000, "timeout must allow real network calls");
+        assert!(default_diff_lines() >= 1);
+        assert!(default_diff_ratio() > 0.0 && default_diff_ratio() <= 1.0);
+        assert!(default_dedup_window() > 0);
+        assert!(default_dedup_sim() > 0.0 && default_dedup_sim() <= 1.0);
+    }
 }

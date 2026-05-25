@@ -1336,4 +1336,251 @@ mod tests {
         assert_eq!(st.token_prompt, 10);
         assert_eq!(st.token_completion, 20);
     }
+
+    // ── Theme selection ────────────────────────────────────────────────────
+
+    #[test]
+    fn theme_from_name_handles_known_names() {
+        let light = Theme::from_name("light");
+        let dark = Theme::from_name("dark");
+        let _minimal = Theme::from_name("minimal");
+        // Themes differ in at least one color attribute (bg / fg).
+        assert!(light.bg != dark.bg || light.fg != dark.fg,
+            "light/dark themes must differ somewhere");
+    }
+
+    #[test]
+    fn theme_from_name_falls_back_to_dark() {
+        let unknown = Theme::from_name("nonsense");
+        let dark = Theme::from_name("dark");
+        // Unknown falls back to dark — bg/fg must match.
+        assert_eq!(unknown.bg, dark.bg);
+        assert_eq!(unknown.fg, dark.fg);
+    }
+
+    // ── ChatRole / ChatLine variants ───────────────────────────────────────
+
+    /// `add_chat` appends the message + a trailing Spacer line.
+    #[test]
+    fn add_chat_inserts_message_and_spacer() {
+        let fs = Fullscreen::new();
+        fs.add_chat(ChatRole::User, "hi");
+        let st = fs.state.lock();
+        let lines = &st.active().chat_lines;
+        assert_eq!(lines.len(), 2, "must push message + spacer");
+        match &lines[0] {
+            ChatLine::Text { role: ChatRole::User, text } => assert_eq!(text, "hi"),
+            other => panic!("expected user text, got {other:?}"),
+        }
+        assert!(matches!(lines[1], ChatLine::Spacer));
+    }
+
+    /// `add_tool` maps status strings to enum variants.
+    #[test]
+    fn add_tool_maps_status_strings() {
+        let fs = Fullscreen::new();
+        fs.add_tool("bash", "ok", "completed");
+        fs.add_tool("read", "err", "failed");
+        fs.add_tool("patch", "running", "...");
+        fs.add_tool("write", "something_unknown", "msg");
+        let st = fs.state.lock();
+        let lines = &st.active().chat_lines;
+        let tools: Vec<&ToolStatus> = lines.iter().filter_map(|l| match l {
+            ChatLine::Tool { status, .. } => Some(status),
+            _ => None,
+        }).collect();
+        assert_eq!(tools.len(), 4);
+        assert_eq!(tools[0], &ToolStatus::Ok);
+        assert_eq!(tools[1], &ToolStatus::Err);
+        // unknown / "running" both fall to Running.
+        assert_eq!(tools[2], &ToolStatus::Running);
+        assert_eq!(tools[3], &ToolStatus::Running);
+    }
+
+    /// `add_diff` truncates large old/new at 8 lines and emits a "more" marker.
+    #[test]
+    fn add_diff_truncates_long_blocks() {
+        let fs = Fullscreen::new();
+        let old: String = (0..20).map(|i| format!("o{i}")).collect::<Vec<_>>().join("\n");
+        let new: String = (0..20).map(|i| format!("n{i}")).collect::<Vec<_>>().join("\n");
+        fs.add_diff("big.rs", &old, &new, 1);
+        let st = fs.state.lock();
+        let lines = &st.active().chat_lines;
+        let more_count = lines.iter().filter(|l| matches!(l, ChatLine::DiffMore(_))).count();
+        assert_eq!(more_count, 2, "must emit a 'more' marker for both old and new (20>8)");
+        let old_count = lines.iter().filter(|l| matches!(l, ChatLine::DiffOld(_))).count();
+        let new_count = lines.iter().filter(|l| matches!(l, ChatLine::DiffNew(_))).count();
+        assert_eq!(old_count, 8, "must cap old lines at 8");
+        assert_eq!(new_count, 8, "must cap new lines at 8");
+    }
+
+    /// `add_diff` keeps short blocks intact (no truncation marker).
+    #[test]
+    fn add_diff_short_blocks_unchanged() {
+        let fs = Fullscreen::new();
+        fs.add_diff("a.rs", "a\nb", "c\nd", 1);
+        let st = fs.state.lock();
+        let lines = &st.active().chat_lines;
+        assert!(!lines.iter().any(|l| matches!(l, ChatLine::DiffMore(_))),
+            "short diff must NOT show truncation marker");
+    }
+
+    // ── stream_token ───────────────────────────────────────────────────────
+
+    /// `stream_token` after a User message starts a NEW Assistant line.
+    /// Anti-regression: streaming must not append to the wrong role.
+    #[test]
+    fn stream_token_starts_new_line_after_other_role() {
+        let fs = Fullscreen::new();
+        fs.add_chat(ChatRole::User, "hi");
+        fs.stream_token("hello");
+        let st = fs.state.lock();
+        let lines = &st.active().chat_lines;
+        // Find the last Text line — must be Assistant, not User.
+        let last_text = lines.iter().rev().find_map(|l| match l {
+            ChatLine::Text { role, text } => Some((role, text)),
+            _ => None,
+        }).expect("must have a text line");
+        assert_eq!(last_text.0, &ChatRole::Assistant);
+        assert_eq!(last_text.1, "hello");
+    }
+
+    /// `end_stream` pushes a Spacer and sets streaming=false.
+    #[test]
+    fn end_stream_appends_spacer() {
+        let fs = Fullscreen::new();
+        fs.stream_token("hello");
+        fs.set_streaming(true);
+        fs.end_stream();
+        let st = fs.state.lock();
+        assert!(!st.active().streaming);
+        assert!(matches!(st.active().chat_lines.last(), Some(ChatLine::Spacer)));
+    }
+
+    // ── new_session ────────────────────────────────────────────────────────
+
+    #[test]
+    fn new_session_switches_active() {
+        let fs = Fullscreen::new();
+        let before = fs.state.lock().sessions.len();
+        fs.new_session("Second");
+        let st = fs.state.lock();
+        assert_eq!(st.sessions.len(), before + 1);
+        assert_eq!(st.active_session, st.sessions.len() - 1);
+        assert_eq!(st.sessions.last().unwrap().title, "Second");
+    }
+
+    // ── State setters ──────────────────────────────────────────────────────
+
+    #[test]
+    fn set_status_records_text_and_timestamp() {
+        let fs = Fullscreen::new();
+        fs.set_status("doing thing");
+        let st = fs.state.lock();
+        assert_eq!(st.status, "doing thing");
+        assert!(st.status_set_at.is_some());
+    }
+
+    #[test]
+    fn set_model_records_name() {
+        let fs = Fullscreen::new();
+        fs.set_model("qwen-3-coder");
+        assert_eq!(fs.state.lock().model, "qwen-3-coder");
+    }
+
+    #[test]
+    fn set_task_type_records_value() {
+        let fs = Fullscreen::new();
+        fs.set_task_type("coding");
+        assert_eq!(fs.state.lock().task_type, "coding");
+    }
+
+    #[test]
+    fn set_latency_records_ms() {
+        let fs = Fullscreen::new();
+        fs.set_latency(150);
+        assert_eq!(fs.state.lock().latency_ms, 150);
+    }
+
+    // ── filtered_commands ──────────────────────────────────────────────────
+
+    /// Empty filter returns all commands.
+    #[test]
+    fn filtered_commands_empty_returns_all() {
+        let m = filtered_commands("");
+        assert!(m.len() >= 10, "must return many commands; got {}", m.len());
+    }
+
+    /// Filter matches commands or aliases.
+    #[test]
+    fn filtered_commands_matches_alias() {
+        // /quit has alias /q
+        let m = filtered_commands("/q");
+        assert!(m.iter().any(|c| c.cmd == "/quit"),
+            "filter '/q' must match /quit via alias or prefix");
+    }
+
+    /// Filter that matches nothing returns empty.
+    #[test]
+    fn filtered_commands_no_match_is_empty() {
+        let m = filtered_commands("xyzabc-no-such-command");
+        assert!(m.is_empty());
+    }
+
+    // ── Char-boundary helpers ──────────────────────────────────────────────
+
+    #[test]
+    fn prev_char_boundary_multibyte() {
+        // "a日b" — bytes: 0='a' 1='日' 4='b' 5=end
+        let s = "a日b";
+        assert_eq!(prev_char_boundary(s, 5), 4);
+        assert_eq!(prev_char_boundary(s, 4), 1);
+        assert_eq!(prev_char_boundary(s, 1), 0);
+        assert_eq!(prev_char_boundary(s, 0), 0, "at start, must not go negative");
+    }
+
+    #[test]
+    fn next_char_boundary_at_end_is_clamped() {
+        let s = "abc";
+        assert_eq!(next_char_boundary(s, 3), 3, "at end, must not exceed len");
+    }
+
+    #[test]
+    fn insert_str_at_appends_correctly() {
+        let mut s = String::from("hello");
+        insert_str_at(&mut s, 5, " world");
+        assert_eq!(s, "hello world");
+    }
+
+    #[test]
+    fn insert_str_at_middle_position() {
+        let mut s = String::from("hello world");
+        insert_str_at(&mut s, 6, "tiny ");
+        assert_eq!(s, "hello tiny world");
+    }
+
+    #[test]
+    fn remove_next_char_drops_one_char() {
+        let mut s = String::from("abc");
+        remove_next_char(&mut s, 1);
+        assert_eq!(s, "ac");
+    }
+
+    #[test]
+    fn remove_next_char_multibyte() {
+        let mut s = String::from("a日b");
+        remove_next_char(&mut s, 1); // remove '日'
+        assert_eq!(s, "ab");
+    }
+
+    #[test]
+    fn cursor_byte_to_char_idx_mapping() {
+        let s = "a日b";
+        // Byte 0 → char 0
+        assert_eq!(cursor_byte_to_char_idx(s, 0), 0);
+        // Byte 1 (start of '日') → char 1
+        assert_eq!(cursor_byte_to_char_idx(s, 1), 1);
+        // Byte 4 (start of 'b', '日' is 3 bytes) → char 2
+        assert_eq!(cursor_byte_to_char_idx(s, 4), 2);
+    }
 }

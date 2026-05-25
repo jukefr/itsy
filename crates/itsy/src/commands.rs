@@ -1289,4 +1289,230 @@ mod tests {
         let CommandResult::Print(text) = r else { panic!(); };
         assert!(!text.is_empty());
     }
+
+    // ── /compact ──────────────────────────────────────────────────────────
+
+    /// `/compact` is a no-op on short histories.
+    #[tokio::test]
+    async fn compact_noop_on_short_history() {
+        let (ctx, _d) = min_ctx();
+        for i in 0..5 {
+            ctx.history.lock().push(serde_json::json!({"role":"user","content":format!("msg{i}")}));
+        }
+        let r = handle_command("/compact", &ctx).await.unwrap();
+        let CommandResult::Print(text) = r else { panic!(); };
+        assert!(text.contains("nothing to compact") || text.contains("5"));
+        // History unchanged.
+        assert_eq!(ctx.history.lock().len(), 5);
+    }
+
+    /// `/compact` trims to last 6 when history exceeds threshold.
+    #[tokio::test]
+    async fn compact_trims_long_history() {
+        let (ctx, _d) = min_ctx();
+        for i in 0..20 {
+            ctx.history.lock().push(serde_json::json!({"role":"user","content":format!("msg{i}")}));
+        }
+        let r = handle_command("/compact", &ctx).await.unwrap();
+        let CommandResult::Print(text) = r else { panic!(); };
+        assert!(text.contains("Removed"));
+        assert_eq!(ctx.history.lock().len(), 6, "must keep exactly the last 6");
+        // The kept ones should be the LAST 6 (msg14..msg19).
+        let kept = ctx.history.lock();
+        let last_content = kept.last().unwrap()["content"].as_str().unwrap().to_string();
+        assert_eq!(last_content, "msg19");
+    }
+
+    // ── /profile ───────────────────────────────────────────────────────────
+
+    /// `/profile` shows the model + context window.
+    #[tokio::test]
+    async fn profile_shows_model_info() {
+        let (ctx, _d) = min_ctx();
+        let r = handle_command("/profile", &ctx).await.unwrap();
+        let CommandResult::Print(text) = r else { panic!(); };
+        assert!(text.contains("Model Profile") || text.contains("Model:"));
+        assert!(text.contains("test-model"));
+        assert!(text.contains("Context:") || text.contains("tokens"));
+    }
+
+    // ── /trace ─────────────────────────────────────────────────────────────
+
+    /// `/trace list` on empty trace recorder shows the no-trace message.
+    #[tokio::test]
+    async fn trace_list_empty_is_helpful() {
+        let (ctx, _d) = min_ctx();
+        let r = handle_command("/trace list", &ctx).await.unwrap();
+        let CommandResult::Print(text) = r else { panic!(); };
+        // Either no traces yet, or some are listed — both OK; just no panic + non-empty.
+        assert!(!text.is_empty());
+    }
+
+    /// `/trace replay` without an id prompts for usage.
+    #[tokio::test]
+    async fn trace_replay_without_id_shows_usage() {
+        let (ctx, _d) = min_ctx();
+        let r = handle_command("/trace replay", &ctx).await.unwrap();
+        let CommandResult::Print(text) = r else { panic!(); };
+        assert!(text.contains("Usage") || text.contains("<id>"));
+    }
+
+    // ── /memory ────────────────────────────────────────────────────────────
+
+    /// `/memory stats` returns the current state.
+    #[tokio::test]
+    async fn memory_stats_returns_state() {
+        let (ctx, _d) = min_ctx();
+        let r = handle_command("/memory stats", &ctx).await.unwrap();
+        let CommandResult::Print(text) = r else { panic!(); };
+        assert!(!text.is_empty());
+    }
+
+    /// `/memory remember` requires arguments.
+    #[tokio::test]
+    async fn memory_remember_requires_args() {
+        let (ctx, _d) = min_ctx();
+        let r = handle_command("/memory remember", &ctx).await.unwrap();
+        let CommandResult::Print(text) = r else { panic!(); };
+        // Must give the user some kind of usage hint or accept-and-fail; non-empty.
+        assert!(!text.is_empty());
+    }
+
+    /// `/memory remember decision <title> <content>` adds an entry.
+    #[tokio::test]
+    async fn memory_remember_adds_entry() {
+        let (ctx, _d) = min_ctx();
+        let r = handle_command("/memory remember decision rust_port we_chose_rust",
+            &ctx).await.unwrap();
+        let CommandResult::Print(text) = r else { panic!(); };
+        assert!(text.contains("✓") || text.to_lowercase().contains("remembered")
+                || text.to_lowercase().contains("saved"),
+            "expected success-ish text; got {text:?}");
+    }
+
+    // ── /skill ─────────────────────────────────────────────────────────────
+
+    /// `/skill list` works even with no skills loaded.
+    #[tokio::test]
+    async fn skill_list_works_empty() {
+        let (ctx, _d) = min_ctx();
+        // skills field is None in min_ctx; the handler should still print something.
+        let r = handle_command("/skill list", &ctx).await.unwrap();
+        let CommandResult::Print(text) = r else { panic!(); };
+        assert!(!text.is_empty());
+    }
+
+    /// `/skills` alias produces the same result as `/skill`.
+    #[tokio::test]
+    async fn skills_alias_works() {
+        let (ctx, _d) = min_ctx();
+        let r = handle_command("/skills", &ctx).await.unwrap();
+        assert!(matches!(r, CommandResult::Print(_)));
+    }
+
+    // ── /plugin ────────────────────────────────────────────────────────────
+
+    /// `/plugin list` works with no plugins loaded.
+    #[tokio::test]
+    async fn plugin_list_works_empty() {
+        let (ctx, _d) = min_ctx();
+        let r = handle_command("/plugin list", &ctx).await.unwrap();
+        let CommandResult::Print(text) = r else { panic!(); };
+        assert!(!text.is_empty());
+    }
+
+    /// `/plugins` alias dispatches to the same handler.
+    #[tokio::test]
+    async fn plugins_alias_works() {
+        let (ctx, _d) = min_ctx();
+        let r = handle_command("/plugins", &ctx).await.unwrap();
+        assert!(matches!(r, CommandResult::Print(_)));
+    }
+
+    // ── /auto-approve ──────────────────────────────────────────────────────
+
+    /// `/auto-approve on` and `/auto-approve off` accept toggles.
+    #[tokio::test]
+    async fn auto_approve_toggle_responds() {
+        let (ctx, _d) = min_ctx();
+        for cmd in ["/auto-approve on", "/auto-approve off", "/auto-approve"] {
+            let r = handle_command(cmd, &ctx).await.unwrap();
+            assert!(matches!(r, CommandResult::Print(_)),
+                "{cmd} must respond, not Quit");
+        }
+    }
+
+    // ── /tokens ────────────────────────────────────────────────────────────
+
+    /// `/tokens` reports token state even when zero.
+    #[tokio::test]
+    async fn tokens_reports_zero_state() {
+        let (ctx, _d) = min_ctx();
+        let r = handle_command("/tokens", &ctx).await.unwrap();
+        let CommandResult::Print(text) = r else { panic!(); };
+        // Mentions tokens/calls/cost in some form.
+        assert!(text.contains("token") || text.contains("call") || text.contains("cost")
+                || text.contains("prompt"),
+            "must report token state; got {text:?}");
+    }
+
+    // ── /sessions ──────────────────────────────────────────────────────────
+
+    /// `/sessions list` with no session store still produces output (no panic).
+    #[tokio::test]
+    async fn sessions_list_handles_no_store() {
+        let (ctx, _d) = min_ctx();
+        // ctx.sessions is None.
+        let r = handle_command("/sessions list", &ctx).await.unwrap();
+        assert!(matches!(r, CommandResult::Print(_)));
+    }
+
+    // ── /session ───────────────────────────────────────────────────────────
+
+    /// `/session list` works without a MultiSession (ctx.multi = None).
+    #[tokio::test]
+    async fn session_list_without_multi_responds() {
+        let (ctx, _d) = min_ctx();
+        let r = handle_command("/session list", &ctx).await.unwrap();
+        assert!(matches!(r, CommandResult::Print(_)));
+    }
+
+    /// `/multi` is an alias for `/session`.
+    #[tokio::test]
+    async fn multi_alias_works() {
+        let (ctx, _d) = min_ctx();
+        let r = handle_command("/multi list", &ctx).await.unwrap();
+        assert!(matches!(r, CommandResult::Print(_)));
+    }
+
+    // ── /lsp ───────────────────────────────────────────────────────────────
+
+    /// `/lsp status` works without an LSP client (ctx.lsp = None).
+    #[tokio::test]
+    async fn lsp_status_without_client_responds() {
+        let (ctx, _d) = min_ctx();
+        let r = handle_command("/lsp status", &ctx).await.unwrap();
+        assert!(matches!(r, CommandResult::Print(_)));
+    }
+
+    // ── /files ─────────────────────────────────────────────────────────────
+
+    /// `/files` produces a non-empty listing.
+    #[tokio::test]
+    async fn files_lists_directory() {
+        let (ctx, dir) = min_ctx();
+        std::fs::write(dir.path().join("a.txt"), "hi").unwrap();
+        std::fs::write(dir.path().join("b.rs"), "fn main(){}").unwrap();
+        let r = handle_command("/files", &ctx).await.unwrap();
+        let CommandResult::Print(text) = r else { panic!(); };
+        assert!(!text.is_empty());
+    }
+
+    /// `/diff` works in a non-git directory (just no diff to show).
+    #[tokio::test]
+    async fn diff_in_non_git_dir_does_not_panic() {
+        let (ctx, _d) = min_ctx();
+        let r = handle_command("/diff", &ctx).await.unwrap();
+        assert!(matches!(r, CommandResult::Print(_)));
+    }
 }

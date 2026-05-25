@@ -322,6 +322,104 @@ mod tests {
         assert_eq!(v["score"], "66.7%");
     }
 
+    /// `run_classify` returns deterministic counts based on the regex classifier.
+    #[test]
+    fn run_classify_returns_deterministic_results() {
+        use crate::config::{
+            ContextConfig, GitConfig, ModelConfig, ToolsConfig, TuiConfig,
+        };
+        let cfg = Config {
+            model: ModelConfig { provider: "x".into(), name: "y".into(), base_url: "http://localhost".into(), timeout: 60, api_key: None },
+            context: ContextConfig { max_budget_pct: 70, detected_window: 32_768, working_memory_tokens: 8192, summary_threshold: 8000 },
+            tools: ToolsConfig { bash_timeout: 30, tool_routing: "direct".into(), web_browse: false, shell_persist: true, shell_contain: false, rtk: true },
+            tui: TuiConfig { show_token_usage: false, auto_approve: false, theme: "dark".into(), classic: false },
+            git: GitConfig { auto_commit: false },
+            features: Default::default(), models: None, limits: Default::default(),
+            security: Default::default(), diff: Default::default(), filetree: Default::default(),
+            snapshots: Default::default(), code_graph: Default::default(),
+            tests: Default::default(), traces: Default::default(),
+            dedup: Default::default(), evidence: Default::default(),
+            plugins: Default::default(), diag: Default::default(),
+            second_opinion: Default::default(),
+        };
+        let mut r = EvalRunner::new(&cfg);
+        let result = r.run_classify();
+        assert!(result.total > 0);
+        assert_eq!(result.total, result.passed + result.failed,
+            "total must equal passed + failed");
+        assert!(result.score.contains('%'));
+        // Results stored.
+        assert_eq!(r.results.len(), 1);
+    }
+
+    /// `run_tool_selection` calls the chat_fn for each test case.
+    #[tokio::test]
+    async fn run_tool_selection_invokes_chat_fn() {
+        use crate::config::{
+            ContextConfig, GitConfig, ModelConfig, ToolsConfig, TuiConfig,
+        };
+        let cfg = Config {
+            model: ModelConfig { provider: "x".into(), name: "y".into(), base_url: "http://localhost".into(), timeout: 60, api_key: None },
+            context: ContextConfig { max_budget_pct: 70, detected_window: 32_768, working_memory_tokens: 8192, summary_threshold: 8000 },
+            tools: ToolsConfig { bash_timeout: 30, tool_routing: "direct".into(), web_browse: false, shell_persist: true, shell_contain: false, rtk: true },
+            tui: TuiConfig { show_token_usage: false, auto_approve: false, theme: "dark".into(), classic: false },
+            git: GitConfig { auto_commit: false },
+            features: Default::default(), models: None, limits: Default::default(),
+            security: Default::default(), diff: Default::default(), filetree: Default::default(),
+            snapshots: Default::default(), code_graph: Default::default(),
+            tests: Default::default(), traces: Default::default(),
+            dedup: Default::default(), evidence: Default::default(),
+            plugins: Default::default(), diag: Default::default(),
+            second_opinion: Default::default(),
+        };
+        let mut r = EvalRunner::new(&cfg);
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let c2 = counter.clone();
+        // Always return `bash` — all cases will either pass (when bash IS expected)
+        // or fail. The point is the chat_fn must get invoked N times.
+        let result = r.run_tool_selection(|_cfg, _msg| {
+            let c = c2.clone();
+            async move {
+                c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Some("bash".to_string())
+            }
+        }).await;
+        assert!(result.total > 0);
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), result.total as u32,
+            "chat_fn must be invoked once per test case");
+    }
+
+    /// `run_response_quality` evaluates length and contains checks.
+    #[tokio::test]
+    async fn run_response_quality_evaluates_checks() {
+        use crate::config::{
+            ContextConfig, GitConfig, ModelConfig, ToolsConfig, TuiConfig,
+        };
+        let cfg = Config {
+            model: ModelConfig { provider: "x".into(), name: "y".into(), base_url: "http://localhost".into(), timeout: 60, api_key: None },
+            context: ContextConfig { max_budget_pct: 70, detected_window: 32_768, working_memory_tokens: 8192, summary_threshold: 8000 },
+            tools: ToolsConfig { bash_timeout: 30, tool_routing: "direct".into(), web_browse: false, shell_persist: true, shell_contain: false, rtk: true },
+            tui: TuiConfig { show_token_usage: false, auto_approve: false, theme: "dark".into(), classic: false },
+            git: GitConfig { auto_commit: false },
+            features: Default::default(), models: None, limits: Default::default(),
+            security: Default::default(), diff: Default::default(), filetree: Default::default(),
+            snapshots: Default::default(), code_graph: Default::default(),
+            tests: Default::default(), traces: Default::default(),
+            dedup: Default::default(), evidence: Default::default(),
+            plugins: Default::default(), diag: Default::default(),
+            second_opinion: Default::default(),
+        };
+        let mut r = EvalRunner::new(&cfg);
+        // Return a long enough reply that contains "4" — should pass length>50
+        // and "contains:4" checks; "contains:const|let" fails.
+        let result = r.run_response_quality(|_cfg, _msg| async move {
+            Some("4 is the answer. ".repeat(20))
+        }).await;
+        assert!(result.total > 0);
+        // Some cases pass, some fail — but no panic on either check shape.
+        assert_eq!(result.total, result.passed + result.failed);
+    }
+
     /// EvalRunner::new starts with an empty results list.
     #[test]
     fn eval_runner_new_starts_empty() {

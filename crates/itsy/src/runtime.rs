@@ -16,3 +16,4 @@ pub mod tool_guidance;
 pub mod agent_loop;
 pub mod agent_helpers;
 pub mod evaluator;
+pub mod mcp_server;

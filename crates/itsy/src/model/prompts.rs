@@ -330,4 +330,48 @@ mod tests {
         let out = get_test_runner_context(dir.path());
         assert!(out.contains("cargo"), "got: {out:?}");
     }
+
+    // ── build_contract_proposal_prompt ─────────────────────────────────────
+
+    /// Contract proposal prompt includes the cwd path and instructs `propose_contract`.
+    #[test]
+    fn proposal_prompt_includes_cwd_and_instructions() {
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_string_lossy().to_string();
+        let p = build_contract_proposal_prompt(dir.path(), &cwd);
+        assert!(p.contains(&cwd), "cwd must appear in prompt");
+        assert!(p.contains("propose_contract") || p.contains("contract"),
+            "prompt must instruct contract proposal; got: {p}");
+    }
+
+    // ── build_contract_active_prompt ────────────────────────────────────────
+
+    /// Active contract prompt renders the contract body.
+    #[test]
+    fn active_prompt_renders_contract_body() {
+        use crate::session::contract::{Contract, ContractStatus, Assertion, AssertionState};
+        let c = Contract {
+            id: "test-id".into(),
+            title: "Wire login".into(),
+            brief: "Add login endpoint.".into(),
+            created_at: "2024".into(),
+            status: ContractStatus::Active,
+            assertions: vec![
+                Assertion {
+                    id: "A.001".into(),
+                    text: "/login returns 200".into(),
+                    state: AssertionState::Pending,
+                    evidence: None,
+                    last_check: None,
+                },
+            ],
+            features: vec![],
+        };
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_string_lossy().to_string();
+        let p = build_contract_active_prompt(&c, dir.path(), &cwd);
+        assert!(p.contains("Wire login") || p.contains("A.001"),
+            "active prompt must reference contract content; got: {p}");
+        assert!(p.contains(&cwd));
+    }
 }

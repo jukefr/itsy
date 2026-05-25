@@ -304,3 +304,205 @@ pub fn render_diff(path: &str, old_str: &str, new_str: &str, line_num: u32) -> S
     out.push_str(&paint(C_GRAY, "    └─"));
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `paint` wraps text with ANSI codes and resets at end.
+    #[test]
+    fn paint_wraps_with_reset() {
+        let s = paint("\x1b[31m", "hello");
+        assert!(s.contains("hello"));
+        // Must end with ANSI reset.
+        assert!(s.ends_with("\x1b[0m"));
+    }
+
+    /// `bold` applies the bold ANSI sequence.
+    #[test]
+    fn bold_applies_ansi() {
+        let s = bold("text");
+        assert!(s.contains("text"));
+        assert!(s.contains("\x1b["));
+    }
+
+    // ── Markdown rendering ─────────────────────────────────────────────────
+
+    /// Plain text passes through unchanged.
+    #[test]
+    fn markdown_plain_text_passes_through() {
+        let s = render_markdown("hello world");
+        assert!(s.contains("hello world"));
+    }
+
+    /// **bold** wraps in ANSI bold.
+    #[test]
+    fn markdown_double_asterisk_becomes_bold() {
+        let s = render_markdown("this is **bold** text");
+        assert!(s.contains("bold"));
+        assert!(s.contains("\x1b["),
+            "rendered markdown must contain ANSI codes; got {s:?}");
+    }
+
+    /// `inline code` gets styled.
+    #[test]
+    fn markdown_inline_code_styled() {
+        let s = render_markdown("call `foo()` here");
+        // foo() should be present (the backticks may be replaced).
+        assert!(s.contains("foo()"));
+    }
+
+    /// Code blocks produce multi-line output containing the language tag.
+    /// Note: syntax highlighting may insert ANSI codes inside the code, so we
+    /// don't assert on the verbatim function name.
+    #[test]
+    fn render_code_block_includes_lang_hint() {
+        let s = render_code_block("fn main(){}", "rust");
+        assert!(s.contains("rust"), "language tag must appear; got: {s}");
+        assert!(s.lines().count() >= 2, "must produce multiple lines");
+    }
+
+    /// Status line includes the message count.
+    #[test]
+    fn status_includes_history_count() {
+        let s = render_status(42);
+        assert!(s.contains("42"));
+    }
+
+    /// Welcome banner mentions itsy.
+    #[test]
+    fn welcome_mentions_itsy() {
+        let s = render_welcome(true);
+        assert!(s.to_lowercase().contains("itsy"));
+    }
+
+    // ── Tool render helpers ────────────────────────────────────────────────
+
+    #[test]
+    fn tool_start_includes_name() {
+        let s = tool_start("bash");
+        assert!(s.contains("bash"));
+    }
+
+    #[test]
+    fn tool_success_includes_elapsed_ms() {
+        let s = tool_success("done", 1234);
+        assert!(s.contains("done") || s.contains("1234"));
+    }
+
+    #[test]
+    fn tool_error_includes_msg() {
+        let s = tool_error("boom");
+        assert!(s.contains("boom"));
+    }
+
+    #[test]
+    fn tool_edited_includes_path_and_line() {
+        let s = tool_edited("src/foo.rs", 42, 100);
+        assert!(s.contains("foo.rs"));
+        assert!(s.contains("42") || s.contains("L42") || s.contains(":42"));
+    }
+
+    #[test]
+    fn tool_created_includes_path_and_lines() {
+        let s = tool_created("new.txt", 10, 50);
+        assert!(s.contains("new.txt"));
+        assert!(s.contains("10"));
+    }
+
+    #[test]
+    fn tool_updated_includes_path() {
+        let s = tool_updated("changed.rs", 5, 75);
+        assert!(s.contains("changed.rs"));
+    }
+
+    #[test]
+    fn tool_bash_includes_command() {
+        let s = tool_bash("ls -la", 100);
+        assert!(s.contains("ls"));
+    }
+
+    // ── Improvement loop helpers ───────────────────────────────────────────
+
+    #[test]
+    fn improvement_loop_lists_errors_and_attempts() {
+        let errors = vec!["err1".to_string(), "err2".to_string()];
+        let s = improvement_loop(&errors, 2, 5);
+        // Attempt counter must appear.
+        assert!(s.contains("2") || s.contains("attempt"));
+    }
+
+    #[test]
+    fn improvement_fixed_mentions_path() {
+        let s = improvement_fixed("foo.py", 3);
+        assert!(s.contains("foo.py"));
+    }
+
+    #[test]
+    fn improvement_gave_up_mentions_path_and_max() {
+        let s = improvement_gave_up("bad.py", 4);
+        assert!(s.contains("bad.py"));
+        assert!(s.contains("4"));
+    }
+
+    // ── Turn summary ───────────────────────────────────────────────────────
+
+    #[test]
+    fn turn_summary_shows_count() {
+        let s = turn_summary(7);
+        assert!(s.contains("7"));
+    }
+
+    /// Compacted notice shows how many were removed.
+    #[test]
+    fn compacted_notice_shows_count() {
+        let s = compacted(15);
+        assert!(s.contains("15"));
+    }
+
+    // ── Diff rendering ─────────────────────────────────────────────────────
+
+    /// `render_diff` shows old/new with minus/plus markers.
+    #[test]
+    fn diff_shows_old_and_new() {
+        let s = render_diff("a.rs", "old line", "new line", 10);
+        assert!(s.contains("a.rs"));
+        assert!(s.contains("old line"));
+        assert!(s.contains("new line"));
+        // Line number appears.
+        assert!(s.contains("10"));
+    }
+
+    /// Long diffs get truncated with a "more" marker. Note: render_diff bails
+    /// to empty string when BOTH sides exceed 8 lines (asymmetric guard).
+    /// Use 7 lines on each side to trigger the per-side cap (>5 lines).
+    #[test]
+    fn diff_truncates_after_five_lines() {
+        let old: String = (0..7).map(|i| format!("o{i}")).collect::<Vec<_>>().join("\n");
+        let new: String = (0..7).map(|i| format!("n{i}")).collect::<Vec<_>>().join("\n");
+        let s = render_diff("big.rs", &old, &new, 1);
+        // Must include a "more" indicator for both old and new.
+        let more_count = s.matches("more").count();
+        assert!(more_count >= 2,
+            "must show truncation marker for both old + new; got {more_count} markers; output: {s}");
+    }
+
+    /// Both sides exceeding 8 lines is a bail-out condition (empty output).
+    /// Anti-regression: pin this asymmetric behavior so a fix that handles
+    /// huge diffs is intentional.
+    #[test]
+    fn diff_bails_when_both_sides_huge() {
+        let old: String = (0..20).map(|i| format!("o{i}")).collect::<Vec<_>>().join("\n");
+        let new: String = (0..20).map(|i| format!("n{i}")).collect::<Vec<_>>().join("\n");
+        let s = render_diff("massive.rs", &old, &new, 1);
+        assert!(s.is_empty(), "both-sides-huge bail returns empty; got: {s:?}");
+    }
+
+    /// Short diff has NO "more" marker.
+    #[test]
+    fn diff_short_blocks_unchanged() {
+        let s = render_diff("a.rs", "a\nb", "c\nd", 1);
+        assert!(!s.contains("more"),
+            "short diff must not show truncation marker; got: {s}");
+    }
+}
