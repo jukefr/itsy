@@ -144,17 +144,21 @@ Qwen3.6-35B IQ2_XXS, n-concurrent=1. Compared against
 | multi-source-data-merger | 100% | **100%** |
 | git-leak-recovery | 100% | **100%** |
 | pypi-server | 100% | **100%** |
-| cobol-modernization | 80% | **100%** |
 | kv-store-grpc | 40% | **100%** |
-| prove-plus-comm | 60% | 67% |
+| prove-plus-comm | 60% | **100%** |
+| cobol-modernization | 80% | 67% |
 | regex-log | 0% | **67%** |
+| overfull-hbox | 0% | **33%** |
 | break-filter-js-from-html | 0% | 0% |
 | filter-js-from-html | 0% | 0% |
-| overfull-hbox | 0% | 0% |
-| **Overall** | **50.9%** | **65.5%** |
+| **Overall** | **50.9%** | **69.7%** |
 
-The three tasks both agents score 0% on (break-filter, filter-js, overfull-hbox) are
-model-capability failures at IQ2 quant — neither agent solves them regardless of framework.
+Run pinned at `.claude/skills/benchmark-driven-development/baselines/scoreboard-3x-20260525-streaming/`
+(3 attempts per task, Qwen3.6-35B IQ2_XXS, Gemma4 26B second-opinion enabled).
+
+The two tasks both agents score 0% on (break-filter-js-from-html and
+filter-js-from-html) are model-capability failures at IQ2 quant — neither
+agent solves them regardless of framework.
 
 ## License
 

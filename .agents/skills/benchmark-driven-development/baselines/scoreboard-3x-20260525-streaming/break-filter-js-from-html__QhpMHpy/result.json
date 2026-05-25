@@ -1,0 +1,111 @@
+{
+    "id": "38c8331e-8404-4774-ab6b-ad81bda63f8e",
+    "task_name": "break-filter-js-from-html",
+    "trial_name": "break-filter-js-from-html__QhpMHpy",
+    "trial_uri": "file:///workspace/itsy/jobs/scoreboard-3x-20260525/break-filter-js-from-html__QhpMHpy",
+    "task_id": {
+        "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+        "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c",
+        "path": "break-filter-js-from-html"
+    },
+    "source": "terminal-bench",
+    "task_checksum": "b33421492e86b07de2a01bc2205f7e7d2fdc36446a84787265d99e5e138fdaaa",
+    "config": {
+        "task": {
+            "path": "break-filter-js-from-html",
+            "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+            "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c",
+            "name": null,
+            "ref": null,
+            "overwrite": false,
+            "download_dir": null,
+            "source": "terminal-bench"
+        },
+        "trial_name": "break-filter-js-from-html__QhpMHpy",
+        "trials_dir": "/workspace/itsy/jobs/scoreboard-3x-20260525",
+        "timeout_multiplier": 1.0,
+        "agent_timeout_multiplier": 2.0,
+        "verifier_timeout_multiplier": null,
+        "agent_setup_timeout_multiplier": null,
+        "environment_build_timeout_multiplier": null,
+        "agent": {
+            "name": null,
+            "import_path": "itsy_agent:ItsyAgent",
+            "model_name": "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+            "skills": [],
+            "override_timeout_sec": null,
+            "override_setup_timeout_sec": null,
+            "max_timeout_sec": null,
+            "kwargs": {},
+            "env": {},
+            "mcp_servers": []
+        },
+        "environment": {
+            "type": "docker",
+            "import_path": null,
+            "force_build": false,
+            "delete": true,
+            "cpu_enforcement_policy": "auto",
+            "memory_enforcement_policy": "auto",
+            "override_cpus": null,
+            "override_memory_mb": null,
+            "override_storage_mb": null,
+            "override_gpus": null,
+            "suppress_override_warnings": false,
+            "mounts": null,
+            "extra_docker_compose": [],
+            "env": {},
+            "kwargs": {}
+        },
+        "verifier": {
+            "override_timeout_sec": null,
+            "max_timeout_sec": null,
+            "env": {},
+            "disable": false
+        },
+        "artifacts": [],
+        "extra_instruction_paths": [],
+        "job_id": "695b95b4-d4d1-40aa-b2c8-601979fccf53"
+    },
+    "agent_info": {
+        "name": "itsy",
+        "version": "0.1.0",
+        "model_info": {
+            "name": "Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+            "provider": "unsloth"
+        }
+    },
+    "agent_result": {
+        "n_input_tokens": null,
+        "n_cache_tokens": null,
+        "n_output_tokens": null,
+        "cost_usd": null,
+        "rollout_details": null,
+        "metadata": {}
+    },
+    "verifier_result": {
+        "rewards": {
+            "reward": 0.0
+        }
+    },
+    "exception_info": null,
+    "started_at": "2026-05-25T02:52:55.133819Z",
+    "finished_at": "2026-05-25T03:23:40.178371Z",
+    "environment_setup": {
+        "started_at": "2026-05-25T02:52:55.139282Z",
+        "finished_at": "2026-05-25T02:53:08.665539Z"
+    },
+    "agent_setup": {
+        "started_at": "2026-05-25T02:53:08.665576Z",
+        "finished_at": "2026-05-25T02:53:12.002018Z"
+    },
+    "agent_execution": {
+        "started_at": "2026-05-25T02:53:12.002088Z",
+        "finished_at": "2026-05-25T03:23:20.194765Z"
+    },
+    "verifier": {
+        "started_at": "2026-05-25T03:23:20.357547Z",
+        "finished_at": "2026-05-25T03:23:29.418329Z"
+    },
+    "step_results": null
+}

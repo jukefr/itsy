@@ -1,0 +1,111 @@
+{
+    "id": "a2b86ff1-12ac-4cfa-8f81-bfd6043548ef",
+    "task_name": "multi-source-data-merger",
+    "trial_name": "multi-source-data-merger__E9Rp8EJ",
+    "trial_uri": "file:///workspace/itsy/jobs/scoreboard-3x-20260525/multi-source-data-merger__E9Rp8EJ",
+    "task_id": {
+        "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+        "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c",
+        "path": "multi-source-data-merger"
+    },
+    "source": "terminal-bench",
+    "task_checksum": "0f86ced6d81948760d828ee03060c28c44eb7244e7ef72442c18dc1c71115280",
+    "config": {
+        "task": {
+            "path": "multi-source-data-merger",
+            "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+            "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c",
+            "name": null,
+            "ref": null,
+            "overwrite": false,
+            "download_dir": null,
+            "source": "terminal-bench"
+        },
+        "trial_name": "multi-source-data-merger__E9Rp8EJ",
+        "trials_dir": "/workspace/itsy/jobs/scoreboard-3x-20260525",
+        "timeout_multiplier": 1.0,
+        "agent_timeout_multiplier": 2.0,
+        "verifier_timeout_multiplier": null,
+        "agent_setup_timeout_multiplier": null,
+        "environment_build_timeout_multiplier": null,
+        "agent": {
+            "name": null,
+            "import_path": "itsy_agent:ItsyAgent",
+            "model_name": "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+            "skills": [],
+            "override_timeout_sec": null,
+            "override_setup_timeout_sec": null,
+            "max_timeout_sec": null,
+            "kwargs": {},
+            "env": {},
+            "mcp_servers": []
+        },
+        "environment": {
+            "type": "docker",
+            "import_path": null,
+            "force_build": false,
+            "delete": true,
+            "cpu_enforcement_policy": "auto",
+            "memory_enforcement_policy": "auto",
+            "override_cpus": null,
+            "override_memory_mb": null,
+            "override_storage_mb": null,
+            "override_gpus": null,
+            "suppress_override_warnings": false,
+            "mounts": null,
+            "extra_docker_compose": [],
+            "env": {},
+            "kwargs": {}
+        },
+        "verifier": {
+            "override_timeout_sec": null,
+            "max_timeout_sec": null,
+            "env": {},
+            "disable": false
+        },
+        "artifacts": [],
+        "extra_instruction_paths": [],
+        "job_id": "695b95b4-d4d1-40aa-b2c8-601979fccf53"
+    },
+    "agent_info": {
+        "name": "itsy",
+        "version": "0.1.0",
+        "model_info": {
+            "name": "Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+            "provider": "unsloth"
+        }
+    },
+    "agent_result": {
+        "n_input_tokens": null,
+        "n_cache_tokens": null,
+        "n_output_tokens": null,
+        "cost_usd": null,
+        "rollout_details": null,
+        "metadata": {}
+    },
+    "verifier_result": {
+        "rewards": {
+            "reward": 1.0
+        }
+    },
+    "exception_info": null,
+    "started_at": "2026-05-25T05:36:27.780148Z",
+    "finished_at": "2026-05-25T05:42:03.059070Z",
+    "environment_setup": {
+        "started_at": "2026-05-25T05:36:27.781839Z",
+        "finished_at": "2026-05-25T05:36:34.482926Z"
+    },
+    "agent_setup": {
+        "started_at": "2026-05-25T05:36:34.482941Z",
+        "finished_at": "2026-05-25T05:36:56.591473Z"
+    },
+    "agent_execution": {
+        "started_at": "2026-05-25T05:36:56.591514Z",
+        "finished_at": "2026-05-25T05:41:47.875100Z"
+    },
+    "verifier": {
+        "started_at": "2026-05-25T05:41:48.035230Z",
+        "finished_at": "2026-05-25T05:41:52.096709Z"
+    },
+    "step_results": null
+}

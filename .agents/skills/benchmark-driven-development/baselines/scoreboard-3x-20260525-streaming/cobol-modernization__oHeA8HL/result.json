@@ -1,0 +1,111 @@
+{
+    "id": "16b37475-8cf1-49dc-9c0b-4d117b9d0657",
+    "task_name": "cobol-modernization",
+    "trial_name": "cobol-modernization__oHeA8HL",
+    "trial_uri": "file:///workspace/itsy/jobs/scoreboard-3x-20260525/cobol-modernization__oHeA8HL",
+    "task_id": {
+        "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+        "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c",
+        "path": "cobol-modernization"
+    },
+    "source": "terminal-bench",
+    "task_checksum": "f8220a33bf193106989df1a28e4806985b12e5f93dcf07efb86acd8dbbc44f6a",
+    "config": {
+        "task": {
+            "path": "cobol-modernization",
+            "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+            "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c",
+            "name": null,
+            "ref": null,
+            "overwrite": false,
+            "download_dir": null,
+            "source": "terminal-bench"
+        },
+        "trial_name": "cobol-modernization__oHeA8HL",
+        "trials_dir": "/workspace/itsy/jobs/scoreboard-3x-20260525",
+        "timeout_multiplier": 1.0,
+        "agent_timeout_multiplier": 2.0,
+        "verifier_timeout_multiplier": null,
+        "agent_setup_timeout_multiplier": null,
+        "environment_build_timeout_multiplier": null,
+        "agent": {
+            "name": null,
+            "import_path": "itsy_agent:ItsyAgent",
+            "model_name": "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+            "skills": [],
+            "override_timeout_sec": null,
+            "override_setup_timeout_sec": null,
+            "max_timeout_sec": null,
+            "kwargs": {},
+            "env": {},
+            "mcp_servers": []
+        },
+        "environment": {
+            "type": "docker",
+            "import_path": null,
+            "force_build": false,
+            "delete": true,
+            "cpu_enforcement_policy": "auto",
+            "memory_enforcement_policy": "auto",
+            "override_cpus": null,
+            "override_memory_mb": null,
+            "override_storage_mb": null,
+            "override_gpus": null,
+            "suppress_override_warnings": false,
+            "mounts": null,
+            "extra_docker_compose": [],
+            "env": {},
+            "kwargs": {}
+        },
+        "verifier": {
+            "override_timeout_sec": null,
+            "max_timeout_sec": null,
+            "env": {},
+            "disable": false
+        },
+        "artifacts": [],
+        "extra_instruction_paths": [],
+        "job_id": "695b95b4-d4d1-40aa-b2c8-601979fccf53"
+    },
+    "agent_info": {
+        "name": "itsy",
+        "version": "0.1.0",
+        "model_info": {
+            "name": "Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+            "provider": "unsloth"
+        }
+    },
+    "agent_result": {
+        "n_input_tokens": null,
+        "n_cache_tokens": null,
+        "n_output_tokens": null,
+        "cost_usd": null,
+        "rollout_details": null,
+        "metadata": {}
+    },
+    "verifier_result": {
+        "rewards": {
+            "reward": 1.0
+        }
+    },
+    "exception_info": null,
+    "started_at": "2026-05-25T07:58:30.707482Z",
+    "finished_at": "2026-05-25T08:13:13.613619Z",
+    "environment_setup": {
+        "started_at": "2026-05-25T07:58:30.708309Z",
+        "finished_at": "2026-05-25T07:58:36.650678Z"
+    },
+    "agent_setup": {
+        "started_at": "2026-05-25T07:58:36.650694Z",
+        "finished_at": "2026-05-25T07:58:42.201033Z"
+    },
+    "agent_execution": {
+        "started_at": "2026-05-25T07:58:42.201077Z",
+        "finished_at": "2026-05-25T08:13:00.195279Z"
+    },
+    "verifier": {
+        "started_at": "2026-05-25T08:13:00.356045Z",
+        "finished_at": "2026-05-25T08:13:02.943186Z"
+    },
+    "step_results": null
+}

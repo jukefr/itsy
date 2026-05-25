@@ -1,0 +1,107 @@
+  Connected: http://10.0.2.2:8000/v1
+  Model: unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS
+
+[1m[36m  ⚡ itsy[0m[90m v0.1.0[0m
+
+  Model:    unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS
+  Endpoint: [90mhttp://10.0.2.2:8000/v1[0m
+  Graph:    [32m✓ indexed[0m
+  Dir:      [90m/app[0m
+
+[90m  Type a message to chat. /help for commands. /quit to exit.[0m
+
+  [90m[tokens] completion=197 thinking~176 (706chars)[0m
+  [36m⚙[0m [36mselect_category[0m 
+  [32m✓[0m Category: plan. Proceed with your tool call. [90m0ms[0m
+  [90m[tokens] completion=229 thinking~16 (65chars)[0m
+  [36m⚙[0m [36mpropose_contract[0m 
+  [32m✓[0m Contract `recover-secret-from-rewritten-gi-20260525-045743` created with 3 asser… [90m1ms[0m
+  [90m[tokens] completion=97 thinking~66 (266chars)[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mcd /app/repo && git log --all --oneline[0m [90m8ms[0m
+  [90m[tokens] completion=73 thinking~32 (130chars)[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mcd /app/repo && git log --all --format="%H %s"[0m [90m4ms[0m
+  [90m[tokens] completion=75 thinking~30 (123chars)[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mcd /app/repo && git fsck --unreachable --no-reflogs 2>&1[0m [90m11ms[0m
+  [90m[tokens] completion=171 thinking~52 (211chars)[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mcd /app/repo && git show 6b4c75caa9a2aa9a630e16764007b0109b1f5c07[0m [90m4ms[0m
+  [90m[tokens] completion=113 thinking~56 (225chars)[0m
+  [36m⚙[0m [36mwrite_file[0m 
+  [32m✓[0m Created [1m/app/secret.txt[0m (2 lines) [90m1ms[0m
+  [90m[tokens] completion=103 thinking~52 (209chars)[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mcd /app/repo && git log --all --oneline && echo "---" && git ls-tree -r HEAD --name-only[0m [90m6ms[0m
+  [90m[tokens] completion=126 thinking~90 (361chars)[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mcd /app/repo && git fsck --unreachable 2>&1[0m [90m7ms[0m
+  [90m[tokens] completion=107 thinking~56 (226chars)[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mcd /app/repo && git reflog expire --expire=now --all && git gc --prune=now 2>&1[0m [90m42ms[0m
+  [90m[tokens] completion=85 thinking~24 (96chars)[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mcd /app/repo && git rev-list --all | xargs git grep "secret\[lost_and_found_in_git\]" 2>&1 || echo "NOT FOUND"[0m [90m7ms[0m
+  [90m[tokens] completion=70 thinking~40 (160chars)[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mcat /app/secret.txt[0m [90m3ms[0m
+  [90m[tokens] completion=47 thinking~19 (79chars)[0m
+  [36m⚙[0m [36mread_file[0m 
+  [32m✓[0m /app/secret.txt (1 lines) [90m0ms[0m
+  [90m[tokens] completion=57 thinking~24 (96chars)[0m
+  [36m⚙[0m [36mbash[0m 
+  [31m✗[0m Exit code 127
+  [90m[tokens] completion=51 thinking~14 (57chars)[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mod -c /app/secret.txt[0m [90m3ms[0m
+  [90m[tokens] completion=79 thinking~33 (132chars)[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mecho 'secret[lost_and_found_in_git]' > /app/secret.txt && cat /app/secret.txt[0m [90m3ms[0m
+  [90m[tokens] completion=160 thinking~108 (432chars)[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mcd /app/repo && git log --all --format="%H %s"[0m [90m4ms[0m
+  [90m[tokens] completion=63 thinking~27 (111chars)[0m
+  [36m⚙[0m [36mbash[0m 
+  [90m$[0m [90mcd /app/repo && git show HEAD:README.md[0m [90m4ms[0m
+  [90m[tokens] completion=225 thinking~86 (346chars)[0m
+  [36m⚙[0m [36mmark_assertion[0m 
+  [32m✓[0m Marked A.001 as passed (1 passed / 0 failed / 2 pending). [90m0ms[0m
+  [90m[tokens] completion=209 thinking~25 (101chars)[0m
+  [36m⚙[0m [36mmark_assertion[0m 
+  [32m✓[0m Marked A.002 as passed (2 passed / 0 failed / 1 pending). [90m0ms[0m
+  [90m[tokens] completion=452 thinking~66 (264chars)[0m
+  [36m⚙[0m [36mmark_assertion[0m 
+  [32m✓[0m Marked A.003 as passed (3 passed / 0 failed / 0 pending). [90m0ms[0m
+  [90m[tokens] completion=41 thinking~14 (57chars)[0m
+  [36m⚙[0m [36mclose_contract[0m 
+  [32m✓[0m Contract `recover-secret-from-rewritten-gi-20260525-045743` closed as completed … [90m0ms[0m
+  [90m[tokens] completion=174 thinking~178 (715chars)[0m
+
+[90m  ─── 22 tool calls this turn ───[0m
+
+  [36m◆ evaluator phase starting (3 assertions)[0m
+  [90m[tokens] completion=189 thinking~117 (468chars)[0m
+  [36m  eval$ cat /app/secret.txt 2>/dev/null || echo "FILE NOT FOUND"[0m
+  [36m  eval$ cd /app/repo && git log --all --oneline[0m
+  [90m[tokens] completion=245 thinking~72 (290chars)[0m
+  [36m  eval$ cd /app/repo && git log --all --source --full-history -p | grep -i 'secret\[' || echo "NO SECRET IN COMMIT HISTORY"[0m
+  [36m  eval$ cd /app/repo && git fsck --unreachable --no-reflogs 2>/dev/null | head -50[0m
+  [36m  eval$ cd /app/repo && git rev-list --all --objects | git cat-file --batch-check 2>/dev/null | grep -i 'secret\[' || echo "NO SECRET IN OBJECTS"[0m
+  [90m[tokens] completion=264 thinking~105 (420chars)[0m
+  [36m  eval$ cd /app/repo && git log --all --source --full-history -p 2>/dev/null | grep 'secret\[' || echo "NO SECRET IN ANY COMMIT"[0m
+  [36m  eval$ cd /app/repo && git reflog --all 2>/dev/null | grep -i secret || echo "NO SECRET IN REFLOG"[0m
+  [36m  eval$ cd /app/repo && git stash list 2>/dev/null; git branch -a 2>/dev/null[0m
+  [90m[tokens] completion=238 thinking~33 (135chars)[0m
+  [36m  eval$ cd /app/repo && git rev-list --all --objects | while read hash rest; do git cat-file -p "$hash" 2>/dev/null; done | grep 'secret\[' || echo "NO SECRET IN ANY TREE/BLOB"[0m
+  [36m  eval$ cd /app/repo && find .git/objects -type f | xargs git cat-file -p 2>/dev/null | grep 'secret\[' || echo "NO SECRET IN LOOSE OBJECTS"[0m
+  [36m  eval$ cd /app/repo && git verify-pack -v .git/objects/pack/*.idx 2>/dev/null | grep -i secret || echo "NO SECRET IN PACK FILES"[0m
+  [90m[tokens] completion=129 thinking~38 (154chars)[0m
+  [36m  eval$ cat /app/secret.txt[0m
+  [36m  eval$ cd /app/repo && git status[0m
+  [36m  eval$ cd /app/repo && ls -la[0m
+  [90m[tokens] completion=107 thinking~29 (118chars)[0m
+  [36m  eval$ cd /app/repo && git log --all --oneline --format="%h %s"[0m
+  [36m  eval$ cd /app/repo && cat README.md[0m
+  [90m[tokens] completion=281 thinking~219 (879chars)[0m
+  [32m✓ evaluator passed — all assertions confirmed[0m

@@ -1,0 +1,1287 @@
+{
+    "schema_version": 1,
+    "created_at": "2026-05-25T02:52:54.181800Z",
+    "harbor": {
+        "version": "0.8.0",
+        "is_editable": false
+    },
+    "invocation": [
+        "/workspace/.cache/uv/builds-v0/.tmpSQrTIR/bin/harbor",
+        "run",
+        "--dataset",
+        "terminal-bench@2.0",
+        "--agent-import-path",
+        "itsy_agent:ItsyAgent",
+        "--model",
+        "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+        "--n-attempts",
+        "3",
+        "--n-concurrent",
+        "1",
+        "--agent-timeout-multiplier",
+        "2",
+        "--jobs-dir",
+        "/workspace/itsy/jobs",
+        "--job-name",
+        "scoreboard-3x-20260525",
+        "-i",
+        "fix-git",
+        "-i",
+        "multi-source-data-merger",
+        "-i",
+        "prove-plus-comm",
+        "-i",
+        "git-leak-recovery",
+        "-i",
+        "cobol-modernization",
+        "-i",
+        "kv-store-grpc",
+        "-i",
+        "regex-log",
+        "-i",
+        "break-filter-js-from-html",
+        "-i",
+        "overfull-hbox",
+        "-i",
+        "filter-js-from-html",
+        "-i",
+        "pypi-server"
+    ],
+    "n_concurrent_trials": 1,
+    "retry": {
+        "max_retries": 0,
+        "exclude_exceptions": [
+            "RewardFileEmptyError",
+            "VerifierTimeoutError",
+            "AgentTimeoutError",
+            "VerifierOutputParseError",
+            "RewardFileNotFoundError"
+        ],
+        "wait_multiplier": 1.0,
+        "min_wait_sec": 1.0,
+        "max_wait_sec": 60.0
+    },
+    "trials": [
+        {
+            "task": {
+                "name": "break-filter-js-from-html",
+                "type": "git",
+                "digest": "sha256:7087019da8f9ff651d8f97a89c34ab80e8c9a552922ad1a3ef737e202d0b9931",
+                "source": "terminal-bench",
+                "path": "break-filter-js-from-html",
+                "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+                "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
+            },
+            "timeout_multiplier": 1.0,
+            "agent_timeout_multiplier": 2.0,
+            "agent": {
+                "import_path": "itsy_agent:ItsyAgent",
+                "model_name": "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+                "skills": [],
+                "kwargs": {},
+                "env": {},
+                "mcp_servers": []
+            },
+            "skills": [],
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "extra_docker_compose": [],
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "prove-plus-comm",
+                "type": "git",
+                "digest": "sha256:62f11257d2c274a0f57cbc3cb17b286f1500dffc326c7aa5280fc2c93edfa085",
+                "source": "terminal-bench",
+                "path": "prove-plus-comm",
+                "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+                "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
+            },
+            "timeout_multiplier": 1.0,
+            "agent_timeout_multiplier": 2.0,
+            "agent": {
+                "import_path": "itsy_agent:ItsyAgent",
+                "model_name": "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+                "skills": [],
+                "kwargs": {},
+                "env": {},
+                "mcp_servers": []
+            },
+            "skills": [],
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "extra_docker_compose": [],
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "pypi-server",
+                "type": "git",
+                "digest": "sha256:0644861427264cd213466f25e4f5be985e53124dff843f42a0ecc1261830f7a6",
+                "source": "terminal-bench",
+                "path": "pypi-server",
+                "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+                "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
+            },
+            "timeout_multiplier": 1.0,
+            "agent_timeout_multiplier": 2.0,
+            "agent": {
+                "import_path": "itsy_agent:ItsyAgent",
+                "model_name": "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+                "skills": [],
+                "kwargs": {},
+                "env": {},
+                "mcp_servers": []
+            },
+            "skills": [],
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "extra_docker_compose": [],
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "multi-source-data-merger",
+                "type": "git",
+                "digest": "sha256:d20c11917eadc61609168d7681f05b70f5e124b3a5606585f807e6e209be3006",
+                "source": "terminal-bench",
+                "path": "multi-source-data-merger",
+                "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+                "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
+            },
+            "timeout_multiplier": 1.0,
+            "agent_timeout_multiplier": 2.0,
+            "agent": {
+                "import_path": "itsy_agent:ItsyAgent",
+                "model_name": "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+                "skills": [],
+                "kwargs": {},
+                "env": {},
+                "mcp_servers": []
+            },
+            "skills": [],
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "extra_docker_compose": [],
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "cobol-modernization",
+                "type": "git",
+                "digest": "sha256:fd425691fce468b95341c29421ff1cf537f710884f66486940e8aa390a808488",
+                "source": "terminal-bench",
+                "path": "cobol-modernization",
+                "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+                "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
+            },
+            "timeout_multiplier": 1.0,
+            "agent_timeout_multiplier": 2.0,
+            "agent": {
+                "import_path": "itsy_agent:ItsyAgent",
+                "model_name": "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+                "skills": [],
+                "kwargs": {},
+                "env": {},
+                "mcp_servers": []
+            },
+            "skills": [],
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "extra_docker_compose": [],
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "overfull-hbox",
+                "type": "git",
+                "digest": "sha256:45bdee2b2f454f45675b81fd53370c258c726720e26821c50ac871fd9ea3e1ee",
+                "source": "terminal-bench",
+                "path": "overfull-hbox",
+                "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+                "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
+            },
+            "timeout_multiplier": 1.0,
+            "agent_timeout_multiplier": 2.0,
+            "agent": {
+                "import_path": "itsy_agent:ItsyAgent",
+                "model_name": "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+                "skills": [],
+                "kwargs": {},
+                "env": {},
+                "mcp_servers": []
+            },
+            "skills": [],
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "extra_docker_compose": [],
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "fix-git",
+                "type": "git",
+                "digest": "sha256:31f6063693d71cdbb49d8ae17848ae54eed7a1953228164efbb3f4100251600d",
+                "source": "terminal-bench",
+                "path": "fix-git",
+                "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+                "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
+            },
+            "timeout_multiplier": 1.0,
+            "agent_timeout_multiplier": 2.0,
+            "agent": {
+                "import_path": "itsy_agent:ItsyAgent",
+                "model_name": "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+                "skills": [],
+                "kwargs": {},
+                "env": {},
+                "mcp_servers": []
+            },
+            "skills": [],
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "extra_docker_compose": [],
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "kv-store-grpc",
+                "type": "git",
+                "digest": "sha256:97b699f1e6c85c5644731cade9888f5fc5a164a7deb7799ab4bcfdb1d2914d49",
+                "source": "terminal-bench",
+                "path": "kv-store-grpc",
+                "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+                "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
+            },
+            "timeout_multiplier": 1.0,
+            "agent_timeout_multiplier": 2.0,
+            "agent": {
+                "import_path": "itsy_agent:ItsyAgent",
+                "model_name": "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+                "skills": [],
+                "kwargs": {},
+                "env": {},
+                "mcp_servers": []
+            },
+            "skills": [],
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "extra_docker_compose": [],
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "regex-log",
+                "type": "git",
+                "digest": "sha256:2415aba0f8bc9521b2a749d24d9ced3438920ed3309ac20d6b8f4cac2d5128e0",
+                "source": "terminal-bench",
+                "path": "regex-log",
+                "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+                "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
+            },
+            "timeout_multiplier": 1.0,
+            "agent_timeout_multiplier": 2.0,
+            "agent": {
+                "import_path": "itsy_agent:ItsyAgent",
+                "model_name": "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+                "skills": [],
+                "kwargs": {},
+                "env": {},
+                "mcp_servers": []
+            },
+            "skills": [],
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "extra_docker_compose": [],
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "filter-js-from-html",
+                "type": "git",
+                "digest": "sha256:c00cee7f6ad360672d1e57420cbbf5411c66ac96f555cf4ff730b01232b00bca",
+                "source": "terminal-bench",
+                "path": "filter-js-from-html",
+                "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+                "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
+            },
+            "timeout_multiplier": 1.0,
+            "agent_timeout_multiplier": 2.0,
+            "agent": {
+                "import_path": "itsy_agent:ItsyAgent",
+                "model_name": "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+                "skills": [],
+                "kwargs": {},
+                "env": {},
+                "mcp_servers": []
+            },
+            "skills": [],
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "extra_docker_compose": [],
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "git-leak-recovery",
+                "type": "git",
+                "digest": "sha256:e1fc7491cabf7adefd0cf779078de07b3e73c00eeef17d40ded9c66780b57f52",
+                "source": "terminal-bench",
+                "path": "git-leak-recovery",
+                "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+                "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
+            },
+            "timeout_multiplier": 1.0,
+            "agent_timeout_multiplier": 2.0,
+            "agent": {
+                "import_path": "itsy_agent:ItsyAgent",
+                "model_name": "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+                "skills": [],
+                "kwargs": {},
+                "env": {},
+                "mcp_servers": []
+            },
+            "skills": [],
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "extra_docker_compose": [],
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "break-filter-js-from-html",
+                "type": "git",
+                "digest": "sha256:7087019da8f9ff651d8f97a89c34ab80e8c9a552922ad1a3ef737e202d0b9931",
+                "source": "terminal-bench",
+                "path": "break-filter-js-from-html",
+                "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+                "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
+            },
+            "timeout_multiplier": 1.0,
+            "agent_timeout_multiplier": 2.0,
+            "agent": {
+                "import_path": "itsy_agent:ItsyAgent",
+                "model_name": "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+                "skills": [],
+                "kwargs": {},
+                "env": {},
+                "mcp_servers": []
+            },
+            "skills": [],
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "extra_docker_compose": [],
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "prove-plus-comm",
+                "type": "git",
+                "digest": "sha256:62f11257d2c274a0f57cbc3cb17b286f1500dffc326c7aa5280fc2c93edfa085",
+                "source": "terminal-bench",
+                "path": "prove-plus-comm",
+                "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+                "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
+            },
+            "timeout_multiplier": 1.0,
+            "agent_timeout_multiplier": 2.0,
+            "agent": {
+                "import_path": "itsy_agent:ItsyAgent",
+                "model_name": "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+                "skills": [],
+                "kwargs": {},
+                "env": {},
+                "mcp_servers": []
+            },
+            "skills": [],
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "extra_docker_compose": [],
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "pypi-server",
+                "type": "git",
+                "digest": "sha256:0644861427264cd213466f25e4f5be985e53124dff843f42a0ecc1261830f7a6",
+                "source": "terminal-bench",
+                "path": "pypi-server",
+                "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+                "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
+            },
+            "timeout_multiplier": 1.0,
+            "agent_timeout_multiplier": 2.0,
+            "agent": {
+                "import_path": "itsy_agent:ItsyAgent",
+                "model_name": "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+                "skills": [],
+                "kwargs": {},
+                "env": {},
+                "mcp_servers": []
+            },
+            "skills": [],
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "extra_docker_compose": [],
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "multi-source-data-merger",
+                "type": "git",
+                "digest": "sha256:d20c11917eadc61609168d7681f05b70f5e124b3a5606585f807e6e209be3006",
+                "source": "terminal-bench",
+                "path": "multi-source-data-merger",
+                "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+                "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
+            },
+            "timeout_multiplier": 1.0,
+            "agent_timeout_multiplier": 2.0,
+            "agent": {
+                "import_path": "itsy_agent:ItsyAgent",
+                "model_name": "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+                "skills": [],
+                "kwargs": {},
+                "env": {},
+                "mcp_servers": []
+            },
+            "skills": [],
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "extra_docker_compose": [],
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "cobol-modernization",
+                "type": "git",
+                "digest": "sha256:fd425691fce468b95341c29421ff1cf537f710884f66486940e8aa390a808488",
+                "source": "terminal-bench",
+                "path": "cobol-modernization",
+                "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+                "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
+            },
+            "timeout_multiplier": 1.0,
+            "agent_timeout_multiplier": 2.0,
+            "agent": {
+                "import_path": "itsy_agent:ItsyAgent",
+                "model_name": "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+                "skills": [],
+                "kwargs": {},
+                "env": {},
+                "mcp_servers": []
+            },
+            "skills": [],
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "extra_docker_compose": [],
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "overfull-hbox",
+                "type": "git",
+                "digest": "sha256:45bdee2b2f454f45675b81fd53370c258c726720e26821c50ac871fd9ea3e1ee",
+                "source": "terminal-bench",
+                "path": "overfull-hbox",
+                "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+                "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
+            },
+            "timeout_multiplier": 1.0,
+            "agent_timeout_multiplier": 2.0,
+            "agent": {
+                "import_path": "itsy_agent:ItsyAgent",
+                "model_name": "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+                "skills": [],
+                "kwargs": {},
+                "env": {},
+                "mcp_servers": []
+            },
+            "skills": [],
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "extra_docker_compose": [],
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "fix-git",
+                "type": "git",
+                "digest": "sha256:31f6063693d71cdbb49d8ae17848ae54eed7a1953228164efbb3f4100251600d",
+                "source": "terminal-bench",
+                "path": "fix-git",
+                "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+                "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
+            },
+            "timeout_multiplier": 1.0,
+            "agent_timeout_multiplier": 2.0,
+            "agent": {
+                "import_path": "itsy_agent:ItsyAgent",
+                "model_name": "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+                "skills": [],
+                "kwargs": {},
+                "env": {},
+                "mcp_servers": []
+            },
+            "skills": [],
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "extra_docker_compose": [],
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "kv-store-grpc",
+                "type": "git",
+                "digest": "sha256:97b699f1e6c85c5644731cade9888f5fc5a164a7deb7799ab4bcfdb1d2914d49",
+                "source": "terminal-bench",
+                "path": "kv-store-grpc",
+                "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+                "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
+            },
+            "timeout_multiplier": 1.0,
+            "agent_timeout_multiplier": 2.0,
+            "agent": {
+                "import_path": "itsy_agent:ItsyAgent",
+                "model_name": "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+                "skills": [],
+                "kwargs": {},
+                "env": {},
+                "mcp_servers": []
+            },
+            "skills": [],
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "extra_docker_compose": [],
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "regex-log",
+                "type": "git",
+                "digest": "sha256:2415aba0f8bc9521b2a749d24d9ced3438920ed3309ac20d6b8f4cac2d5128e0",
+                "source": "terminal-bench",
+                "path": "regex-log",
+                "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+                "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
+            },
+            "timeout_multiplier": 1.0,
+            "agent_timeout_multiplier": 2.0,
+            "agent": {
+                "import_path": "itsy_agent:ItsyAgent",
+                "model_name": "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+                "skills": [],
+                "kwargs": {},
+                "env": {},
+                "mcp_servers": []
+            },
+            "skills": [],
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "extra_docker_compose": [],
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "filter-js-from-html",
+                "type": "git",
+                "digest": "sha256:c00cee7f6ad360672d1e57420cbbf5411c66ac96f555cf4ff730b01232b00bca",
+                "source": "terminal-bench",
+                "path": "filter-js-from-html",
+                "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+                "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
+            },
+            "timeout_multiplier": 1.0,
+            "agent_timeout_multiplier": 2.0,
+            "agent": {
+                "import_path": "itsy_agent:ItsyAgent",
+                "model_name": "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+                "skills": [],
+                "kwargs": {},
+                "env": {},
+                "mcp_servers": []
+            },
+            "skills": [],
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "extra_docker_compose": [],
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "git-leak-recovery",
+                "type": "git",
+                "digest": "sha256:e1fc7491cabf7adefd0cf779078de07b3e73c00eeef17d40ded9c66780b57f52",
+                "source": "terminal-bench",
+                "path": "git-leak-recovery",
+                "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+                "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
+            },
+            "timeout_multiplier": 1.0,
+            "agent_timeout_multiplier": 2.0,
+            "agent": {
+                "import_path": "itsy_agent:ItsyAgent",
+                "model_name": "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+                "skills": [],
+                "kwargs": {},
+                "env": {},
+                "mcp_servers": []
+            },
+            "skills": [],
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "extra_docker_compose": [],
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "break-filter-js-from-html",
+                "type": "git",
+                "digest": "sha256:7087019da8f9ff651d8f97a89c34ab80e8c9a552922ad1a3ef737e202d0b9931",
+                "source": "terminal-bench",
+                "path": "break-filter-js-from-html",
+                "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+                "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
+            },
+            "timeout_multiplier": 1.0,
+            "agent_timeout_multiplier": 2.0,
+            "agent": {
+                "import_path": "itsy_agent:ItsyAgent",
+                "model_name": "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+                "skills": [],
+                "kwargs": {},
+                "env": {},
+                "mcp_servers": []
+            },
+            "skills": [],
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "extra_docker_compose": [],
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "prove-plus-comm",
+                "type": "git",
+                "digest": "sha256:62f11257d2c274a0f57cbc3cb17b286f1500dffc326c7aa5280fc2c93edfa085",
+                "source": "terminal-bench",
+                "path": "prove-plus-comm",
+                "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+                "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
+            },
+            "timeout_multiplier": 1.0,
+            "agent_timeout_multiplier": 2.0,
+            "agent": {
+                "import_path": "itsy_agent:ItsyAgent",
+                "model_name": "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+                "skills": [],
+                "kwargs": {},
+                "env": {},
+                "mcp_servers": []
+            },
+            "skills": [],
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "extra_docker_compose": [],
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "pypi-server",
+                "type": "git",
+                "digest": "sha256:0644861427264cd213466f25e4f5be985e53124dff843f42a0ecc1261830f7a6",
+                "source": "terminal-bench",
+                "path": "pypi-server",
+                "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+                "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
+            },
+            "timeout_multiplier": 1.0,
+            "agent_timeout_multiplier": 2.0,
+            "agent": {
+                "import_path": "itsy_agent:ItsyAgent",
+                "model_name": "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+                "skills": [],
+                "kwargs": {},
+                "env": {},
+                "mcp_servers": []
+            },
+            "skills": [],
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "extra_docker_compose": [],
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "multi-source-data-merger",
+                "type": "git",
+                "digest": "sha256:d20c11917eadc61609168d7681f05b70f5e124b3a5606585f807e6e209be3006",
+                "source": "terminal-bench",
+                "path": "multi-source-data-merger",
+                "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+                "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
+            },
+            "timeout_multiplier": 1.0,
+            "agent_timeout_multiplier": 2.0,
+            "agent": {
+                "import_path": "itsy_agent:ItsyAgent",
+                "model_name": "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+                "skills": [],
+                "kwargs": {},
+                "env": {},
+                "mcp_servers": []
+            },
+            "skills": [],
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "extra_docker_compose": [],
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "cobol-modernization",
+                "type": "git",
+                "digest": "sha256:fd425691fce468b95341c29421ff1cf537f710884f66486940e8aa390a808488",
+                "source": "terminal-bench",
+                "path": "cobol-modernization",
+                "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+                "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
+            },
+            "timeout_multiplier": 1.0,
+            "agent_timeout_multiplier": 2.0,
+            "agent": {
+                "import_path": "itsy_agent:ItsyAgent",
+                "model_name": "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+                "skills": [],
+                "kwargs": {},
+                "env": {},
+                "mcp_servers": []
+            },
+            "skills": [],
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "extra_docker_compose": [],
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "overfull-hbox",
+                "type": "git",
+                "digest": "sha256:45bdee2b2f454f45675b81fd53370c258c726720e26821c50ac871fd9ea3e1ee",
+                "source": "terminal-bench",
+                "path": "overfull-hbox",
+                "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+                "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
+            },
+            "timeout_multiplier": 1.0,
+            "agent_timeout_multiplier": 2.0,
+            "agent": {
+                "import_path": "itsy_agent:ItsyAgent",
+                "model_name": "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+                "skills": [],
+                "kwargs": {},
+                "env": {},
+                "mcp_servers": []
+            },
+            "skills": [],
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "extra_docker_compose": [],
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "fix-git",
+                "type": "git",
+                "digest": "sha256:31f6063693d71cdbb49d8ae17848ae54eed7a1953228164efbb3f4100251600d",
+                "source": "terminal-bench",
+                "path": "fix-git",
+                "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+                "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
+            },
+            "timeout_multiplier": 1.0,
+            "agent_timeout_multiplier": 2.0,
+            "agent": {
+                "import_path": "itsy_agent:ItsyAgent",
+                "model_name": "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+                "skills": [],
+                "kwargs": {},
+                "env": {},
+                "mcp_servers": []
+            },
+            "skills": [],
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "extra_docker_compose": [],
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "kv-store-grpc",
+                "type": "git",
+                "digest": "sha256:97b699f1e6c85c5644731cade9888f5fc5a164a7deb7799ab4bcfdb1d2914d49",
+                "source": "terminal-bench",
+                "path": "kv-store-grpc",
+                "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+                "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
+            },
+            "timeout_multiplier": 1.0,
+            "agent_timeout_multiplier": 2.0,
+            "agent": {
+                "import_path": "itsy_agent:ItsyAgent",
+                "model_name": "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+                "skills": [],
+                "kwargs": {},
+                "env": {},
+                "mcp_servers": []
+            },
+            "skills": [],
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "extra_docker_compose": [],
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "regex-log",
+                "type": "git",
+                "digest": "sha256:2415aba0f8bc9521b2a749d24d9ced3438920ed3309ac20d6b8f4cac2d5128e0",
+                "source": "terminal-bench",
+                "path": "regex-log",
+                "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+                "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
+            },
+            "timeout_multiplier": 1.0,
+            "agent_timeout_multiplier": 2.0,
+            "agent": {
+                "import_path": "itsy_agent:ItsyAgent",
+                "model_name": "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+                "skills": [],
+                "kwargs": {},
+                "env": {},
+                "mcp_servers": []
+            },
+            "skills": [],
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "extra_docker_compose": [],
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "filter-js-from-html",
+                "type": "git",
+                "digest": "sha256:c00cee7f6ad360672d1e57420cbbf5411c66ac96f555cf4ff730b01232b00bca",
+                "source": "terminal-bench",
+                "path": "filter-js-from-html",
+                "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+                "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
+            },
+            "timeout_multiplier": 1.0,
+            "agent_timeout_multiplier": 2.0,
+            "agent": {
+                "import_path": "itsy_agent:ItsyAgent",
+                "model_name": "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+                "skills": [],
+                "kwargs": {},
+                "env": {},
+                "mcp_servers": []
+            },
+            "skills": [],
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "extra_docker_compose": [],
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        },
+        {
+            "task": {
+                "name": "git-leak-recovery",
+                "type": "git",
+                "digest": "sha256:e1fc7491cabf7adefd0cf779078de07b3e73c00eeef17d40ded9c66780b57f52",
+                "source": "terminal-bench",
+                "path": "git-leak-recovery",
+                "git_url": "https://github.com/laude-institute/terminal-bench-2.git",
+                "git_commit_id": "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
+            },
+            "timeout_multiplier": 1.0,
+            "agent_timeout_multiplier": 2.0,
+            "agent": {
+                "import_path": "itsy_agent:ItsyAgent",
+                "model_name": "unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_XXS",
+                "skills": [],
+                "kwargs": {},
+                "env": {},
+                "mcp_servers": []
+            },
+            "skills": [],
+            "environment": {
+                "type": "docker",
+                "force_build": false,
+                "delete": true,
+                "cpu_enforcement_policy": "auto",
+                "memory_enforcement_policy": "auto",
+                "suppress_override_warnings": false,
+                "extra_docker_compose": [],
+                "env": {},
+                "kwargs": {}
+            },
+            "verifier": {
+                "env": {},
+                "disable": false
+            }
+        }
+    ]
+}
