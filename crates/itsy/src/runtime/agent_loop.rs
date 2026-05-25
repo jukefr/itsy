@@ -127,6 +127,13 @@ pub struct TurnState {
     pub per_turn_repeats: HashMap<String, u32>,
     pub per_turn_write_seen: HashSet<String>,
     pub recent_tool_failures: HashMap<String, u32>,
+
+    /// Last few model-response signatures (content + tool-call sequence)
+    /// to detect identical replies. A small IQ-quantised model can settle
+    /// into emitting the exact same response several times in a row —
+    /// the existing no-progress nudge is a soft warning that doesn't
+    /// escape the loop. Three identical responses → hard-stop the turn.
+    pub recent_response_sigs: std::collections::VecDeque<u64>,
 }
 
 impl TurnState {
@@ -149,7 +156,36 @@ impl TurnState {
             per_turn_repeats: HashMap::new(),
             per_turn_write_seen: HashSet::new(),
             recent_tool_failures: HashMap::new(),
+            recent_response_sigs: std::collections::VecDeque::with_capacity(3),
         }
+    }
+
+    /// Record a model response signature and report whether the agent has
+    /// emitted the SAME response (same content + same tool-call sequence)
+    /// three times in a row. The caller is expected to break out of the
+    /// turn loop on `true`.
+    pub fn note_response_and_check_stuck(
+        &mut self,
+        content: &str,
+        tool_calls: &[Value],
+    ) -> bool {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        content.hash(&mut h);
+        for tc in tool_calls {
+            let n = tc.pointer("/function/name").and_then(|v| v.as_str()).unwrap_or("");
+            let a = tc.pointer("/function/arguments").and_then(|v| v.as_str()).unwrap_or("");
+            n.hash(&mut h);
+            a.hash(&mut h);
+        }
+        let sig = h.finish();
+        const STUCK_REPEAT: usize = 3;
+        self.recent_response_sigs.push_back(sig);
+        while self.recent_response_sigs.len() > STUCK_REPEAT {
+            self.recent_response_sigs.pop_front();
+        }
+        self.recent_response_sigs.len() == STUCK_REPEAT
+            && self.recent_response_sigs.iter().all(|s| *s == sig)
     }
 
     /// Check tool call names for validity. Returns `GuardAction::Inject` when
@@ -778,5 +814,53 @@ mod tests {
         assert!(s.edited_files.is_empty());
         assert!(s.per_turn_repeats.is_empty());
         assert!(s.per_turn_write_seen.is_empty());
+        assert!(s.recent_response_sigs.is_empty());
+    }
+
+    // ── stuck-repetition detector ─────────────────────────────────────────
+
+    /// Three identical responses in a row trip the stuck flag. Anti-
+    /// regression for the regex-log-VEmMyGL pattern where the same
+    /// completion repeated six times until wallclock killed it.
+    #[test]
+    fn note_response_flags_stuck_on_three_identical() {
+        let mut s = TurnState::new("hi".into(), "coding", None, 50);
+        let tc = vec![json!({
+            "function": {"name": "read_file", "arguments": "{\"path\":\"a.txt\"}"}
+        })];
+        assert!(!s.note_response_and_check_stuck("same content", &tc));
+        assert!(!s.note_response_and_check_stuck("same content", &tc));
+        assert!(s.note_response_and_check_stuck("same content", &tc),
+            "3rd identical response must trip stuck");
+    }
+
+    /// Different content breaks the streak.
+    #[test]
+    fn note_response_resets_when_content_differs() {
+        let mut s = TurnState::new("hi".into(), "coding", None, 50);
+        let tc: Vec<Value> = vec![];
+        assert!(!s.note_response_and_check_stuck("a", &tc));
+        assert!(!s.note_response_and_check_stuck("a", &tc));
+        // Different content interrupts the streak.
+        assert!(!s.note_response_and_check_stuck("b", &tc));
+        // Now back to "a" — only 1 in the window of 3, so not stuck.
+        assert!(!s.note_response_and_check_stuck("a", &tc));
+        assert!(!s.note_response_and_check_stuck("a", &tc));
+        // Third identical "a" lands → stuck. The window is the last 3, and
+        // all 3 are "a" now.
+        assert!(s.note_response_and_check_stuck("a", &tc));
+    }
+
+    /// Different tool-call args also break identity — same text content
+    /// with a different tool_call argument is NOT stuck.
+    #[test]
+    fn note_response_distinguishes_tool_call_args() {
+        let mut s = TurnState::new("hi".into(), "coding", None, 50);
+        let tc1 = vec![json!({"function":{"name":"read_file","arguments":"{\"path\":\"a\"}"}})];
+        let tc2 = vec![json!({"function":{"name":"read_file","arguments":"{\"path\":\"b\"}"}})];
+        assert!(!s.note_response_and_check_stuck("X", &tc1));
+        assert!(!s.note_response_and_check_stuck("X", &tc2));
+        assert!(!s.note_response_and_check_stuck("X", &tc1),
+            "alternating tool args is NOT stuck");
     }
 }

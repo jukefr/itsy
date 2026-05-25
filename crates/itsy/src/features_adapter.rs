@@ -436,18 +436,26 @@ pub async fn negotiate_assertions(
 ) -> (Vec<(String, String)>, bool) {
     // Skip when no second opinion is configured.
     if config.second_opinion.model.is_none() && config.second_opinion.endpoint.is_none() {
+        eprintln!("[negotiate] skipped: no second_opinion configured");
         return (main_assertions, false);
     }
     let second_model = config.second_opinion.resolved_model(config).to_string();
     let second_url = config.second_opinion.resolved_endpoint(config).to_string();
     let main_model = config.model.name.clone();
     let main_url = config.model.base_url.clone();
+    eprintln!("[negotiate] start: main={main_model} second={second_model} url={second_url}");
 
     // Step 1: second model independently proposes assertions.
     let second_assertions =
         match ask_for_assertions(brief, title, &second_model, &second_url).await {
-            Some(a) if !a.is_empty() => a,
-            _ => return (main_assertions, false),
+            Some(a) if !a.is_empty() => {
+                eprintln!("[negotiate] second model returned {} assertions", a.len());
+                a
+            }
+            _ => {
+                eprintln!("[negotiate] second model returned empty/None — falling back");
+                return (main_assertions, false);
+            }
         };
 
     // Step 2: merge both sets (union; id collisions get a disambiguating suffix).
@@ -505,8 +513,20 @@ Brief: {brief}\n\n\
 Return ONLY a JSON array, no markdown or explanation:\n\
 [{{\"id\":\"A1\",\"text\":\"<specific verifiable statement>\"}},...]"
     );
-    let raw = direct_chat(&prompt, model, base_url, 120).await.ok()?;
-    parse_assertion_array(&raw)
+    let raw = match direct_chat(&prompt, model, base_url, 120).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[negotiate] direct_chat({model}) failed: {e}");
+            return None;
+        }
+    };
+    let parsed = parse_assertion_array(&raw);
+    if parsed.is_none() {
+        eprintln!("[negotiate] direct_chat returned but parse_assertion_array failed. \
+                   Raw response (first 300 chars): {}",
+                  raw.chars().take(300).collect::<String>());
+    }
+    parsed
 }
 
 async fn review_assertions(
@@ -610,7 +630,7 @@ fn parse_assertion_array_from_value(arr: &[Value]) -> Vec<(String, String)> {
         .collect()
 }
 
-async fn direct_chat(
+pub async fn direct_chat(
     prompt: &str,
     model: &str,
     base_url: &str,
@@ -632,11 +652,30 @@ async fn direct_chat(
             headers.insert(AUTHORIZATION, v);
         }
     }
+    // Reasoning-enabled models (Qwen3, Gemma3+, DeepSeek-R1, ...) spend
+    // `max_tokens` on reasoning_content first, then on output. With
+    // max_tokens=1024 the entire budget gets eaten by thinking and the
+    // content field comes back empty — that's the bug we hit when the
+    // assertion-negotiation second-opinion call always returned "".
+    //
+    // Allocate generous headroom: ~2048 for thinking, ~4096 for the
+    // actual JSON response. Match the explicit chat_template_kwargs +
+    // thinking_budget shape the main client uses so llama-server-backed
+    // reasoning models pick it up correctly.
+    let thinking_budget = 2048;
+    let max_tokens = thinking_budget + 4096;
     let body = json!({
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.2,
-        "max_tokens": 1024,
+        "max_tokens": max_tokens,
+        "enable_thinking": true,
+        "thinking_budget": thinking_budget,
+        "chat_template_kwargs": {
+            "enable_thinking": true,
+            "thinking_budget": thinking_budget,
+        },
+        "thinking": {"type": "enabled", "budget_tokens": thinking_budget},
     });
     let url = format!("{base_url}/chat/completions");
     let res = client

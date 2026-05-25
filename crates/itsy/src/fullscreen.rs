@@ -360,12 +360,21 @@ impl Fullscreen {
     // ── Public API mirroring the JS class ────────────────────────────────
 
     pub fn add_chat(&self, role: ChatRole, text: impl Into<String>) {
+        let text = text.into();
+        let role_label = match role {
+            ChatRole::User => "user",
+            ChatRole::Assistant => "assistant",
+            ChatRole::System => "system",
+            ChatRole::Tool => "tool",
+        };
+        crate::session_log::log(&format!("[chat:{role_label}] {text}"));
         let mut st = self.state.lock();
-        st.push_line(ChatLine::Text { role, text: text.into() });
+        st.push_line(ChatLine::Text { role, text });
         st.push_line(ChatLine::Spacer);
     }
 
     pub fn add_tool(&self, name: &str, status: &str, msg: &str) {
+        crate::session_log::log(&format!("[tool] {name} status={status} msg={msg}"));
         let status = match status {
             "ok" => ToolStatus::Ok,
             "err" | "error" => ToolStatus::Err,
@@ -384,6 +393,7 @@ impl Fullscreen {
     /// Falls back to pushing a fresh tool line if no running line is found —
     /// guarantees the result is always visible.
     pub fn finish_tool(&self, name: &str, status: &str, msg: &str) {
+        crate::session_log::log(&format!("[tool-finish] {name} status={status} msg={msg}"));
         let new_status = match status {
             "ok" => ToolStatus::Ok,
             "err" | "error" => ToolStatus::Err,
@@ -482,8 +492,10 @@ impl Fullscreen {
     /// Append a thinking / reasoning block to the chat. Shown dim + italic
     /// when `show_thinking` is on; preserved in state when off (toggle later).
     pub fn add_thinking(&self, text: impl Into<String>) {
+        let text = text.into();
+        crate::session_log::log(&format!("[thinking] {text}"));
         let mut st = self.state.lock();
-        st.push_line(ChatLine::Thinking(text.into()));
+        st.push_line(ChatLine::Thinking(text));
     }
 
     /// Stream-append a thinking token to the trailing `Thinking(_)` line.

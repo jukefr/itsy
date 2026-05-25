@@ -103,8 +103,19 @@ class ItsyAgent(BaseInstalledAgent):
         # construction. Every other knob is a CLI flag.
         env: dict[str, str] = {"ITSY_HOME": "/tmp/itsy-home"}
 
-        evaluator_model = os.environ.get("ITSY_SECOND_OPINION_MODEL", "")
-        evaluator_endpoint = os.environ.get("ITSY_SECOND_OPINION_ENDPOINT", "")
+        # Second-opinion model: defaults match the host's config.toml. The
+        # host config doesn't propagate into the harbor docker container,
+        # so we have to pass these explicitly via CLI flags. Override per
+        # run with ITSY_SECOND_OPINION_MODEL / ITSY_SECOND_OPINION_ENDPOINT
+        # if you want to A/B another evaluator model.
+        evaluator_model = os.environ.get(
+            "ITSY_SECOND_OPINION_MODEL",
+            "unsloth/gemma-4-26B-A4B-it-GGUF:IQ2_M",
+        )
+        evaluator_endpoint = os.environ.get(
+            "ITSY_SECOND_OPINION_ENDPOINT",
+            base_url,
+        )
 
         escaped = shlex.quote(instruction)
         # CLI flags supplant the old ITSY_* env-var bridge. Order matters:
@@ -121,16 +132,20 @@ class ItsyAgent(BaseInstalledAgent):
             "--bash-timeout=120",
             "--request-timeout-ms=600000",
             # Reasoning headroom — IQ2_XXS will exhaust output budget on
-            # thinking unless max_output_tokens > thinking_budget.
+            # thinking unless max_output_tokens > thinking_budget. 1024
+            # works well; 2048 (briefly tried) made the model emit longer
+            # speculative outputs and over-edit on constraint-heavy tasks.
             "--thinking-budget=1024",
             # Safeguards on by default — cheap and catch patch/bash/
             # write_guard pitfalls. Disable clarifier (bench tasks have
             # specific prompts, not vague user input).
             "--set=features.clarifier=false",
-            # Cap total tool calls per bench trial — prevents stuck loops
-            # from exhausting the session. The bash-failure-loop detector
-            # (8 consecutive failures → break) handles spirals earlier.
-            "--max-tool-calls-per-turn=100",
+            # Tool-call ceiling. 100 was too tight for tasks that need
+            # many edit/verify cycles (overfull-hbox legit uses ~50 patches
+            # + ~30 verify runs). The stuck-response detector + bash-failure
+            # spiral detector bound runaway loops independently, so this
+            # cap can match the binary default.
+            "--max-tool-calls-per-turn=250",
         ]
         if evaluator_model:
             flags.append(f"--second-opinion-model={shlex.quote(evaluator_model)}")

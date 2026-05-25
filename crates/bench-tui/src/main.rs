@@ -308,7 +308,7 @@ fn poll_job_dir(app: &mut App) {
                 .and_then(|s| s.trim().parse::<f64>().ok());
             let passed = r.map(|v| v > 0.5).unwrap_or(false);
             (if passed { TrialStatus::Passed } else { TrialStatus::Failed }, r)
-        } else if chats_dir.exists() {
+        } else if trial_has_chats(&chats_dir) {
             (TrialStatus::Running, None)
         } else {
             (TrialStatus::Pending, None)
@@ -346,29 +346,40 @@ fn poll_job_dir(app: &mut App) {
     refresh_log_if_changed(app);
 }
 
-/// Parse contract assertions from the earliest chat file containing propose_contract.
+/// Parse contract assertions from the first chat record whose response
+/// contains a `propose_contract` tool call. Works with both the new
+/// itsy.log format and the legacy chats/*.json format via `read_chat_records`.
 fn parse_contract(chats_dir: &Path) -> Vec<ContractAssertion> {
-    let mut files = chat_files(chats_dir);
-    files.sort();
-    for path in &files {
-        let Ok(content) = std::fs::read_to_string(path) else { continue };
-        let Ok(data) = serde_json::from_str::<serde_json::Value>(&content) else { continue };
-        let Some(messages) = data.pointer("/request/messages").and_then(|m| m.as_array()) else { continue };
-        for msg in messages {
-            if msg.get("role").and_then(|r| r.as_str()) != Some("assistant") { continue }
-            let Some(tool_calls) = msg.get("tool_calls").and_then(|t| t.as_array()) else { continue };
-            for tc in tool_calls {
-                if tc.pointer("/function/name").and_then(|n| n.as_str()) != Some("propose_contract") { continue }
-                let Some(args_str) = tc.pointer("/function/arguments").and_then(|a| a.as_str()) else { continue };
-                let Ok(args) = serde_json::from_str::<serde_json::Value>(args_str) else { continue };
-                let Some(assertions) = args.get("assertions").and_then(|a| a.as_array()) else { continue };
-                return assertions.iter().map(|a| {
-                    ContractAssertion {
-                        _id: a.get("id").and_then(|i| i.as_str()).unwrap_or("?").to_string(),
-                        text: a.get("text").and_then(|t| t.as_str()).unwrap_or("?").to_string(),
-                    }
-                }).collect();
+    for data in read_chat_records(chats_dir) {
+        // New layout: tool_calls live on response message; old layout had
+        // them on a previous turn's request messages. Check both.
+        let response_msg = data.pointer("/response/choices/0/message");
+        let mut tool_calls: Vec<&serde_json::Value> = Vec::new();
+        if let Some(msg) = response_msg {
+            if let Some(tcs) = msg.get("tool_calls").and_then(|t| t.as_array()) {
+                tool_calls.extend(tcs);
             }
+        }
+        // Also walk request.messages for older format compatibility.
+        if let Some(messages) = data.pointer("/request/messages").and_then(|m| m.as_array()) {
+            for msg in messages {
+                if msg.get("role").and_then(|r| r.as_str()) != Some("assistant") { continue }
+                if let Some(tcs) = msg.get("tool_calls").and_then(|t| t.as_array()) {
+                    tool_calls.extend(tcs);
+                }
+            }
+        }
+        for tc in tool_calls {
+            if tc.pointer("/function/name").and_then(|n| n.as_str()) != Some("propose_contract") { continue }
+            let Some(args_str) = tc.pointer("/function/arguments").and_then(|a| a.as_str()) else { continue };
+            let Ok(args) = serde_json::from_str::<serde_json::Value>(args_str) else { continue };
+            let Some(assertions) = args.get("assertions").and_then(|a| a.as_array()) else { continue };
+            return assertions.iter().map(|a| {
+                ContractAssertion {
+                    _id: a.get("id").and_then(|i| i.as_str()).unwrap_or("?").to_string(),
+                    text: a.get("text").and_then(|t| t.as_str()).unwrap_or("?").to_string(),
+                }
+            }).collect();
         }
     }
     Vec::new()
@@ -384,34 +395,88 @@ fn chat_files(chats_dir: &Path) -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
-/// Reload the log for the selected trial only if the chat file count changed.
+/// Read every chat-completion record for a trial. New layout: `[chat] {json}`
+/// lines in `agent/itsy.log`. Old layout (pre-2026-05-25): one JSON file per
+/// call under `agent/chats/`. We try the new path first and fall back so
+/// archived runs still render.
+///
+/// `chats_dir` is the legacy `agent/chats/` path that the rest of the TUI
+/// already tracks. The new log lives at its parent's sibling — `agent/itsy.log`.
+fn read_chat_records(chats_dir: &Path) -> Vec<serde_json::Value> {
+    // Try the new single-log path first.
+    if let Some(agent_dir) = chats_dir.parent() {
+        let log_path = agent_dir.join("itsy.log");
+        if log_path.is_file() {
+            if let Ok(text) = std::fs::read_to_string(&log_path) {
+                let mut out = Vec::new();
+                for line in text.lines() {
+                    // Strip the leading "[YYYY-MM-DD HH:MM:SS.mmm] " timestamp.
+                    let rest = if line.starts_with('[') {
+                        line.find("] ").map(|i| &line[i + 2..]).unwrap_or(line)
+                    } else {
+                        line
+                    };
+                    if let Some(json) = rest.strip_prefix("[chat] ") {
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(json) {
+                            out.push(v);
+                        }
+                    }
+                }
+                if !out.is_empty() {
+                    return out;
+                }
+            }
+        }
+    }
+    // Fall back to the legacy per-call json files.
+    let mut files = chat_files(chats_dir);
+    files.sort();
+    let mut out = Vec::new();
+    for p in files {
+        if let Ok(content) = std::fs::read_to_string(&p) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+                out.push(v);
+            }
+        }
+    }
+    out
+}
+
+/// True if the trial directory has produced at least one chat record —
+/// covers both the new `itsy.log` path and the legacy `chats/` directory.
+fn trial_has_chats(chats_dir: &Path) -> bool {
+    if let Some(agent_dir) = chats_dir.parent() {
+        if agent_dir.join("itsy.log").is_file() {
+            return true;
+        }
+    }
+    chats_dir.exists() && !chat_files(chats_dir).is_empty()
+}
+
+/// Reload the log for the selected trial only if the chat record count changed.
 fn refresh_log_if_changed(app: &mut App) {
     let Some(trial) = app.selected_trial() else { return };
     let chats_dir = trial.chats_dir.clone();
     let trial_name = trial.name.clone();
 
-    let file_count = chat_files(&chats_dir).len();
-    let changed = trial_name != app.last_log_trial || file_count != app.last_log_file_count;
+    let record_count = read_chat_records(&chats_dir).len();
+    let changed = trial_name != app.last_log_trial || record_count != app.last_log_file_count;
 
     if changed {
         let was_at_bottom = app.log_scroll.saturating_add(5) >= app.log_lines.len().max(1);
         app.log_lines = load_rich_log(&chats_dir);
         app.last_log_trial = trial_name;
-        app.last_log_file_count = file_count;
+        app.last_log_file_count = record_count;
         if was_at_bottom {
             app.log_scroll = app.log_lines.len().saturating_sub(1);
         }
     }
 }
 
-/// Build the rich log from the last chat JSON file (full conversation history).
+/// Build the rich log from the last chat record (most recent model exchange).
 fn load_rich_log(chats_dir: &Path) -> Vec<LogLine> {
-    let mut files = chat_files(chats_dir);
-    files.sort();
-    let Some(last) = files.last() else { return Vec::new() };
-
-    let Ok(content) = std::fs::read_to_string(last) else { return Vec::new() };
-    let Ok(data) = serde_json::from_str::<serde_json::Value>(&content) else { return Vec::new() };
+    let records = read_chat_records(chats_dir);
+    let Some(data) = records.last() else { return Vec::new() };
     let Some(messages) = data.pointer("/request/messages").and_then(|m| m.as_array()) else { return Vec::new() };
 
     let mut lines: Vec<LogLine> = Vec::new();

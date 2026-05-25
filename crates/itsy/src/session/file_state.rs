@@ -103,13 +103,24 @@ impl FileStateTracker {
         let mut g = self.known.lock();
 
         if self.disabled {
-            // Still track state so writes stay accurate.
+            // Even with diff mode off, we still need to surface
+            // "unchanged" — otherwise the agent loop can't tell a reread
+            // of identical content apart from a fresh read, and the
+            // no-progress nudge stays silent on reread loops.
+            let prior_hash = g.get(path).map(|e| e.hash.clone());
             self.originals.lock().entry(path.to_path_buf()).or_insert_with(|| content.to_string());
+            let unchanged = prior_hash.as_deref() == Some(hash.as_str());
+            let prior_read_count = g.get(path).map(|e| e.read_count).unwrap_or(0);
             g.insert(
                 path.to_path_buf(),
-                Entry { content: content.to_string(), hash, read_count: 1, recorded_at: Instant::now() },
+                Entry {
+                    content: content.to_string(),
+                    hash,
+                    read_count: prior_read_count + 1,
+                    recorded_at: Instant::now(),
+                },
             );
-            return RecordResult::Full;
+            return if unchanged { RecordResult::Unchanged } else { RecordResult::Full };
         }
 
         // Expire stale entries.
@@ -220,18 +231,25 @@ impl FileStateTracker {
         self.originals.lock().get(path).cloned()
     }
 
-    /// Return every tracked path whose current `known` content differs from
+    /// Return every tracked path whose current ON-DISK content differs from
     /// its captured original. Used by the evaluator phase to surface "which
     /// files did the agent actually change?" without having to infer it from
     /// the task text.
+    ///
+    /// Reads from disk rather than comparing against the in-memory `known`
+    /// map — this catches files modified outside our tracked tools (e.g.
+    /// `sed -i input.tex` from a bash call), which would otherwise be
+    /// silently invisible to the evaluator. The `known` map only updates
+    /// on `read_file` / `record_write`; direct disk modifications bypass it.
+    ///
+    /// Skips paths whose on-disk read fails (file deleted, permission
+    /// denied) — the caller can't meaningfully diff an unreadable file.
     pub fn edited_paths(&self) -> Vec<PathBuf> {
         let orig = self.originals.lock();
-        let known = self.known.lock();
         let mut out: Vec<PathBuf> = orig.iter()
             .filter_map(|(p, original)| {
-                known.get(p).and_then(|e| {
-                    if e.content != *original { Some(p.clone()) } else { None }
-                })
+                let disk = std::fs::read_to_string(p).ok()?;
+                if disk != *original { Some(p.clone()) } else { None }
             })
             .collect();
         out.sort();
@@ -585,20 +603,26 @@ mod tests {
             "original must remain the pre-first-write content");
     }
 
-    /// `edited_paths` returns paths whose current known content differs
-    /// from the captured original.
+    /// `edited_paths` compares on-disk content against the captured
+    /// original, so files modified through tracked tools surface. Uses
+    /// real tempfiles since the implementation reads from disk.
     #[test]
     fn edited_paths_returns_only_diverged_paths() {
         let t = tracker_enabled();
-        let a = PathBuf::from("/x/a.txt");
-        let b = PathBuf::from("/x/b.txt");
-        let c = PathBuf::from("/x/c.txt");
-        // a: read, then written with different content → edited
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        let c = dir.path().join("c.txt");
+        std::fs::write(&a, "a-orig\n").unwrap();
+        std::fs::write(&b, "b-orig\n").unwrap();
+        std::fs::write(&c, "c-orig\n").unwrap();
+
+        // a: read, then modified through record_write + matching disk write
         let _ = t.record(&a, "a-orig\n");
+        std::fs::write(&a, "a-new\n").unwrap();
         t.record_write(&a, "a-new\n");
-        // b: read, then written with same content → not edited
+        // b: read, but content stayed the same on disk → not edited
         let _ = t.record(&b, "b-orig\n");
-        t.record_write(&b, "b-orig\n");
         // c: only read, never written → not edited
         let _ = t.record(&c, "c-orig\n");
 
@@ -606,10 +630,76 @@ mod tests {
         assert_eq!(edited, vec![a]);
     }
 
+    /// `edited_paths` catches files modified OUTSIDE the tracked tools —
+    /// e.g. `sed -i` from a bash call. Anti-regression for the gap that
+    /// let illegal shell-mutation edits silently bypass the evaluator's
+    /// "files edited this run" prompt section and the post-verdict
+    /// "must compare originals" enforcement check.
+    #[test]
+    fn edited_paths_detects_disk_changes_outside_tracker() {
+        let t = tracker_enabled();
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("input.tex");
+        std::fs::write(&p, "original line\n").unwrap();
+        // Generator reads the file — original captured.
+        let _ = t.record(&p, "original line\n");
+
+        // Simulate `sed -i 's/original/modified/' input.tex` — disk
+        // changes without record_write being called.
+        std::fs::write(&p, "modified line\n").unwrap();
+
+        let edited = t.edited_paths();
+        assert_eq!(edited, vec![p],
+            "shell-mutated file must appear in edited_paths");
+    }
+
+    /// Files deleted out from under us aren't crashes — just skipped.
+    #[test]
+    fn edited_paths_skips_unreadable_paths() {
+        let t = tracker_enabled();
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("gone.txt");
+        std::fs::write(&p, "x\n").unwrap();
+        let _ = t.record(&p, "x\n");
+        std::fs::remove_file(&p).unwrap();
+
+        let edited = t.edited_paths();
+        assert!(edited.is_empty(), "missing file must not appear as edited");
+    }
+
     #[test]
     fn unified_diff_no_changes_is_empty() {
         let s = compute_unified_diff("a\nb\n", "a\nb\n", Path::new("/x/foo"), 3);
         assert!(s.is_empty());
+    }
+
+    /// With diff mode disabled, an immediate reread of the SAME content
+    /// must return `Unchanged` — otherwise the agent loop can't detect a
+    /// reread loop and the no-progress nudge stays silent.
+    ///
+    /// Anti-regression for the overfull-hbox-Hg2DTnv failure where the
+    /// model read input.tex five times in a row and `batch_had_fresh_read`
+    /// reset on each call.
+    #[test]
+    fn record_unchanged_works_when_diff_disabled() {
+        let t = FileStateTracker {
+            known: Mutex::new(HashMap::new()),
+            originals: Mutex::new(HashMap::new()),
+            disabled: true,
+            context_lines: 3,
+            max_ratio: 0.5,
+            ttl: Duration::from_secs(60),
+        };
+        let p = PathBuf::from("/x/foo.txt");
+        // First read is always Full.
+        assert!(matches!(t.record(&p, "same content\n"), RecordResult::Full));
+        // Re-read of identical content must be Unchanged, not Full.
+        assert!(matches!(t.record(&p, "same content\n"), RecordResult::Unchanged),
+            "disabled-mode reread of same content must be Unchanged");
+        // A real change still reports Full (we don't compute diffs when disabled).
+        assert!(matches!(t.record(&p, "different\n"), RecordResult::Full));
+        // Re-read of the new content is again Unchanged.
+        assert!(matches!(t.record(&p, "different\n"), RecordResult::Unchanged));
     }
 
     #[test]

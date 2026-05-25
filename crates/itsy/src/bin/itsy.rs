@@ -379,6 +379,10 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
         user_msg.clone(), task_type, stage2_category, max_tool_calls_per_turn(),
     );
     const MAX_CONSECUTIVE_BLOCKS: u32 = 2;
+    // Stuck-detector retry budget: first stuck → inject recovery directive
+    // and continue; second stuck → break out for real.
+    let mut stuck_recoveries_used: u32 = 0;
+    const MAX_STUCK_RECOVERIES: u32 = 1;
 
     // Reset any pending Ctrl+C presses from earlier turns; the user starts
     // each turn with a clean slate.
@@ -525,6 +529,41 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             .unwrap_or_default();
         let response_content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
         let response_has_content = !response_content.trim().is_empty();
+
+        // Stuck-repetition recovery. First strike: inject a strong
+        // directive, disable thinking, clear the repeat window, continue
+        // — this gives the model one chance to escape the loop with
+        // pressure applied. Second strike: end the turn.
+        //
+        // Hard-stop alone was wrong because it threw away in-progress
+        // work when the model was just slow to act. The forced-recovery
+        // path preserves that work while still bounding wallclock.
+        if state.note_response_and_check_stuck(response_content, &tool_calls) {
+            if stuck_recoveries_used < MAX_STUCK_RECOVERIES {
+                stuck_recoveries_used += 1;
+                println!(
+                    "\n  \x1b[33m⚠ stuck — same response 3× in a row, injecting recovery directive ({stuck_recoveries_used}/{MAX_STUCK_RECOVERIES})\x1b[0m"
+                );
+                session.mutable.lock().history.push(json!({
+                    "role": "user",
+                    "content":
+                        "[SYSTEM] You are repeating the same analysis. Re-reading the same \
+                         files will not produce new information. Make ONE small, concrete \
+                         change based on what you have already observed, then run a \
+                         verification command and look at the result before deciding the \
+                         next step. Do not broaden scope or make speculative edits across \
+                         multiple locations.",
+                }));
+                state.force_disable_thinking = true;
+                state.recent_response_sigs.clear();
+                continue;
+            }
+            println!(
+                "\n  \x1b[31m⚠ stuck — same response 3× in a row after recovery, ending turn\x1b[0m"
+            );
+            break;
+        }
+
         if state.empty_retry_injected && (!tool_calls.is_empty() || response_has_content) {
             let mut locked = session.mutable.lock();
             if locked.history.len() >= 2 {
@@ -1498,7 +1537,8 @@ async fn run_non_interactive(session: &AgentSession, prompt: Option<String>) {
             };
             // Discard any stale verdict from a prior turn before this call.
             let _ = itsy::session::contract::take_evaluator_result();
-            run_evaluator_phase(&prompt, session, &completed).await;
+            let round_result = run_evaluator_consensus(&prompt, session, &completed).await;
+            evaluator_emit_result(round_result.passed, &round_result.findings, session);
             let verdict = itsy::session::contract::take_evaluator_result();
             match verdict {
                 Some(r) if !r.passed && retry < MAX_EVALUATOR_RETRIES => {
@@ -1535,6 +1575,192 @@ async fn run_non_interactive(session: &AgentSession, prompt: Option<String>) {
 
 // ── Adversarial evaluator ────────────────────────────────────────────────
 
+/// One evaluator's verdict on the closed contract.
+/// Two of these get negotiated in `run_evaluator_consensus`.
+#[derive(Debug, Clone)]
+struct EvaluatorRoundResult {
+    passed: bool,
+    findings: Vec<String>,
+    /// Display label for the source of this verdict (e.g. "main",
+    /// "second_opinion", "revised", "consensus"). Stored for logs and
+    /// potential UI breadcrumbs even when not currently read at every call
+    /// site — removing it would lose context if any negotiation step fails.
+    #[allow(dead_code)]
+    label: String,
+}
+
+/// Run the evaluator phase with consensus between TWO models. Mirrors the
+/// shape of `negotiate_assertions`:
+///
+/// 1. Each model runs an independent full evaluation round (with tools).
+/// 2. Findings are merged (union) and the verdict is the AND of both.
+/// 3. Each model REVIEWS the merged synthesis one-shot, can accept or revise.
+/// 4. If both accept → done. Otherwise update with revisions and loop.
+/// 5. Up to 3 review rounds, then use the most recent synthesis.
+///
+/// Falls back to single-model evaluation when no distinct second-opinion
+/// model is configured — preserves prior behaviour on default setups.
+async fn run_evaluator_consensus(
+    task: &str,
+    session: &AgentSession,
+    contract: &itsy::session::contract::Contract,
+) -> EvaluatorRoundResult {
+    let config = session.shared.read().config.clone();
+    let main_model = config.model.name.clone();
+    let main_url = config.model.base_url.clone();
+    let main_key = config.model.api_key.clone();
+
+    let second_model = config.second_opinion.resolved_model(&config).to_string();
+    let second_url = config.second_opinion.resolved_endpoint(&config).to_string();
+
+    // No distinct second opinion configured → single model, preserve old behaviour.
+    if config.second_opinion.model.is_none() && config.second_opinion.endpoint.is_none() {
+        return run_evaluator_round(
+            task, session, contract, &main_model, &main_url, main_key.as_deref(), "main",
+        ).await;
+    }
+
+    // Round 1: independent full evaluations.
+    let r_main = run_evaluator_round(
+        task, session, contract, &main_model, &main_url, main_key.as_deref(), "main",
+    ).await;
+    let r_second = run_evaluator_round(
+        task, session, contract, &second_model, &second_url, main_key.as_deref(), "second_opinion",
+    ).await;
+
+    let mut current = EvaluatorRoundResult {
+        passed: r_main.passed && r_second.passed,
+        findings: merge_findings(&r_main.findings, &r_second.findings),
+        label: "consensus".into(),
+    };
+
+    println!(
+        "  \x1b[36m◆ evaluator round 1: main={} ({} finding(s)), second_opinion={} ({} finding(s)) → synth passed={}\x1b[0m",
+        if r_main.passed { "pass" } else { "fail" }, r_main.findings.len(),
+        if r_second.passed { "pass" } else { "fail" }, r_second.findings.len(),
+        current.passed,
+    );
+
+    // Rounds 2-3: one-shot reviews of the merged synthesis.
+    for round in 2..=3 {
+        let main_rev = review_verdict(task, contract, &current, &main_model, &main_url).await;
+        let second_rev = review_verdict(task, contract, &current, &second_model, &second_url).await;
+
+        let main_revised = match main_rev { Some(ReviewResponse::Revise(r)) => Some(r), _ => None };
+        let second_revised = match second_rev { Some(ReviewResponse::Revise(r)) => Some(r), _ => None };
+
+        match (main_revised, second_revised) {
+            (None, None) => {
+                println!("  \x1b[36m◆ evaluator round {round}: both accept — consensus reached\x1b[0m");
+                break;
+            }
+            (Some(r), None) => {
+                println!("  \x1b[36m◆ evaluator round {round}: main revised, second_opinion accepted\x1b[0m");
+                current = r;
+            }
+            (None, Some(r)) => {
+                println!("  \x1b[36m◆ evaluator round {round}: second_opinion revised, main accepted\x1b[0m");
+                current = r;
+            }
+            (Some(a), Some(b)) => {
+                println!("  \x1b[36m◆ evaluator round {round}: both revised — merging\x1b[0m");
+                current = EvaluatorRoundResult {
+                    passed: a.passed && b.passed,
+                    findings: merge_findings(&a.findings, &b.findings),
+                    label: "consensus".into(),
+                };
+            }
+        }
+    }
+
+    current
+}
+
+fn merge_findings(a: &[String], b: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(a.len() + b.len());
+    for f in a.iter().chain(b.iter()) {
+        let trimmed = f.trim();
+        if trimmed.is_empty() { continue; }
+        if seen.insert(trimmed.to_string()) {
+            out.push(trimmed.to_string());
+        }
+    }
+    out
+}
+
+enum ReviewResponse {
+    Accept,
+    Revise(EvaluatorRoundResult),
+}
+
+/// One-shot review of the merged synthesis. The model returns either
+/// `{"accept": true}` (agrees with current verdict + findings) or
+/// `{"accept": false, "passed": <bool>, "findings": [...]}` (revises).
+/// Falls back to `Accept` on any parse/network failure — better to converge
+/// than to flap on transport errors.
+async fn review_verdict(
+    task: &str,
+    contract: &itsy::session::contract::Contract,
+    current: &EvaluatorRoundResult,
+    model: &str,
+    base_url: &str,
+) -> Option<ReviewResponse> {
+    let findings_json = serde_json::to_string(&current.findings).unwrap_or_default();
+    let assertions_summary = contract.assertions.iter()
+        .map(|a| format!("  - {} ({}): {}", a.id, a.state.as_str(), a.text))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let prompt = format!(
+        "Two evaluators independently checked whether a code generator completed this task.\n\
+Their combined verdict and findings are below. Decide if you agree.\n\n\
+TASK:\n{task}\n\n\
+Contract assertions (self-reported by generator):\n{assertions_summary}\n\n\
+Current synthesized verdict: passed={}\n\
+Current findings: {findings_json}\n\n\
+Output ONE of:\n\
+  {{\"accept\": true}}     — you agree with the current verdict and findings\n\
+  {{\"accept\": false, \"passed\": <bool>, \"findings\": [<string>, ...]}}\n\
+    — you disagree; provide your revised verdict and findings\n\n\
+Return ONLY the JSON. No prose.",
+        current.passed,
+    );
+
+    let raw = match itsy::features_adapter::direct_chat(&prompt, model, base_url, 120).await {
+        Ok(s) => s,
+        Err(_) => return Some(ReviewResponse::Accept),
+    };
+    let cleaned = strip_json_fences(&raw);
+    let parsed: Value = match serde_json::from_str(&cleaned) {
+        Ok(v) => v,
+        Err(_) => return Some(ReviewResponse::Accept),
+    };
+    let accept = parsed.get("accept").and_then(|v| v.as_bool()).unwrap_or(true);
+    if accept {
+        return Some(ReviewResponse::Accept);
+    }
+    let passed = parsed.get("passed").and_then(|v| v.as_bool()).unwrap_or(current.passed);
+    let findings: Vec<String> = parsed.get("findings")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    Some(ReviewResponse::Revise(EvaluatorRoundResult {
+        passed,
+        findings,
+        label: "revised".into(),
+    }))
+}
+
+fn strip_json_fences(s: &str) -> String {
+    let t = s.trim();
+    // Remove ```json … ``` or ``` … ``` fences if present.
+    let t = t.strip_prefix("```json").unwrap_or(t).trim();
+    let t = t.strip_prefix("```").unwrap_or(t).trim();
+    let t = t.strip_suffix("```").unwrap_or(t).trim();
+    t.to_string()
+}
+
 fn evaluator_tools() -> Vec<Value> {
     fn tool(name: &str, desc: &str, params: Value) -> Value {
         json!({"type":"function","function":{"name":name,"description":desc,"parameters":params}})
@@ -1569,22 +1795,19 @@ fn evaluator_tools() -> Vec<Value> {
 /// contract. Gets a clean history, tool-restricted to read+bash only,
 /// and a system prompt that instructs it to treat self-reported passes
 /// as unconfirmed.
-async fn run_evaluator_phase(
+async fn run_evaluator_round(
     task: &str,
     session: &AgentSession,
     contract: &itsy::session::contract::Contract,
-) {
+    model_name: &str,
+    base_url: &str,
+    api_key: Option<&str>,
+    label: &str,
+) -> EvaluatorRoundResult {
     const MAX_TURNS: u32 = 50;
 
     let cwd = session.ro.cwd.to_string_lossy().to_string();
-    let mut config = session.shared.read().config.clone();
-    // Use second-opinion model/endpoint if configured.
-    if let Some(m) = config.second_opinion.model.clone() {
-        config.model.name = m;
-    }
-    if let Some(e) = config.second_opinion.endpoint.clone() {
-        config.model.base_url = e;
-    }
+    let config = session.shared.read().config.clone();
 
     // #7: machine-known list of files the generator actually changed this
     // run. Computed from FileStateTracker (paths with an original that
@@ -1642,13 +1865,22 @@ async fn run_evaluator_phase(
     // machine-known edited_paths.
     let mut compared_paths: std::collections::HashSet<String> = Default::default();
 
-    println!("\n  \x1b[36m◆ evaluator phase starting ({} assertions)\x1b[0m", contract.assertions.len());
+    // Bash-repetition detector. The evaluator's failure mode in the
+    // kv-store-grpc timeouts was the same `python server.py &` (or
+    // equivalent check) running over and over until the wallclock killed
+    // it. After 3 identical (command, output) pairs in a row we short-
+    // circuit to "inconclusive fail" rather than burning the budget.
+    const MAX_BASH_REPETITION: usize = 3;
+    let mut recent_bash: std::collections::VecDeque<(String, String)> = Default::default();
+
+    println!("\n  \x1b[36m◆ evaluator round [{label}] starting ({} assertions, model={})\x1b[0m",
+        contract.assertions.len(), model_name);
 
     for turn in 0..MAX_TURNS {
         let ctx = itsy::model_client::ChatContext {
-            model_name: &config.model.name,
-            base_url: &config.model.base_url,
-            api_key: config.model.api_key.clone(),
+            model_name,
+            base_url,
+            api_key: api_key.map(String::from),
             timeout: Duration::from_secs(config.model.timeout),
             temp_adapt: config.features.temp_adapt,
             conversation: &history,
@@ -1661,13 +1893,12 @@ async fn run_evaluator_phase(
         let Some(response) = itsy::model_client::chat_completion(&ctx).await else {
             // #4: API failure is a verdict, not a silent return. The safety
             // net would otherwise be bypassed on evaluator outages.
-            println!("  \x1b[31m✗ evaluator API call failed — treating as fail\x1b[0m");
-            evaluator_emit_result(
-                false,
-                &["evaluator API call failed; verdict unrecorded".into()],
-                session,
-            );
-            return;
+            println!("  \x1b[31m✗ evaluator [{label}] API call failed — treating as fail\x1b[0m");
+            return EvaluatorRoundResult {
+                passed: false,
+                findings: vec![format!("evaluator [{label}] API call failed; verdict unrecorded")],
+                label: label.into(),
+            };
         };
 
         let msg = response
@@ -1699,13 +1930,12 @@ async fn run_evaluator_phase(
                 continue;
             }
             // #4: out of turns with no verdict is also a verdict.
-            println!("  \x1b[33m⚠ evaluator reached turn limit without verdict\x1b[0m");
-            evaluator_emit_result(
-                false,
-                &["evaluation inconclusive: turn limit reached without verdict".into()],
-                session,
-            );
-            return;
+            println!("  \x1b[33m⚠ evaluator [{label}] reached turn limit without verdict\x1b[0m");
+            return EvaluatorRoundResult {
+                passed: false,
+                findings: vec!["evaluation inconclusive: turn limit reached without verdict".into()],
+                label: label.into(),
+            };
         }
 
         let mut tool_results = Vec::new();
@@ -1735,7 +1965,12 @@ async fn run_evaluator_phase(
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
                     println!("  \x1b[36m  eval$ {}\x1b[0m", cmd);
-                    evaluator_run_bash(cmd, &cwd)
+                    let out = evaluator_run_bash(cmd, &cwd);
+                    recent_bash.push_back((cmd.to_string(), out.clone()));
+                    while recent_bash.len() > MAX_BASH_REPETITION {
+                        recent_bash.pop_front();
+                    }
+                    out
                 }
                 "read_file" => {
                     let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
@@ -1794,6 +2029,28 @@ async fn run_evaluator_phase(
 
         history.extend(tool_results);
 
+        // Bash-repetition short-circuit. If the model has run the same
+        // bash command MAX_BASH_REPETITION times in a row with identical
+        // output, it's stuck — stop spending budget waiting for a verdict.
+        if recent_bash.len() == MAX_BASH_REPETITION
+            && recent_bash.iter().all(|p| p == &recent_bash[0])
+        {
+            let (cmd, _) = &recent_bash[0];
+            println!(
+                "  \x1b[33m⚠ evaluator [{label}] stuck repeating `{}` — short-circuiting\x1b[0m",
+                cmd.chars().take(80).collect::<String>(),
+            );
+            return EvaluatorRoundResult {
+                passed: false,
+                findings: vec![format!(
+                    "evaluation inconclusive: evaluator repeated the same bash command \
+                     ({} times) with identical output — likely stuck in a verification loop",
+                    MAX_BASH_REPETITION,
+                )],
+                label: label.into(),
+            };
+        }
+
         if let Some((passed, mut findings)) = verdict {
             // #1: enforce that a passed verdict actually compared every
             // edited file against its original. Override on miss.
@@ -1808,7 +2065,7 @@ async fn run_evaluator_phase(
                         .collect::<Vec<_>>()
                         .join("\n");
                     println!(
-                        "  \x1b[33m⚠ overriding passed verdict — evaluator did not \
+                        "  \x1b[33m⚠ [{label}] overriding passed verdict — evaluator did not \
                          compare originals on {} edited file(s):\n{}\x1b[0m",
                         missing.len(), list,
                     );
@@ -1817,18 +2074,20 @@ async fn run_evaluator_phase(
                          or read_original on edited files: {}",
                         missing.join(", "),
                     ));
-                    evaluator_emit_result(false, &findings, session);
-                    return;
+                    return EvaluatorRoundResult { passed: false, findings, label: label.into() };
                 }
             }
-            evaluator_emit_result(passed, &findings, session);
-            return;
+            return EvaluatorRoundResult { passed, findings, label: label.into() };
         }
     }
 
     // Turn budget exhausted without a verdict — treat as inconclusive fail.
-    println!("  \x1b[33m⚠ evaluator exhausted turns without reaching verdict\x1b[0m");
-    evaluator_emit_result(false, &["evaluation inconclusive: turn limit reached".into()], session);
+    println!("  \x1b[33m⚠ evaluator [{label}] exhausted turns without reaching verdict\x1b[0m");
+    EvaluatorRoundResult {
+        passed: false,
+        findings: vec!["evaluation inconclusive: turn limit reached".into()],
+        label: label.into(),
+    }
 }
 
 /// Normalise a path argument into a canonical key for comparing against the
@@ -2410,11 +2669,90 @@ fn build_config_and_settings(cli: &Cli) -> (Config, Flags) {
 
 // ── Main dispatcher ──────────────────────────────────────────────────────────
 
+/// Redirect this process's stdout and stderr through a background thread
+/// that prepends an ISO-8601 wall-clock timestamp to every line. The reader
+/// thread holds the *original* stdout/stderr file descriptors and writes
+/// `[YYYY-MM-DD HH:MM:SS.mmm] <line>` for each line read from the pipe.
+///
+/// All `println!` / `eprintln!` calls (and any C code that writes to fd 1/2)
+/// automatically get timestamps from this point on. Multi-line strings get
+/// one timestamp per line, which is exactly what you want when reading back
+/// a bench log to figure out *when* the model started stalling.
+///
+/// Failures during setup degrade gracefully — we keep the original stdout
+/// and warn to stderr rather than crashing the process.
+fn install_timestamped_stdout() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::io::FromRawFd;
+
+    fn redirect(fd: libc::c_int, label: &str) -> Option<(libc::c_int, libc::c_int)> {
+        // Duplicate the original target fd so we can keep writing real output.
+        let original = unsafe { libc::dup(fd) };
+        if original < 0 {
+            eprintln!("[timestamp] dup({label}) failed: {}", std::io::Error::last_os_error());
+            return None;
+        }
+        // Create a pipe; we'll redirect the target fd to the write end.
+        let mut fds = [0i32; 2];
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
+            eprintln!("[timestamp] pipe failed: {}", std::io::Error::last_os_error());
+            unsafe { libc::close(original) };
+            return None;
+        }
+        let (read_fd, write_fd) = (fds[0], fds[1]);
+        if unsafe { libc::dup2(write_fd, fd) } < 0 {
+            eprintln!("[timestamp] dup2 failed: {}", std::io::Error::last_os_error());
+            unsafe { libc::close(read_fd) };
+            unsafe { libc::close(write_fd) };
+            unsafe { libc::close(original) };
+            return None;
+        }
+        unsafe { libc::close(write_fd) };
+        Some((read_fd, original))
+    }
+
+    fn spawn_reader(read_fd: libc::c_int, original_fd: libc::c_int) {
+        std::thread::spawn(move || {
+            let read_file = unsafe { std::fs::File::from_raw_fd(read_fd) };
+            let mut writer = unsafe { std::fs::File::from_raw_fd(original_fd) };
+            let mut reader = BufReader::new(read_file);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        // User-facing terminal: raw line, no timestamp.
+                        let _ = write!(writer, "{line}");
+                        let _ = writer.flush();
+                        // Session log on disk: timestamped via session_log::log.
+                        itsy::session_log::log(line.trim_end_matches('\n'));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+
+    if let Some((rfd, ofd)) = redirect(1, "stdout") {
+        spawn_reader(rfd, ofd);
+    }
+    if let Some((rfd, ofd)) = redirect(2, "stderr") {
+        spawn_reader(rfd, ofd);
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     load_dotenv();
     itsy::interrupt::install();
     let cli = Cli::parse();
+
+    // Open the always-on session log file before anything else runs. Every
+    // mode (bench, classic, fullscreen TUI) appends to this. Lands at
+    // `/logs/agent/itsy.log` under harbor, or `<traces_dir>/itsy-<ts>.log`
+    // for local runs.
+    itsy::session_log::init();
 
     // Non-interactive modes never run the wizard: CI, `-p "..."`, `--eval`,
     // `--mcp`, and `--print-system-prompt` all need to be scriptable.
@@ -2424,6 +2762,18 @@ async fn main() -> Result<()> {
         || cli.print_system_prompt
         || cli.non_interactive
         || !std::io::IsTerminal::is_terminal(&std::io::stdin());
+
+    // Prefix every stdout/stderr line with a wall-clock timestamp in
+    // non-interactive / classic modes (bench, scripts, piped runs). Skipped
+    // when the fullscreen TUI will own the terminal — timestamps would
+    // corrupt ratatui's cursor positioning and ANSI sequences.
+    if non_interactive || cli.classic || cli.mcp {
+        // MCP mode speaks JSON-RPC over stdio — timestamps would break the
+        // protocol. Only enable for the human-facing non-interactive modes.
+        if !cli.mcp {
+            install_timestamped_stdout();
+        }
+    }
 
     // First-launch / explicit `--init`: run the interactive wizard before
     // anything else. The wizard writes ~/.config/itsy/config.toml so the
