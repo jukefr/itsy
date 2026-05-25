@@ -152,6 +152,9 @@ pub enum ChatLine {
     /// Plain text line for the given role. May contain newlines (wrapped at
     /// render time by ratatui).
     Text { role: ChatRole, text: String },
+    /// Reasoning / thinking text from the model. Rendered dim + italic when
+    /// `show_thinking` is on, hidden when off. The text may contain newlines.
+    Thinking(String),
     /// Tool indicator: `[⚙ name] running... <msg>` or `[✓ name] <msg>`.
     Tool { name: String, status: ToolStatus, msg: String },
     /// Diff header introducing a block.
@@ -229,6 +232,11 @@ pub struct PendingModal {
 const MAX_CHAT_LINES: usize = 5000;
 const MAX_HISTORY: usize = 500;
 
+/// Tick counter advanced once per render frame — used to drive the OMP
+/// status-line spinner.
+pub static SPINNER_TICK: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 #[derive(Debug)]
 pub struct FullscreenState {
     pub theme: Theme,
@@ -252,10 +260,32 @@ pub struct FullscreenState {
     pub modal: Option<PendingModal>,
     pub quit_confirm: bool,
     pub quit: bool,
+    /// Whether to render `ChatLine::Thinking(_)` lines. Default off — toggle
+    /// with Ctrl+T. When off, thinking content is still stored so flipping
+    /// the toggle reveals already-streamed reasoning.
+    pub show_thinking: bool,
+
+    // ── OMP-style widget surface (additive — old fields above still used) ──
+    /// Rich color palette used by the new OMP widgets. Reads `ITSY_THEME=light`
+    /// / `=minimal` / `=dark` (default).
+    pub omp_theme: crate::fullscreen_widgets::theme::Theme,
+    /// Symbol preset (unicode / ascii). Reads `ITSY_SYMBOLS=ascii`.
+    pub omp_symbols: crate::fullscreen_widgets::symbols::SymbolTheme,
+    /// Plan / TODO tracker rendered above the status line. Empty → hidden.
+    pub todo: crate::fullscreen_widgets::todo::TodoWidget,
+    /// USD cost surfaced in the status line.
+    pub cost_usd: f64,
+    /// Total turns + tool calls (for status-line counters).
+    pub turn_count: u32,
+    pub tool_count: u32,
+    /// Detected context window (for status-line "used/window" segment).
+    pub context_window: u32,
 }
 
 impl Default for FullscreenState {
     fn default() -> Self {
+        let theme_name = env::var("ITSY_THEME").unwrap_or_else(|_| "dark".into());
+        let symbol_name = env::var("ITSY_SYMBOLS").unwrap_or_else(|_| "unicode".into());
         Self {
             theme: Theme::from_env(),
             sessions: vec![SessionTab { title: "main".into(), ..Default::default() }],
@@ -278,6 +308,14 @@ impl Default for FullscreenState {
             modal: None,
             quit_confirm: false,
             quit: false,
+            show_thinking: env::var("ITSY_SHOW_THINKING").ok().as_deref() == Some("1"),
+            omp_theme: crate::fullscreen_widgets::theme::Theme::from_name(&theme_name),
+            omp_symbols: crate::fullscreen_widgets::symbols::SymbolTheme::from_name(&symbol_name),
+            todo: crate::fullscreen_widgets::todo::TodoWidget::new("Plan"),
+            cost_usd: 0.0,
+            turn_count: 0,
+            tool_count: 0,
+            context_window: 0,
         }
     }
 }
@@ -412,6 +450,77 @@ impl Fullscreen {
         self.state.lock().latency_ms = ms;
     }
 
+    /// Append a thinking / reasoning block to the chat. Shown dim + italic
+    /// when `show_thinking` is on; preserved in state when off (toggle later).
+    pub fn add_thinking(&self, text: impl Into<String>) {
+        let mut st = self.state.lock();
+        st.push_line(ChatLine::Thinking(text.into()));
+    }
+
+    /// Stream-append a thinking token to the trailing `Thinking(_)` line.
+    /// Creates a new thinking line if the last entry isn't already one.
+    pub fn stream_thinking_token(&self, token: &str) {
+        let mut st = self.state.lock();
+        let needs_new = !matches!(st.active().chat_lines.last(), Some(ChatLine::Thinking(_)));
+        if needs_new {
+            st.push_line(ChatLine::Thinking(String::new()));
+        }
+        let tab = st.active_mut();
+        if let Some(ChatLine::Thinking(buf)) = tab.chat_lines.last_mut() {
+            buf.push_str(token);
+        }
+        tab.scroll = 0;
+    }
+
+    /// Toggle the show-thinking flag. Useful for binding to Ctrl+T from a
+    /// programmatic caller; the TUI does its own binding internally.
+    pub fn toggle_thinking(&self) {
+        let mut st = self.state.lock();
+        st.show_thinking = !st.show_thinking;
+    }
+
+    pub fn set_show_thinking(&self, on: bool) {
+        self.state.lock().show_thinking = on;
+    }
+
+    // ── OMP widget setters ─────────────────────────────────────────────
+
+    /// Replace the plan/TODO list shown above the status line.
+    /// Pass `&[]` to hide the widget.
+    pub fn set_todo(&self, items: Vec<crate::fullscreen_widgets::todo::TodoItem>) {
+        let mut st = self.state.lock();
+        st.todo.items = items;
+    }
+
+    /// Add a single TODO item.
+    pub fn push_todo(
+        &self,
+        label: impl Into<String>,
+        state: crate::fullscreen_widgets::todo::TodoState,
+    ) {
+        let mut st = self.state.lock();
+        st.todo.push(label.into(), state);
+    }
+
+    /// Toggle the plan/TODO widget between compact (header only) and expanded.
+    pub fn set_todo_expanded(&self, expanded: bool) {
+        self.state.lock().todo.expanded = expanded;
+    }
+
+    /// Update accumulated USD cost surfaced in the status line.
+    pub fn set_cost_usd(&self, cost: f64) {
+        self.state.lock().cost_usd = cost;
+    }
+
+    /// Bump the per-turn / per-tool counters surfaced in the status line.
+    pub fn record_turn(&self) { self.state.lock().turn_count += 1; }
+    pub fn record_tool_call(&self) { self.state.lock().tool_count += 1; }
+
+    /// Set the detected context window (used for the `12k/32k` segment).
+    pub fn set_context_window(&self, window: u32) {
+        self.state.lock().context_window = window;
+    }
+
     pub fn new_session(&self, title: impl Into<String>) {
         let mut st = self.state.lock();
         st.sessions.push(SessionTab { title: title.into(), ..Default::default() });
@@ -535,7 +644,12 @@ fn filtered_commands(filter: &str) -> Vec<&'static CommandSpec> {
 
 // ─── Rendering ────────────────────────────────────────────────────────────
 
-fn render_chat_lines<'a>(lines: &'a [ChatLine], theme: &Theme) -> Vec<Line<'a>> {
+fn render_chat_lines<'a>(
+    lines: &'a [ChatLine],
+    theme: &Theme,
+    show_thinking: bool,
+    omp_theme: &crate::fullscreen_widgets::theme::Theme,
+) -> Vec<Line<'a>> {
     let mut out = Vec::with_capacity(lines.len() * 2);
     for cl in lines.iter() {
         match cl {
@@ -627,6 +741,22 @@ fn render_chat_lines<'a>(lines: &'a [ChatLine], theme: &Theme) -> Vec<Line<'a>> 
                     Span::styled(s.clone(), Style::default().fg(theme.muted)),
                 ]));
             }
+            ChatLine::Thinking(text) => {
+                // Hidden unless show_thinking is on. Anti-regression: the
+                // text is preserved in state, only the render is suppressed.
+                if !show_thinking { continue; }
+                let style = Style::default()
+                    .fg(omp_theme.thinking_text)
+                    .add_modifier(Modifier::ITALIC | Modifier::DIM);
+                let parts: Vec<&str> = text.split('\n').collect();
+                for (i, part) in parts.iter().enumerate() {
+                    let prefix = if i == 0 { " ⠁ " } else { "   " };
+                    out.push(Line::from(vec![
+                        Span::styled(prefix, Style::default().fg(omp_theme.thinking_text)),
+                        Span::styled((*part).to_string(), style),
+                    ]));
+                }
+            }
             ChatLine::Spacer => {
                 out.push(Line::from(""));
             }
@@ -679,39 +809,53 @@ fn render_welcome(theme: &Theme, width: u16) -> Vec<Line<'static>> {
     lines
 }
 
-fn render_status_bar<'a>(st: &'a FullscreenState) -> Line<'a> {
-    let theme = &st.theme;
-    let left = if !st.status.is_empty() {
-        format!(" {} ", st.status)
+fn render_status_bar(st: &FullscreenState, width: u16) -> Line<'static> {
+    use crate::fullscreen_widgets::status_line::{GitState, StatusLine};
+
+    let cwd = st.cwd.file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| st.cwd.display().to_string());
+
+    let busy_label = if !st.status.is_empty() {
+        Some(st.status.clone())
     } else if !st.task_type.is_empty() {
-        format!(" {} ", st.task_type)
+        Some(st.task_type.clone())
     } else {
-        " enter send  shift+drag copy ".to_string()
+        None
     };
-    let cwd = st.cwd.display().to_string();
-    let mid = format!(
-        " tok p={} c={} t={}  {}ms ",
-        st.token_prompt,
-        st.token_completion,
-        st.token_prompt + st.token_completion,
-        st.latency_ms
-    );
-    let stream_glyph = if st.active().streaming { "⟳" } else { "●" };
-    let right = format!(" itsy  {}  {}  {} ", st.model, cwd, stream_glyph);
-    Line::from(vec![
-        Span::styled(left, Style::default().fg(theme.accent).bg(theme.status_bg)),
-        Span::styled(mid, Style::default().fg(theme.muted).bg(theme.status_bg)),
-        Span::styled(right, Style::default().fg(theme.brand_dim).bg(theme.status_bg)),
-    ])
+    let spinner_tick = if st.active().streaming || busy_label.is_some() {
+        Some(SPINNER_TICK.load(std::sync::atomic::Ordering::Relaxed))
+    } else {
+        None
+    };
+
+    let sl = StatusLine {
+        model: Some(st.model.clone()),
+        path: Some(cwd),
+        git: GitState::None, // populated by the agent when a git probe runs
+        context_used: (st.token_prompt + st.token_completion) as u64,
+        context_window: st.context_window as u64,
+        cost_usd: st.cost_usd,
+        turn_count: st.turn_count,
+        tool_count: st.tool_count,
+        spinner_tick,
+        busy_label,
+    };
+    sl.render(width, &st.omp_theme, &st.omp_symbols)
 }
 
 fn render_input<'a>(st: &'a FullscreenState) -> Paragraph<'a> {
     let theme = &st.theme;
-    let title = if st.palette_open {
-        "itsy  ↑↓ navigate  enter select  esc cancel"
+    let mut title = if st.palette_open {
+        "itsy  ↑↓ navigate  enter select  esc cancel".to_string()
     } else {
-        "itsy"
+        "itsy".to_string()
     };
+    // Show the thinking-toggle state as a small badge in the input title.
+    // OFF: blank. ON: "  · thinking on  (ctrl+t)".
+    if st.show_thinking {
+        title.push_str("  · thinking on  (ctrl+t)");
+    }
     Paragraph::new(Line::from(vec![
         Span::styled(" > ", Style::default().fg(theme.muted)),
         Span::styled(st.input.clone(), Style::default().fg(theme.fg)),
@@ -723,60 +867,38 @@ fn render_input<'a>(st: &'a FullscreenState) -> Paragraph<'a> {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(theme.border))
             .title(Span::styled(
-                title.to_string(),
+                title,
                 Style::default().fg(theme.accent),
             )),
     )
 }
 
-fn render_palette<'a>(st: &'a FullscreenState, area: Rect) -> (Paragraph<'a>, Rect) {
-    let theme = &st.theme;
-    let filtered = filtered_commands(&st.input);
-    let max_h = area.height.saturating_sub(2).clamp(3, 12) as usize;
-    let visible = filtered.len().min(max_h);
-    let scroll = st.palette_scroll.min(filtered.len().saturating_sub(visible));
-    let sel = st.palette_selection.min(filtered.len().saturating_sub(1));
-    let mut lines: Vec<Line> = Vec::new();
-    for i in 0..visible {
-        let idx = i + scroll;
-        let Some(c) = filtered.get(idx) else { break };
-        let is_sel = idx == sel;
-        let cmd_text = match c.alias {
-            Some(a) => format!("{} ({})", c.cmd, a),
-            None => c.cmd.to_string(),
-        };
-        let style = if is_sel {
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::REVERSED | Modifier::BOLD)
-        } else {
-            Style::default().fg(theme.fg)
-        };
-        lines.push(Line::from(vec![
-            Span::styled(format!(" {:<16}", cmd_text), style),
-            Span::styled(format!(" {}", c.desc), Style::default().fg(theme.muted)),
-        ]));
-    }
-    if lines.is_empty() {
-        lines.push(Line::from(Span::styled(
-            " (no matches)".to_string(),
-            Style::default().fg(theme.muted),
-        )));
-    }
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.border))
-        .title(Span::styled(
-            format!(" commands {}/{} ", filtered.len().min(scroll + visible), filtered.len()),
-            Style::default().fg(theme.accent),
-        ));
-    let p = Paragraph::new(lines).block(block);
-    let h = (visible.max(1) as u16) + 2;
-    let w = area.width.min(50);
+fn render_palette<'a>(st: &'a FullscreenState, area: Rect) -> (Paragraph<'static>, Rect) {
+    use crate::fullscreen_widgets::slash_overlay::{filter, render_overlay, SlashItem};
+
+    // Convert the existing `CommandSpec` list into SlashItems and run the
+    // fuzzy filter against the user's current input.
+    let needle = &st.input;
+    let items: Vec<SlashItem> = COMMANDS.iter().map(|c| SlashItem {
+        name: c.cmd.into(),
+        description: c.desc.into(),
+        alias: c.alias.map(|s| s.into()),
+    }).collect();
+    let matches = filter(&items, needle);
+
+    // Selection is clamped against the live match count so a narrow filter
+    // never points past the end.
+    let visible_max: usize = (area.height.saturating_sub(2).clamp(3, 12)) as usize;
+    let visible = matches.len().min(visible_max);
+    let sel = st.palette_selection.min(matches.len().saturating_sub(1).max(0));
+
+    let width = area.width.min(70);
+    let lines = render_overlay(&matches, sel, width, visible_max, &st.omp_theme, &st.omp_symbols);
+    let h = (visible.max(1) as u16) + 2; // body + top/bottom borders
     let x = area.x;
     let y = area.y.saturating_sub(h);
-    let rect = Rect { x, y, width: w, height: h };
-    (p, rect)
+    let rect = Rect { x, y, width, height: h };
+    (Paragraph::new(lines), rect)
 }
 
 fn render_modal<'a>(modal: &'a PendingModal, area: Rect, theme: &Theme) -> (Paragraph<'a>, Rect) {
@@ -877,12 +999,15 @@ where
                 let st = state.lock();
                 let theme = st.theme;
 
-                // Layout: tabs (1) | chat (min) | input (3) | status (1)
+                // Layout: tabs (1) | chat (min) | todo (N or 0) | input (3) | status (1)
+                let todo_lines = st.todo.render(&st.omp_theme, &st.omp_symbols);
+                let todo_h = todo_lines.len() as u16;
                 let chunks = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
                         Constraint::Length(1),
                         Constraint::Min(1),
+                        Constraint::Length(todo_h),
                         Constraint::Length(3),
                         Constraint::Length(1),
                     ])
@@ -916,7 +1041,7 @@ where
                 let body_lines: Vec<Line> = if tab.chat_lines.is_empty() {
                     render_welcome(&theme, chat_area.width)
                 } else {
-                    render_chat_lines(&tab.chat_lines, &theme)
+                    render_chat_lines(&tab.chat_lines, &theme, st.show_thinking, &st.omp_theme)
                 };
                 // Compute scroll: the Paragraph scroll offset is relative to the top.
                 // Pin to bottom unless user scrolled up (negative scroll).
@@ -930,15 +1055,23 @@ where
                     .block(Block::default().borders(Borders::NONE));
                 f.render_widget(chat, chat_area);
 
+                // Todo / plan tracker (between chat and input — empty when no items).
+                if todo_h > 0 {
+                    let todo_widget = Paragraph::new(todo_lines)
+                        .style(Style::default().bg(theme.bg));
+                    f.render_widget(todo_widget, chunks[2]);
+                }
+
                 // Input
-                let input_area = chunks[2];
+                let input_area = chunks[3];
                 let input_widget = render_input(&st);
                 f.render_widget(input_widget, input_area);
 
-                // Status bar
-                let status_widget = Paragraph::new(render_status_bar(&st))
+                // Status bar — OMP-style segments. Bump the spinner so it animates.
+                SPINNER_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let status_widget = Paragraph::new(render_status_bar(&st, chunks[4].width))
                     .style(Style::default().bg(theme.status_bg));
-                f.render_widget(status_widget, chunks[3]);
+                f.render_widget(status_widget, chunks[4]);
 
                 // Cursor position inside the input area.
                 let cursor_char_idx = cursor_byte_to_char_idx(&st.input, st.input_cursor);
@@ -1095,6 +1228,12 @@ where
             KeyCode::Char('e') => {
                 let mut st = state.lock();
                 st.input_cursor = st.input.len();
+                return;
+            }
+            KeyCode::Char('t') => {
+                // Toggle thinking visibility.
+                let mut st = state.lock();
+                st.show_thinking = !st.show_thinking;
                 return;
             }
             KeyCode::Char('u') => {

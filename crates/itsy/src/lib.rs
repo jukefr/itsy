@@ -32,6 +32,7 @@ pub mod eval_runner;
 pub mod executor;
 pub mod features_adapter;
 pub mod fullscreen;
+pub mod fullscreen_widgets;
 pub mod governor;
 pub mod init_wizard;
 pub mod interrupt;

@@ -171,6 +171,12 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
     // Reset early-stop bookkeeping for a fresh turn.
     session.mutable.lock().early_stop.new_turn();
 
+    // Bump the turn counter in the fullscreen status line.
+    let fs_handle = session.mutable.lock().fullscreen.clone();
+    if let Some(fs) = fs_handle {
+        fs.record_turn();
+    }
+
 
     // Trace recording: start a fresh trace for this turn.
     {
@@ -475,7 +481,27 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             &json!(chat_ctx.tools),
         );
 
-        let Some(data) = chat_completion(&chat_ctx).await else {
+        // If a fullscreen TUI is attached, stream tokens to it in real time
+        // (content lands in the visible chat, thinking lands in dim/italic
+        // lines hidden behind Ctrl+T). Otherwise fall back to the
+        // non-streaming path which prints once at the end.
+        let fs_for_stream = session.mutable.lock().fullscreen.clone();
+        let data = if let Some(fs) = fs_for_stream {
+            fs.set_streaming(true);
+            let fs_clone = fs.clone();
+            let result = itsy::model_client::chat_completion_streaming(
+                &chat_ctx,
+                move |ev| match ev {
+                    itsy::model_client::StreamEvent::Content(s) => fs_clone.stream_token(&s),
+                    itsy::model_client::StreamEvent::Thinking(s) => fs_clone.stream_thinking_token(&s),
+                },
+            ).await;
+            fs.end_stream();
+            result
+        } else {
+            chat_completion(&chat_ctx).await
+        };
+        let Some(data) = data else {
             session.mutable.lock().trace
                 .record_error("chat_completion", "no response from model");
             println!("  \x1b[31m✗ No response from model\x1b[0m");
@@ -700,6 +726,17 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     &result,
                     elapsed_ms,
                 );
+
+                // Fullscreen counters + assertion mirror.
+                let fs_handle = session.mutable.lock().fullscreen.clone();
+                if let Some(fs) = &fs_handle {
+                    fs.record_tool_call();
+                }
+                if matches!(name.as_str(),
+                    "propose_contract" | "mark_assertion" | "mark_feature" | "close_contract")
+                {
+                    sync_contract_to_todo(session);
+                }
 
                 // Track edited files and reset readonly-turn counter on any mutating call.
                 const MUTATING_TOOLS: &[&str] = &[
@@ -1115,6 +1152,28 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
         let content_opt = msg.get("content").and_then(|c| c.as_str()).map(String::from);
         let content_trimmed_len = content_opt.as_deref().map(|c| c.trim().len()).unwrap_or(0);
 
+        // Surface any extracted reasoning (inline <think> blocks captured by
+        // chat_completion, OR a `reasoning_content` field from providers that
+        // split it out separately) into the fullscreen TUI as a hidden-by-default
+        // line. The user toggles with Ctrl+T.
+        {
+            let fs_opt = session.mutable.lock().fullscreen.clone();
+            if let Some(fs) = &fs_opt {
+                if let Some(blocks) = msg.get("_itsy_thinking_blocks").and_then(|v| v.as_array()) {
+                    for b in blocks {
+                        if let Some(s) = b.as_str() {
+                            fs.add_thinking(s.to_string());
+                        }
+                    }
+                }
+                if let Some(rc) = msg.get("reasoning_content").and_then(|v| v.as_str()) {
+                    if !rc.trim().is_empty() {
+                        fs.add_thinking(rc.to_string());
+                    }
+                }
+            }
+        }
+
         // Empty-response retry: model returned no content AND no tool
         // calls. This is the IQ2_XXS "I give up" failure mode. Push the
         // empty assistant turn (so the model sees its own no-op) and ask
@@ -1192,9 +1251,13 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
             session.mutable.lock().history
                 .push(json!({"role": "assistant", "content": content}));
 
+            // When fullscreen is attached we already streamed the tokens via
+            // chat_completion_streaming; the lines exist in chat_lines and a
+            // second add_chat would duplicate them. Just push the trailing
+            // Spacer so the next prompt is visually separated.
             let fs_assist = session.mutable.lock().fullscreen.clone();
             if let Some(fs) = &fs_assist {
-                fs.add_chat(itsy::fullscreen::ChatRole::Assistant, content.clone());
+                fs.end_stream();
             } else {
                 println!("{}", tui::render_markdown(content));
             }
@@ -1288,7 +1351,40 @@ fn record_usage(data: &Value, session: &AgentSession, is_tool_call: bool) {
             },
         );
         session.mutable.lock().trace.record_tokens(pt, ct);
+
+        // Mirror cumulative cost into the fullscreen status line.
+        let cost = session.shared.read().tokens.cost_usd;
+        let fs_handle = session.mutable.lock().fullscreen.clone();
+        if let Some(fs) = fs_handle {
+            fs.set_cost_usd(cost);
+        }
     }
+}
+
+/// Mirror the current contract's assertions into the fullscreen todo widget,
+/// translating `AssertionState` → `TodoState`. No-op when fullscreen isn't
+/// attached or no contract is loaded.
+fn sync_contract_to_todo(session: &AgentSession) {
+    use itsy::fullscreen_widgets::todo::{TodoItem, TodoState};
+    use itsy::session::contract::AssertionState;
+
+    let fs = match session.mutable.lock().fullscreen.clone() {
+        Some(fs) => fs,
+        None => return,
+    };
+    let Some(contract) = itsy::session::contract::current() else {
+        return;
+    };
+    let items: Vec<TodoItem> = contract.assertions.iter().map(|a| {
+        let state = match a.state {
+            AssertionState::Pending => TodoState::Pending,
+            AssertionState::Passed => TodoState::Complete,
+            AssertionState::Failed => TodoState::Blocked,
+            AssertionState::Skipped => TodoState::Cancelled,
+        };
+        TodoItem { label: a.text.clone(), state, meta: Some(a.id.clone()) }
+    }).collect();
+    fs.set_todo(items);
 }
 
 fn print_tool_result(name: &str, result: &Value, elapsed_ms: u64, verbose: bool) {
@@ -1976,11 +2072,22 @@ async fn run_fullscreen_repl(session: Arc<AgentSession>) -> Result<()> {
     let fs = Arc::new(Fullscreen::with_theme(Theme::from_env()));
     {
         // Seed the status bar from the current config + cwd.
-        fs.set_model(itsy::settings::get().model_name.clone());
+        let settings = itsy::settings::get();
+        fs.set_model(settings.model_name.clone());
         fs.set_status(format!("cwd: {}", session.ro.cwd.display()));
+        let detected = session.shared.read().config.context.detected_window;
+        let ctx_window = itsy::model::profiles::get_profile(
+            &settings.model_name,
+            detected,
+        ).context_length;
+        if ctx_window > 0 {
+            fs.set_context_window(ctx_window);
+        }
     }
 
     session.mutable.lock().fullscreen = Some(fs.clone());
+    // Mirror any pre-existing contract assertions on attach.
+    sync_contract_to_todo(&session);
 
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 

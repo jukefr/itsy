@@ -216,10 +216,311 @@ pub async fn chat_completion(ctx: &ChatContext<'_>) -> Option<Value> {
         // reasoning and response text.
         if let Some(msg) = value.pointer_mut("/choices/0/message") {
             extract_xml_tool_calls(msg);
-            strip_think_tags(msg);
+            // Capture thinking blocks separately so the agent loop can surface
+            // them in the TUI (Ctrl+T toggle) — they're stripped from
+            // `content` for the model side regardless.
+            let blocks = extract_think_blocks(msg);
+            if !blocks.is_empty() {
+                if let Some(obj) = msg.as_object_mut() {
+                    obj.insert(
+                        "_itsy_thinking_blocks".into(),
+                        Value::Array(blocks.into_iter().map(Value::String).collect()),
+                    );
+                }
+            }
         }
 
         return Some(value);
+    }
+}
+
+/// One stream event from [`chat_completion_streaming`]. Callers can update
+/// the TUI in real time as each token arrives.
+#[derive(Debug, Clone)]
+pub enum StreamEvent {
+    /// A visible text fragment (model's user-facing reply).
+    Content(String),
+    /// A reasoning / thinking fragment. Emitted both for:
+    /// - provider-supplied `delta.reasoning_content` (Anthropic-style)
+    /// - inline `<think>...</think>` blocks inside `delta.content`
+    Thinking(String),
+}
+
+/// Streaming variant of [`chat_completion`] — emits per-token callbacks as
+/// the model responds, and returns the same final `Value` shape so the
+/// agent loop doesn't need branching. When the upstream fails or stream
+/// is unsupported, this falls back to [`chat_completion`] internally.
+///
+/// `on_event` is called for every content / thinking chunk. Tool-call
+/// chunks are accumulated silently and surfaced in the returned `Value`.
+pub async fn chat_completion_streaming(
+    ctx: &ChatContext<'_>,
+    mut on_event: impl FnMut(StreamEvent),
+) -> Option<Value> {
+    // Build request body (same shape as chat_completion, with stream=true).
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let processed: Vec<Value> = ctx.conversation.iter().map(|msg| {
+        let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
+        if role != "user" { return msg.clone(); }
+        let Some(content) = msg.get("content").and_then(|c| c.as_str()) else { return msg.clone(); };
+        let images = extract_images(content, &cwd);
+        if images.is_empty() || !model_supports_vision(ctx.model_name) { return msg.clone(); }
+        let mut parts = vec![json!({"type": "text", "text": content})];
+        parts.extend(format_images_for_api(&images));
+        json!({"role": "user", "content": parts})
+    }).collect();
+
+    let mut messages = vec![json!({"role": "system", "content": ctx.system_prompt})];
+    messages.extend(processed);
+
+    let temperature = if ctx.temp_adapt {
+        let task = ctx.current_task_type.unwrap_or("coding");
+        crate::model::adaptive_temp::adaptive_temperature(task, 0)
+    } else {
+        0.1
+    };
+    let task = ctx.current_task_type.unwrap_or("coding");
+    let tokens = crate::model::thinking_budget::thinking_budget(task, 0);
+    let explicit_cap = crate::settings::get().max_output_tokens;
+    let max_tokens = if explicit_cap > 0 {
+        explicit_cap
+    } else {
+        tokens.saturating_add(4096).max(4096)
+    };
+
+    let mut body = json!({
+        "model": ctx.model_name,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": true,
+    });
+    if !ctx.tools.is_empty() {
+        body["tools"] = json!(ctx.tools);
+    }
+    crate::model::thinking_budget::apply_thinking_budget(
+        &mut body, ctx.base_url, tokens, ctx.force_disable_thinking,
+    );
+
+    let client = match reqwest::Client::builder().timeout(ctx.timeout).build() {
+        Ok(c) => c,
+        Err(_) => return chat_completion(ctx).await, // fall back
+    };
+    let url = format!("{}/chat/completions", ctx.base_url);
+    let res = match client.post(&url)
+        .headers(build_auth_headers_for(ctx.api_key.as_deref(), ctx.base_url))
+        .json(&body).send().await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("  \x1b[31m✗ {e}\x1b[0m");
+            return None;
+        }
+    };
+    if !res.status().is_success() {
+        let status = res.status().as_u16();
+        let text = res.text().await.unwrap_or_default();
+        let redacted = crate::security::redact_string(&text);
+        eprintln!("  \x1b[31m✗ API error {status}: {}\x1b[0m",
+            &redacted[..redacted.len().min(200)]);
+        return None;
+    }
+
+    // Stream the SSE response.
+    let mut stream = res.bytes_stream();
+    let mut buffer = String::new();
+    let mut content = String::new();
+    let mut reasoning = String::new();
+    let mut tool_calls_acc: std::collections::BTreeMap<u64, ToolCallAcc> = Default::default();
+    let mut think_state = ThinkSplitter::default();
+    let mut usage: Option<Value> = None;
+    let mut finish_reason: Option<String> = None;
+    let mut model_name: Option<String> = None;
+
+    while let Some(Ok(bytes)) = stream.next().await {
+        buffer.push_str(&String::from_utf8_lossy(&bytes));
+        while let Some(nl) = buffer.find('\n') {
+            let line = buffer[..nl].to_string();
+            buffer.drain(..=nl);
+            let line = line.trim();
+            if !line.starts_with("data: ") { continue; }
+            let payload = &line[6..];
+            if payload == "[DONE]" { break; }
+            let Ok(chunk) = serde_json::from_str::<Value>(payload) else { continue };
+            if let Some(m) = chunk.get("model").and_then(|v| v.as_str()) {
+                if model_name.is_none() { model_name = Some(m.to_string()); }
+            }
+            if let Some(u) = chunk.get("usage") {
+                if !u.is_null() { usage = Some(u.clone()); }
+            }
+            if let Some(fr) = chunk.pointer("/choices/0/finish_reason").and_then(|v| v.as_str()) {
+                finish_reason = Some(fr.to_string());
+            }
+            if let Some(delta) = chunk.pointer("/choices/0/delta") {
+                // delta.content → may contain inline <think>...</think>.
+                if let Some(c) = delta.get("content").and_then(|v| v.as_str()) {
+                    let (vis, think) = think_state.feed(c);
+                    if !vis.is_empty() {
+                        content.push_str(&vis);
+                        on_event(StreamEvent::Content(vis));
+                    }
+                    if !think.is_empty() {
+                        reasoning.push_str(&think);
+                        on_event(StreamEvent::Thinking(think));
+                    }
+                }
+                // delta.reasoning_content → emit as thinking directly.
+                if let Some(r) = delta.get("reasoning_content").and_then(|v| v.as_str()) {
+                    if !r.is_empty() {
+                        reasoning.push_str(r);
+                        on_event(StreamEvent::Thinking(r.to_string()));
+                    }
+                }
+                // delta.tool_calls → accumulate per-index entries.
+                if let Some(tc_arr) = delta.get("tool_calls").and_then(|v| v.as_array()) {
+                    for tc in tc_arr {
+                        let idx = tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let entry = tool_calls_acc.entry(idx).or_default();
+                        if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {
+                            entry.id = id.to_string();
+                        }
+                        if let Some(fname) = tc.pointer("/function/name").and_then(|v| v.as_str()) {
+                            entry.name = fname.to_string();
+                        }
+                        if let Some(fargs) = tc.pointer("/function/arguments").and_then(|v| v.as_str()) {
+                            entry.arguments.push_str(fargs);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Drain any bytes the splitter held back as a safety buffer for partial
+    // tags. Without this, the trailing ≤ "</think>".len() bytes of the last
+    // content chunk would never reach the caller.
+    let (tail_vis, tail_think) = think_state.flush();
+    if !tail_vis.is_empty() {
+        content.push_str(&tail_vis);
+        on_event(StreamEvent::Content(tail_vis));
+    }
+    if !tail_think.is_empty() {
+        reasoning.push_str(&tail_think);
+        on_event(StreamEvent::Thinking(tail_think));
+    }
+
+    // Build the final Value matching chat_completion's shape.
+    let tool_calls: Vec<Value> = tool_calls_acc.into_values().enumerate().map(|(i, t)| {
+        let id = if t.id.is_empty() { format!("call_{i}") } else { t.id };
+        json!({
+            "id": id,
+            "type": "function",
+            "function": {
+                "name": t.name,
+                "arguments": if t.arguments.is_empty() { "{}".into() } else { t.arguments },
+            }
+        })
+    }).collect();
+
+    let mut message = json!({"role": "assistant"});
+    if !content.is_empty() {
+        message["content"] = Value::String(content);
+    }
+    if !tool_calls.is_empty() {
+        message["tool_calls"] = Value::Array(tool_calls);
+    }
+    if !reasoning.is_empty() {
+        message["_itsy_thinking_blocks"] = Value::Array(vec![Value::String(reasoning)]);
+    }
+
+    let mut value = json!({
+        "model": model_name.unwrap_or_else(|| ctx.model_name.into()),
+        "choices": [{
+            "index": 0,
+            "message": message,
+            "finish_reason": finish_reason.unwrap_or_else(|| "stop".into()),
+        }],
+    });
+    if let Some(u) = usage {
+        value["usage"] = u;
+    }
+
+    // Same normalisation chat_completion does — handle Qwen3 XML tool calls.
+    if let Some(msg) = value.pointer_mut("/choices/0/message") {
+        extract_xml_tool_calls(msg);
+    }
+
+    crate::model::chat_log::record(&body, &value, 1);
+    Some(value)
+}
+
+#[derive(Debug, Default)]
+struct ToolCallAcc {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+/// State machine that splits a streamed content string into (visible, thinking)
+/// fragments based on `<think>...</think>` markers. Handles fragments that
+/// span multiple chunks (e.g. `<thi` arrives, then `nk>...`).
+#[derive(Debug, Default)]
+struct ThinkSplitter {
+    /// Are we currently inside a `<think>` block?
+    inside: bool,
+    /// Bytes pending while we wait for a possible partial tag to complete.
+    pending: String,
+}
+
+impl ThinkSplitter {
+    /// Drain any remaining pending bytes once the stream is done.
+    /// Returns (visible, thinking) for the held-back tail. Critical for the
+    /// last chunk — without this, the safety buffer (≤ len("</think>") bytes)
+    /// would never reach the caller.
+    fn flush(&mut self) -> (String, String) {
+        let drained = std::mem::take(&mut self.pending);
+        if self.inside {
+            (String::new(), drained)
+        } else {
+            (drained, String::new())
+        }
+    }
+
+    /// Feed a chunk of content; return (visible, thinking) extracted from it.
+    /// Anything that could be the start of a future `<think>` / `</think>`
+    /// tag is held in `pending` and re-fed on the next call.
+    fn feed(&mut self, chunk: &str) -> (String, String) {
+        self.pending.push_str(chunk);
+        let mut vis = String::new();
+        let mut think = String::new();
+        loop {
+            if self.inside {
+                if let Some(idx) = self.pending.find("</think>") {
+                    think.push_str(&self.pending[..idx]);
+                    self.pending.drain(..idx + "</think>".len());
+                    self.inside = false;
+                    continue;
+                }
+                // No close tag yet — but we mustn't emit the last few bytes
+                // since they could be the start of "</think>".
+                let safe_tail = self.pending.len().saturating_sub("</think>".len() - 1);
+                think.push_str(&self.pending[..safe_tail]);
+                self.pending.drain(..safe_tail);
+                break;
+            } else if let Some(idx) = self.pending.find("<think>") {
+                vis.push_str(&self.pending[..idx]);
+                self.pending.drain(..idx + "<think>".len());
+                self.inside = true;
+                continue;
+            } else {
+                // Hold back the trailing bytes that could start "<think>".
+                let safe_tail = self.pending.len().saturating_sub("<think>".len() - 1);
+                vis.push_str(&self.pending[..safe_tail]);
+                self.pending.drain(..safe_tail);
+                break;
+            }
+        }
+        (vis, think)
     }
 }
 
@@ -384,25 +685,41 @@ pub fn run_validation(file_path: &str) -> Option<ValidationOutcome> {
 /// llama-server normally moves thinking into `reasoning_content`, but
 /// occasionally a stray closing `</think>` or a full `<think>…</think>` block
 /// leaks into content. Remove them so the TUI never shows raw reasoning XML.
+#[allow(dead_code)] // Kept for tests and library callers; `chat_completion`
+                    // uses `extract_think_blocks` directly to surface thinking.
 fn strip_think_tags(msg: &mut Value) {
+    let _ = extract_think_blocks(msg);
+}
+
+/// Like [`strip_think_tags`] but also returns the extracted reasoning so
+/// callers (e.g. the agent loop) can route it to the UI as a separate
+/// `Thinking` chat line. Returns the list of `<think>…</think>` block
+/// contents in document order.
+pub fn extract_think_blocks(msg: &mut Value) -> Vec<String> {
     let content = match msg.get("content").and_then(|v| v.as_str()) {
         Some(c) if c.contains("</think>") || c.contains("<think>") => c.to_string(),
-        _ => return,
+        _ => return Vec::new(),
     };
 
-    // Strip full <think>…</think> blocks first, then any orphaned closing tag.
     let mut s = content.clone();
+    let mut blocks: Vec<String> = Vec::new();
     loop {
         if let Some(a) = s.find("<think>") {
             if let Some(rel) = s[a..].find("</think>") {
+                let block_start = a + "<think>".len();
+                let block_end = a + rel;
+                let block: String = s[block_start..block_end].trim().to_string();
+                if !block.is_empty() { blocks.push(block); }
                 s.drain(a..a + rel + "</think>".len());
                 continue;
             } else {
+                // Orphan opener: everything after is treated as thinking.
+                let block: String = s[a + "<think>".len()..].trim().to_string();
+                if !block.is_empty() { blocks.push(block); }
                 s.drain(a..);
                 break;
             }
         }
-        // No more open tags — remove orphaned </think> if present.
         while let Some(pos) = s.find("</think>") {
             s.drain(pos..pos + "</think>".len());
         }
@@ -410,16 +727,14 @@ fn strip_think_tags(msg: &mut Value) {
     }
 
     let clean = s.trim().to_string();
-    if clean == content.trim() {
-        return;
-    }
     if let Some(obj) = msg.as_object_mut() {
         if clean.is_empty() {
             obj.remove("content");
-        } else {
+        } else if clean != content.trim() {
             obj.insert("content".into(), Value::String(clean));
         }
     }
+    blocks
 }
 
 /// Normalise Qwen3-style `<tool_call>` XML that leaks into the content field
@@ -996,6 +1311,196 @@ mod tests {
         let convo = vec![json!({"role":"user","content":"x"})];
         let r = stream_final_response("test", &server.uri(), None, 5, &convo, None, |_| {}).await;
         assert_eq!(r, Some("survives".into()));
+    }
+
+    // ── ThinkSplitter unit tests ────────────────────────────────────────
+
+    /// Plain text with no tags must emit verbatim once flushed.
+    #[test]
+    fn think_splitter_passes_plain_text() {
+        let mut ts = ThinkSplitter::default();
+        let (vis, think) = ts.feed("hello world");
+        let (tail_vis, tail_think) = ts.flush();
+        let total_vis = format!("{vis}{tail_vis}");
+        assert_eq!(total_vis, "hello world");
+        assert!(think.is_empty() && tail_think.is_empty());
+    }
+
+    /// Complete `<think>foo</think>` in one chunk splits cleanly across feed+flush.
+    #[test]
+    fn think_splitter_handles_complete_block() {
+        let mut ts = ThinkSplitter::default();
+        let (vis, think) = ts.feed("before <think>secret</think> after");
+        let (tail_vis, _) = ts.flush();
+        let total_vis = format!("{vis}{tail_vis}");
+        assert_eq!(total_vis, "before  after");
+        assert_eq!(think, "secret");
+    }
+
+    /// Tag split across chunks — must NOT leak partial markup as content.
+    /// Anti-regression: a naive splitter would emit "<thi" then "nk>foo</think>" as content.
+    #[test]
+    fn think_splitter_tag_split_across_chunks() {
+        let mut ts = ThinkSplitter::default();
+        let (v1, t1) = ts.feed("hi <thi");
+        assert!(t1.is_empty());
+        assert!(!v1.contains("<thi"), "must not leak partial tag; got {v1:?}");
+
+        let (v2, t2) = ts.feed("nk>secret</think> done");
+        let (tail_v, _) = ts.flush();
+        let total_vis = format!("{v1}{v2}{tail_v}");
+        // "hi " comes out; "<think>secret</think>" is consumed; " done" comes out.
+        assert_eq!(total_vis, "hi  done");
+        assert_eq!(t2, "secret");
+        assert!(!total_vis.contains("<think>"));
+        assert!(!total_vis.contains("</think>"));
+    }
+
+    /// Multiple tag blocks in one feed.
+    #[test]
+    fn think_splitter_multiple_blocks() {
+        let mut ts = ThinkSplitter::default();
+        let (v, t) = ts.feed("a<think>X</think>b<think>Y</think>c");
+        let (tail_v, _) = ts.flush();
+        assert_eq!(t, "XY");
+        assert_eq!(format!("{v}{tail_v}"), "abc");
+    }
+
+    // ── chat_completion_streaming via wiremock ──────────────────────────
+
+    #[tokio::test]
+    async fn streaming_emits_content_tokens_in_order() {
+        let server = MockServer::start().await;
+        let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\
+                   data: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\
+                   data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\
+                   data: [DONE]\n";
+        Mock::given(method("POST")).and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sse))
+            .mount(&server).await;
+
+        let convo = vec![json!({"role":"user","content":"hi"})];
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let c2 = captured.clone();
+        let v = chat_completion_streaming(&chat_ctx(&server.uri(), vec![], &convo), move |ev| {
+            if let StreamEvent::Content(s) = ev {
+                c2.lock().unwrap().push(s);
+            }
+        }).await.expect("streaming must return Some");
+
+        let tokens = captured.lock().unwrap().clone();
+        assert_eq!(tokens, vec!["Hello".to_string(), " world".to_string()]);
+        // Final value carries accumulated content.
+        assert_eq!(v["choices"][0]["message"]["content"], "Hello world");
+        assert_eq!(v["choices"][0]["finish_reason"], "stop");
+    }
+
+    /// `delta.reasoning_content` chunks come out as Thinking events.
+    #[tokio::test]
+    async fn streaming_splits_reasoning_content_to_thinking() {
+        let server = MockServer::start().await;
+        let sse = "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"step 1\"}}]}\n\
+                   data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\
+                   data: [DONE]\n";
+        Mock::given(method("POST")).and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sse))
+            .mount(&server).await;
+
+        let convo = vec![json!({"role":"user","content":"x"})];
+        let thinking = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let content = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let t2 = thinking.clone();
+        let c2 = content.clone();
+        let v = chat_completion_streaming(&chat_ctx(&server.uri(), vec![], &convo), move |ev| {
+            match ev {
+                StreamEvent::Content(s) => c2.lock().unwrap().push_str(&s),
+                StreamEvent::Thinking(s) => t2.lock().unwrap().push_str(&s),
+            }
+        }).await.unwrap();
+
+        assert_eq!(*thinking.lock().unwrap(), "step 1");
+        assert_eq!(*content.lock().unwrap(), "answer");
+        // Final Value has `_itsy_thinking_blocks`.
+        assert!(v["choices"][0]["message"]["_itsy_thinking_blocks"].is_array());
+    }
+
+    /// Inline `<think>` block in `delta.content` becomes Thinking, surrounding
+    /// text stays Content.
+    #[tokio::test]
+    async fn streaming_splits_inline_think_tags() {
+        let server = MockServer::start().await;
+        let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"before <think>reasoning</think> after\"}}]}\n\
+                   data: [DONE]\n";
+        Mock::given(method("POST")).and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sse))
+            .mount(&server).await;
+
+        let convo = vec![json!({"role":"user","content":"x"})];
+        let thinking = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let content = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let t2 = thinking.clone();
+        let c2 = content.clone();
+        let v = chat_completion_streaming(&chat_ctx(&server.uri(), vec![], &convo), move |ev| {
+            match ev {
+                StreamEvent::Content(s) => c2.lock().unwrap().push_str(&s),
+                StreamEvent::Thinking(s) => t2.lock().unwrap().push_str(&s),
+            }
+        }).await.unwrap();
+
+        let think = thinking.lock().unwrap().clone();
+        let cont = content.lock().unwrap().clone();
+        assert_eq!(think, "reasoning");
+        assert!(cont.contains("before"));
+        assert!(cont.contains("after"));
+        // The visible content in the Value MUST NOT contain raw tags.
+        let final_content = v["choices"][0]["message"]["content"].as_str().unwrap().to_string();
+        assert!(!final_content.contains("<think>"));
+        assert!(!final_content.contains("</think>"));
+    }
+
+    /// Streaming tool_calls accumulate by `index` across multiple deltas.
+    #[tokio::test]
+    async fn streaming_accumulates_tool_call_deltas() {
+        let server = MockServer::start().await;
+        // First delta: index 0, name "bash", first arg chunk.
+        // Second delta: index 0, more args.
+        // Third delta: index 1, different tool.
+        let sse = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[\
+                    {\"index\":0,\"id\":\"call_a\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"cmd\\\":\\\"l\"}}\
+                  ]}}]}\n\
+                   data: {\"choices\":[{\"delta\":{\"tool_calls\":[\
+                    {\"index\":0,\"function\":{\"arguments\":\"s\\\"}\"}}\
+                  ]}}]}\n\
+                   data: {\"choices\":[{\"delta\":{\"tool_calls\":[\
+                    {\"index\":1,\"id\":\"call_b\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{}\"}}\
+                  ]}}]}\n\
+                   data: [DONE]\n";
+        Mock::given(method("POST")).and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sse))
+            .mount(&server).await;
+
+        let convo = vec![json!({"role":"user","content":"do stuff"})];
+        let v = chat_completion_streaming(&chat_ctx(&server.uri(), vec![], &convo), |_| {}).await.unwrap();
+
+        let calls = v["choices"][0]["message"]["tool_calls"].as_array().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["function"]["name"], "bash");
+        assert_eq!(calls[0]["function"]["arguments"], "{\"cmd\":\"ls\"}",
+            "argument chunks must be concatenated in order");
+        assert_eq!(calls[1]["function"]["name"], "read_file");
+        assert_eq!(calls[1]["id"], "call_b");
+    }
+
+    /// HTTP error during streaming returns None — no panic on transport failure.
+    #[tokio::test]
+    async fn streaming_returns_none_on_4xx() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&server).await;
+        let convo = vec![json!({"role":"user","content":"x"})];
+        let r = chat_completion_streaming(&chat_ctx(&server.uri(), vec![], &convo), |_| {}).await;
+        assert!(r.is_none());
     }
 }
 
