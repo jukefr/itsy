@@ -184,7 +184,22 @@ impl FileStateTracker {
     }
 
     /// Record a write so the tracker knows the new state.
+    ///
+    /// If this is the first time we're hearing about `path` and the file
+    /// already exists on disk, snapshot the pre-write content into
+    /// `originals` so `get_original` works even when the agent patches
+    /// without first calling `read_file`. Falls through silently on any IO
+    /// error — losing the baseline is the same as the prior behaviour, so
+    /// this can never regress anything; it only adds coverage.
     pub fn record_write(&self, path: &Path, content: &str) {
+        {
+            let mut orig = self.originals.lock();
+            if !orig.contains_key(path) {
+                if let Ok(disk) = std::fs::read_to_string(path) {
+                    orig.insert(path.to_path_buf(), disk);
+                }
+            }
+        }
         let hash = hash_content(content);
         let mut g = self.known.lock();
         let read_count = g.get(path).map(|e| e.read_count).unwrap_or(0);
@@ -203,6 +218,24 @@ impl FileStateTracker {
     /// before any writes. Returns `None` if the file was never read.
     pub fn get_original(&self, path: &Path) -> Option<String> {
         self.originals.lock().get(path).cloned()
+    }
+
+    /// Return every tracked path whose current `known` content differs from
+    /// its captured original. Used by the evaluator phase to surface "which
+    /// files did the agent actually change?" without having to infer it from
+    /// the task text.
+    pub fn edited_paths(&self) -> Vec<PathBuf> {
+        let orig = self.originals.lock();
+        let known = self.known.lock();
+        let mut out: Vec<PathBuf> = orig.iter()
+            .filter_map(|(p, original)| {
+                known.get(p).and_then(|e| {
+                    if e.content != *original { Some(p.clone()) } else { None }
+                })
+            })
+            .collect();
+        out.sort();
+        out
     }
 
     /// Clear all state — call between agent runs.
@@ -255,7 +288,7 @@ struct Hunk {
 
 /// Compute a simplified unified diff between two texts (line-level LCS).
 /// Returns an empty string if no changes.
-pub(crate) fn compute_unified_diff(old: &str, new: &str, path: &Path, context_lines: usize) -> String {
+pub fn compute_unified_diff(old: &str, new: &str, path: &Path, context_lines: usize) -> String {
     let old_lines: Vec<&str> = old.split('\n').collect();
     let new_lines: Vec<&str> = new.split('\n').collect();
     if old_lines == new_lines {
@@ -506,6 +539,71 @@ mod tests {
         let _ = t.record(&p, "a\n");
         t.forget(&p);
         assert!(matches!(t.record(&p, "a\n"), RecordResult::Full));
+    }
+
+    /// First-write-without-prior-read still captures the on-disk baseline.
+    /// Anti-regression: previously, patch-then-write without `read_file`
+    /// left `get_original` empty, breaking the evaluator's diff machinery.
+    #[test]
+    fn record_write_captures_original_from_disk_when_no_prior_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("foo.txt");
+        std::fs::write(&p, "before\n").unwrap();
+        let t = tracker_enabled();
+        // Note: NO prior `record` / `read` call.
+        t.record_write(&p, "after\n");
+        assert_eq!(t.get_original(&p).as_deref(), Some("before\n"),
+            "first-write must snapshot pre-existing disk content");
+    }
+
+    /// Writing a brand-new file (no disk content yet) doesn't fabricate
+    /// an empty original — `get_original` stays `None`.
+    #[test]
+    fn record_write_does_not_capture_original_for_new_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("brand-new.txt");
+        let t = tracker_enabled();
+        t.record_write(&p, "created from nothing\n");
+        assert!(t.get_original(&p).is_none(),
+            "first-write to a non-existent file must not invent an original");
+    }
+
+    /// A subsequent write does NOT overwrite the first-captured original.
+    /// The "original" is whatever existed before the first write of the session.
+    #[test]
+    fn second_write_preserves_first_captured_original() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("foo.txt");
+        std::fs::write(&p, "v0\n").unwrap();
+        let t = tracker_enabled();
+        t.record_write(&p, "v1\n");
+        // Simulate the on-disk content advancing past v0 (which is what a
+        // real write does — record_write doesn't actually write disk).
+        std::fs::write(&p, "v1\n").unwrap();
+        t.record_write(&p, "v2\n");
+        assert_eq!(t.get_original(&p).as_deref(), Some("v0\n"),
+            "original must remain the pre-first-write content");
+    }
+
+    /// `edited_paths` returns paths whose current known content differs
+    /// from the captured original.
+    #[test]
+    fn edited_paths_returns_only_diverged_paths() {
+        let t = tracker_enabled();
+        let a = PathBuf::from("/x/a.txt");
+        let b = PathBuf::from("/x/b.txt");
+        let c = PathBuf::from("/x/c.txt");
+        // a: read, then written with different content → edited
+        let _ = t.record(&a, "a-orig\n");
+        t.record_write(&a, "a-new\n");
+        // b: read, then written with same content → not edited
+        let _ = t.record(&b, "b-orig\n");
+        t.record_write(&b, "b-orig\n");
+        // c: only read, never written → not edited
+        let _ = t.record(&c, "c-orig\n");
+
+        let edited = t.edited_paths();
+        assert_eq!(edited, vec![a]);
     }
 
     #[test]

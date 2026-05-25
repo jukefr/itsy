@@ -494,6 +494,12 @@ async fn ask_for_assertions(
         "You are reviewing a coding task. Generate a list of testable assertions \
 (acceptance criteria) that can be verified by running commands or inspecting files. \
 Each assertion must be specific and concrete.\n\n\
+For every constraint in the brief, write an assertion that verifies the constraint \
+directly — not a proxy. If the brief constrains the *content* of a modification (what \
+something becomes, what range/set it must come from, what shape it must have), the \
+assertion must check the modification itself, not just the existence or integrity of \
+related files. A file-unchanged or compile-succeeded check does not verify a content \
+constraint.\n\n\
 Title: {title}\n\
 Brief: {brief}\n\n\
 Return ONLY a JSON array, no markdown or explanation:\n\
@@ -523,6 +529,11 @@ If they fully and correctly cover what needs to be done, return {{\"accept\":tru
 If any are missing, wrong, or too broad to verify, return the full revised list as \
 {{\"accept\":false,\"revised\":[{{\"id\":\"A1\",\"text\":\"...\"}},...]}}\n\
 Break broad assertions into specific verifiable ones. Remove duplicates.\n\n\
+For every constraint in the brief, check that an assertion verifies the constraint \
+directly. A proxy check (file unchanged, compile succeeded, output exists) is not \
+enough when the brief restricts the *content* of a modification — that requires an \
+assertion that examines the modification itself. If a constraint is unverified, add \
+or rewrite an assertion to cover it.\n\n\
 Brief: {brief}\n\nAssertions:\n{assertions_json}\n\nReturn ONLY JSON."
     );
 

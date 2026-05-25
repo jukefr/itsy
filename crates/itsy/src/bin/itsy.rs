@@ -53,7 +53,9 @@ fn max_tool_calls_per_turn() -> u32 {
 }
 
 use itsy::runtime::agent_helpers::recency_tool_hint;
-use itsy::runtime::evaluator::{evaluator_read_file, evaluator_run_bash};
+use itsy::runtime::evaluator::{
+    evaluator_diff_from_original, evaluator_read_file, evaluator_read_original, evaluator_run_bash,
+};
 use itsy::runtime::mcp_server::{
     apply_unique_patch, build_error_response, build_initialize_response,
     build_tool_text_result, build_tools_list_response, is_destructive_command,
@@ -1483,9 +1485,50 @@ async fn run_non_interactive(session: &AgentSession, prompt: Option<String>) {
     // contract feature is on and the generator closed the contract as
     // completed. The evaluator gets a fresh context window (no generator
     // history) and tries to break the solution by running checks itself.
+    //
+    // On failure, fold the findings back into a synthetic user prompt and
+    // re-run handle_turn so the generator can fix the issues. Caps at 2
+    // retries to bound runtime when the evaluator is wrong or the model
+    // can't actually fix what's flagged.
+    const MAX_EVALUATOR_RETRIES: u32 = 2;
     if itsy::settings::get().contract {
-        if let Some(completed) = itsy::session::contract::take_completed() {
+        for retry in 0..=MAX_EVALUATOR_RETRIES {
+            let Some(completed) = itsy::session::contract::take_completed() else {
+                break;
+            };
+            // Discard any stale verdict from a prior turn before this call.
+            let _ = itsy::session::contract::take_evaluator_result();
             run_evaluator_phase(&prompt, session, &completed).await;
+            let verdict = itsy::session::contract::take_evaluator_result();
+            match verdict {
+                Some(r) if !r.passed && retry < MAX_EVALUATOR_RETRIES => {
+                    // Inline findings rather than relying on the history
+                    // push in evaluator_emit_result — context compaction
+                    // can drop earlier turns, and the generator needs the
+                    // concrete repair list right where it's reading.
+                    let findings_block = if r.findings.is_empty() {
+                        "(no specific findings — evaluator failed without details)"
+                            .to_string()
+                    } else {
+                        r.findings.iter()
+                            .map(|f| format!("  - {f}"))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    };
+                    let synthetic_prompt = format!(
+                        "[EVALUATOR retry {}/{}] Independent verification rejected the \
+                         contract close. Fix these findings:\n{}\n\nAfter fixing, re-open \
+                         or amend the contract (propose_contract / mark_assertion / \
+                         close_contract). Do not just re-assert without changing the \
+                         underlying behaviour.",
+                        retry + 1,
+                        MAX_EVALUATOR_RETRIES,
+                        findings_block,
+                    );
+                    handle_turn(&synthetic_prompt, session).await;
+                }
+                _ => break,
+            }
         }
     }
 }
@@ -1500,6 +1543,10 @@ fn evaluator_tools() -> Vec<Value> {
         tool("bash", "Run a shell command and return stdout+stderr. Use for verification only.",
             json!({"type":"object","properties":{"command":{"type":"string"}},"required":["command"]})),
         tool("read_file", "Read a file. Returns content.",
+            json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]})),
+        tool("read_original", "Read the original (pre-edit) content of a file as it was before any edits this session. Returns the content as first read by read_file. Use to diff against current content and verify which specific changes were made.",
+            json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]})),
+        tool("diff_from_original", "Return a unified diff between the original (pre-edit) content of a file and its current on-disk content. Use this INSTEAD of mentally diffing read_original vs read_file — the diff is mechanical and exact. Required before evaluator_verdict when the task constrains the content of edits.",
             json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]})),
         tool("evaluator_verdict",
             "Report your evaluation verdict. Call this ONCE when you have checked all assertions.",
@@ -1539,17 +1586,47 @@ async fn run_evaluator_phase(
         config.model.base_url = e;
     }
 
+    // #7: machine-known list of files the generator actually changed this
+    // run. Computed from FileStateTracker (paths with an original that
+    // differs from current known content). Passed to the evaluator so it
+    // doesn't have to infer "what might have been edited" from the task.
+    let edited_paths: Vec<String> = session.shared.read().file_state
+        .edited_paths()
+        .into_iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    let edited_section = if edited_paths.is_empty() {
+        "Files edited this run: (none recorded — generator may have made no \
+         file changes, or changes happened outside the tracked tools)".to_string()
+    } else {
+        format!(
+            "Files edited this run (compare each against its original):\n{}",
+            edited_paths.iter().map(|p| format!("  - {p}")).collect::<Vec<_>>().join("\n")
+        )
+    };
+
     let system_prompt = format!(
         "You are an adversarial evaluator. A code generator claimed to have completed the \
          following task — your job is to independently verify whether it actually did.\n\n\
          TASK:\n{task}\n\n\
          Working directory: {cwd}\n\n\
+         {edited_section}\n\n\
          You have no knowledge of what the generator did or claimed. Devise your own \
          verification strategy from the task description alone. Use `bash` to run commands \
          and observe real output. Use `read_file` to inspect files.\n\n\
+         When the task constrains *what* a file may become — not just that it exists or \
+         that it compiles — you must check the modification directly. Call \
+         `diff_from_original` on every file listed above (and any other file the task \
+         mentions as input/source). Verify that every change shown in the diff satisfies \
+         the constraints stated in the task. A proxy check (file exists, file compiles, \
+         related files unchanged) does not prove the edits themselves were legal.\n\n\
+         REQUIRED: before calling evaluator_verdict with passed=true, you MUST have \
+         called diff_from_original (or read_original) on every file listed above. A \
+         passed verdict without that comparison will be overridden to failed.\n\n\
          When you have enough evidence, call `evaluator_verdict` with:\n\
-         - passed=true if the task is genuinely complete\n\
-         - passed=false + findings describing what is wrong or missing\n\n\
+         - passed=true if the task is genuinely complete AND every constraint holds\n\
+         - passed=false + findings describing what is wrong, missing, or violates a \
+           task constraint\n\n\
          Be terse and direct. If the first check reveals a clear failure, call \
          evaluator_verdict immediately."
     );
@@ -1559,6 +1636,11 @@ async fn run_evaluator_phase(
         "role": "user",
         "content": "Begin evaluation."
     })];
+
+    // #1: track which paths the evaluator actually compared. A passed=true
+    // verdict gets overridden to failed when this set doesn't cover the
+    // machine-known edited_paths.
+    let mut compared_paths: std::collections::HashSet<String> = Default::default();
 
     println!("\n  \x1b[36m◆ evaluator phase starting ({} assertions)\x1b[0m", contract.assertions.len());
 
@@ -1577,7 +1659,14 @@ async fn run_evaluator_phase(
         };
 
         let Some(response) = itsy::model_client::chat_completion(&ctx).await else {
-            println!("  \x1b[31m✗ evaluator API call failed\x1b[0m");
+            // #4: API failure is a verdict, not a silent return. The safety
+            // net would otherwise be bypassed on evaluator outages.
+            println!("  \x1b[31m✗ evaluator API call failed — treating as fail\x1b[0m");
+            evaluator_emit_result(
+                false,
+                &["evaluator API call failed; verdict unrecorded".into()],
+                session,
+            );
             return;
         };
 
@@ -1609,7 +1698,13 @@ async fn run_evaluator_phase(
                 }));
                 continue;
             }
+            // #4: out of turns with no verdict is also a verdict.
             println!("  \x1b[33m⚠ evaluator reached turn limit without verdict\x1b[0m");
+            evaluator_emit_result(
+                false,
+                &["evaluation inconclusive: turn limit reached without verdict".into()],
+                session,
+            );
             return;
         }
 
@@ -1645,6 +1740,18 @@ async fn run_evaluator_phase(
                 "read_file" => {
                     let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
                     evaluator_read_file(path, &cwd)
+                }
+                "read_original" => {
+                    let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                    println!("  \x1b[36m  eval$ read_original {}\x1b[0m", path);
+                    compared_paths.insert(canonical_compare_key(path, &cwd));
+                    evaluator_read_original(path, &cwd)
+                }
+                "diff_from_original" => {
+                    let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                    println!("  \x1b[36m  eval$ diff_from_original {}\x1b[0m", path);
+                    compared_paths.insert(canonical_compare_key(path, &cwd));
+                    evaluator_diff_from_original(path, &cwd)
                 }
                 "evaluator_verdict" => {
                     let passed = args
@@ -1687,7 +1794,33 @@ async fn run_evaluator_phase(
 
         history.extend(tool_results);
 
-        if let Some((passed, findings)) = verdict {
+        if let Some((passed, mut findings)) = verdict {
+            // #1: enforce that a passed verdict actually compared every
+            // edited file against its original. Override on miss.
+            if passed {
+                let missing: Vec<String> = edited_paths.iter()
+                    .filter(|p| !compared_paths.contains(&canonical_compare_key(p, &cwd)))
+                    .cloned()
+                    .collect();
+                if !missing.is_empty() {
+                    let list = missing.iter()
+                        .map(|p| format!("    · {p}"))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    println!(
+                        "  \x1b[33m⚠ overriding passed verdict — evaluator did not \
+                         compare originals on {} edited file(s):\n{}\x1b[0m",
+                        missing.len(), list,
+                    );
+                    findings.insert(0, format!(
+                        "evaluation invalid: passed verdict without diff_from_original \
+                         or read_original on edited files: {}",
+                        missing.join(", "),
+                    ));
+                    evaluator_emit_result(false, &findings, session);
+                    return;
+                }
+            }
             evaluator_emit_result(passed, &findings, session);
             return;
         }
@@ -1696,6 +1829,22 @@ async fn run_evaluator_phase(
     // Turn budget exhausted without a verdict — treat as inconclusive fail.
     println!("  \x1b[33m⚠ evaluator exhausted turns without reaching verdict\x1b[0m");
     evaluator_emit_result(false, &["evaluation inconclusive: turn limit reached".into()], session);
+}
+
+/// Normalise a path argument into a canonical key for comparing against the
+/// machine-known edited-files list. The list contains absolute paths from
+/// the FileStateTracker; evaluator tool calls may pass relative paths.
+fn canonical_compare_key(path: &str, cwd: &str) -> String {
+    let p = if std::path::Path::new(path).is_absolute() {
+        std::path::PathBuf::from(path)
+    } else {
+        std::path::Path::new(cwd).join(path)
+    };
+    // Resolve `..`/symlinks where possible; fall back to lexical join.
+    std::fs::canonicalize(&p)
+        .unwrap_or(p)
+        .to_string_lossy()
+        .to_string()
 }
 
 fn evaluator_emit_result(passed: bool, findings: &[String], session: &AgentSession) {

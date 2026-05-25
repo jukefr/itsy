@@ -8,6 +8,8 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use crate::session::file_state::get_file_state_tracker;
+
 pub struct BashOutput {
     pub exit_code: i32,
     pub stdout: String,
@@ -140,11 +142,78 @@ pub fn evaluator_read_file(path: &str, cwd: &str) -> String {
     }
 }
 
+/// Compute a deterministic unified diff between the captured original of
+/// `path` and its current on-disk content. Returns a unified-diff string,
+/// an explanatory message when there's nothing to compare, or an error.
+/// Lets the evaluator skip the mental-diff step that small/quantized models
+/// reliably get wrong.
+pub fn evaluator_diff_from_original(path: &str, cwd: &str) -> String {
+    let p = if std::path::Path::new(path).is_absolute() {
+        PathBuf::from(path)
+    } else {
+        std::path::Path::new(cwd).join(path)
+    };
+    let original = match get_file_state_tracker().get_original(&p) {
+        Some(s) => s,
+        None => return format!(
+            "No original content recorded for {}. The file was never read \
+             or written this session, so there is no baseline to diff against.",
+            p.display()
+        ),
+    };
+    let current = match std::fs::read_to_string(&p) {
+        Ok(s) => s,
+        Err(e) => return format!("error reading current {}: {e}", p.display()),
+    };
+    let diff = crate::session::file_state::compute_unified_diff(
+        &original, &current, &p, 3,
+    );
+    if diff.trim().is_empty() {
+        format!("No differences between original and current {}.", p.display())
+    } else if diff.len() > 6000 {
+        let mut end = 6000;
+        while end > 0 && !diff.is_char_boundary(end) { end -= 1; }
+        format!("{}\n[diff truncated at 6000 chars]", &diff[..end])
+    } else {
+        diff
+    }
+}
+
+/// Read the original (pre-edit) content of a file, as first read this session.
+/// Returns the content that was captured the first time `read_file` was called
+/// for this path, before any edits. Caps at 3000 chars like `evaluator_read_file`.
+pub fn evaluator_read_original(path: &str, cwd: &str) -> String {
+    let p = if std::path::Path::new(path).is_absolute() {
+        PathBuf::from(path)
+    } else {
+        std::path::Path::new(cwd).join(path)
+    };
+    match get_file_state_tracker().get_original(&p) {
+        Some(s) => {
+            if s.len() > 3000 {
+                let mut end = 3000;
+                while end > 0 && !s.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{}\n[file truncated at 3000 chars]", &s[..end])
+            } else {
+                s
+            }
+        }
+        None => format!(
+            "No original content recorded for {}. The file was never read with read_file, \
+             or the session has been reset.",
+            p.display()
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::file_state::reset_file_state_tracker;
 
-    // ── run_bash_with_timeout ─────────────────────────────────────────────
+    // ── run_bash_with_timeout
 
     #[test]
     fn bash_success_returns_zero_exit_code() {
@@ -301,5 +370,125 @@ mod tests {
         assert!(s.contains("[file truncated"));
         // Verify char_boundary safety: re-read indices.
         let _ = s.chars().count();
+    }
+
+    // ── evaluator_read_original ──────────────────────────────────────────────
+
+    #[test]
+    fn read_original_returns_content_when_recorded() {
+        reset_file_state_tracker();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("test.txt");
+        std::fs::write(&path, "original content").unwrap();
+
+        // Simulate the first read that records the original.
+        get_file_state_tracker().record(&path, "original content");
+
+        // Now overwrite the file (as the generator would).
+        std::fs::write(&path, "modified content").unwrap();
+
+        // read_original should return the pre-edit version.
+        let cwd = tmp.path().to_string_lossy();
+        let s = evaluator_read_original("test.txt", &cwd);
+        assert_eq!(s, "original content", "must return original, not current");
+    }
+
+    #[test]
+    fn read_original_returns_error_when_never_read() {
+        reset_file_state_tracker();
+        let s = evaluator_read_original("never_read.txt", "/tmp");
+        assert!(s.contains("No original content recorded"), "got: {s}");
+    }
+
+    #[test]
+    fn read_original_truncates_at_3000_chars() {
+        reset_file_state_tracker();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("big.txt");
+        let big = "x".repeat(10_000);
+        std::fs::write(&path, &big).unwrap();
+        get_file_state_tracker().record(&path, &big);
+
+        let cwd = tmp.path().to_string_lossy();
+        let s = evaluator_read_original("big.txt", &cwd);
+        assert!(s.contains("[file truncated"), "must mark truncation");
+        assert!(s.len() <= 3100, "got {} chars total", s.len());
+    }
+
+    #[test]
+    fn read_original_resolves_absolute_paths() {
+        reset_file_state_tracker();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("abs.txt");
+        std::fs::write(&path, "abs original").unwrap();
+        get_file_state_tracker().record(&path, "abs original");
+
+        let s = evaluator_read_original(&path.to_string_lossy(), "/nonexistent/cwd");
+        assert_eq!(s, "abs original", "absolute path must NOT be joined with cwd");
+    }
+
+    // ── evaluator_diff_from_original ─────────────────────────────────────────
+
+    /// Diff highlights the actual changed lines (line-level unified diff).
+    /// Anti-regression: this is the tool that exists so a small quantized
+    /// model doesn't have to mentally diff two blobs.
+    #[test]
+    fn diff_from_original_shows_changed_lines() {
+        reset_file_state_tracker();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("t.tex");
+        std::fs::write(&path, "an apple\na cat\na dog\n").unwrap();
+        get_file_state_tracker().record(&path, "an apple\na cat\na dog\n");
+
+        // Generator changes "an apple" → "a apple" (illegal article swap).
+        std::fs::write(&path, "a apple\na cat\na dog\n").unwrap();
+
+        let cwd = tmp.path().to_string_lossy();
+        let diff = evaluator_diff_from_original("t.tex", &cwd);
+        assert!(diff.contains("-an apple"), "diff must show removed line, got: {diff}");
+        assert!(diff.contains("+a apple"), "diff must show added line, got: {diff}");
+    }
+
+    /// No diff when current matches original — explicit message, not an
+    /// empty string (model shouldn't have to interpret silence).
+    #[test]
+    fn diff_from_original_reports_no_changes_when_identical() {
+        reset_file_state_tracker();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("same.txt");
+        std::fs::write(&path, "unchanged\n").unwrap();
+        get_file_state_tracker().record(&path, "unchanged\n");
+
+        let cwd = tmp.path().to_string_lossy();
+        let out = evaluator_diff_from_original("same.txt", &cwd);
+        assert!(out.contains("No differences"), "expected explicit no-diff message, got: {out}");
+    }
+
+    /// No baseline → explicit explanation, not a misleading empty diff.
+    #[test]
+    fn diff_from_original_reports_missing_baseline() {
+        reset_file_state_tracker();
+        let out = evaluator_diff_from_original("/tmp/never_seen_by_session.txt", "/tmp");
+        assert!(out.contains("No original content"), "expected baseline-missing message, got: {out}");
+    }
+
+    /// Picks up the `record_write` baseline path too — not just `record`.
+    /// Anti-regression for the patch-without-prior-read case (the change
+    /// to `record_write` in this same PR).
+    #[test]
+    fn diff_from_original_uses_record_write_baseline() {
+        reset_file_state_tracker();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("patched.txt");
+        std::fs::write(&path, "before\n").unwrap();
+        // No prior `record` — the generator patched directly.
+        get_file_state_tracker().record_write(&path, "after\n");
+        // The on-disk content reflects what record_write thinks is current.
+        std::fs::write(&path, "after\n").unwrap();
+
+        let cwd = tmp.path().to_string_lossy();
+        let diff = evaluator_diff_from_original("patched.txt", &cwd);
+        assert!(diff.contains("-before"), "must use record_write baseline, got: {diff}");
+        assert!(diff.contains("+after"), "got: {diff}");
     }
 }
