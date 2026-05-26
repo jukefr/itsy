@@ -209,8 +209,8 @@ async fn exec_read_file(args: &Value, cwd: &Path) -> Value {
 
         // Summarize large files (>200 lines) via the features adapter.
         // Matches JS Feature 2: context savings on large files with no range.
-        if total > 200 && crate::features_adapter::is_features_available() {
-            if let Some(summary) = crate::features_adapter::summarize_file_compiled(path, &content, 600).await {
+        if total > 200 {
+            if let Some(summary) = crate::runtime::features::summarize::summarize_file_compiled(path, &content, 600).await {
                 if summary.len() > 50 {
                     return json!({"result": format!("{path} ({total} lines — summarized):\n{}", sanitize_tool_output(&summary))});
                 }
@@ -454,7 +454,7 @@ async fn maybe_prepend_error_diagnosis(
     if !enabled {
         return output.to_string();
     }
-    let Some(diag) = crate::features_adapter::diagnose_error(command, output, exit_code).await else {
+    let Some(diag) = crate::runtime::features::diagnose::diagnose_error(command, output, exit_code).await else {
         return output.to_string();
     };
     let loc = match (&diag.file, diag.line) {
@@ -1092,7 +1092,7 @@ async fn exec_propose_contract(args: &Value, cwd: &Path, config: &Config) -> Val
     // independent assertion proposal + reconciliation loop before creating the
     // contract. Falls back to the main model's assertions on any failure.
     let (assertions, negotiated) =
-        crate::features_adapter::negotiate_assertions(&brief, &title, assertions, config).await;
+        crate::runtime::features::contract_review::negotiate_assertions(&brief, &title, assertions, config).await;
 
     if assertions.is_empty() {
         return json!({"error": "assertion negotiation produced an empty list — please retry"});
@@ -1191,7 +1191,7 @@ async fn exec_mark_assertion(args: &Value, cwd: &Path, config: &Config) -> Value
             let cmd_str = check.as_ref().map(|c| c.command.as_str());
             let ec = check.as_ref().map(|c| c.exit_code);
             let obs_str = check.as_ref().map(|c| c.observation.as_str());
-            if let Some(reason) = crate::features_adapter::verify_assertion_passed(
+            if let Some(reason) = crate::runtime::features::contract_review::verify_assertion_passed(
                 &assertion_text,
                 &evidence,
                 cmd_str,
@@ -1289,7 +1289,7 @@ async fn exec_close_contract(args: &Value, cwd: &Path, config: &Config) -> Value
             .collect();
         if !passed.is_empty() {
             if let Some(disputed) =
-                crate::features_adapter::verify_contract_complete(&c.brief, &passed, config).await
+                crate::runtime::features::contract_review::verify_contract_complete(&c.brief, &passed, config).await
             {
                 return json!({
                     "error": format!(

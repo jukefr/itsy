@@ -1,7 +1,7 @@
 //! Verify-and-fix loop — mirrors upstream JS `features/verify_and_fix.js`.
 //!
 //! After a file is written/patched, this module:
-//!   1. Runs a fast self-critique via [`crate::features_adapter::validate_edit_compiled`].
+//!   1. Runs a fast self-critique via [`validate_edit_compiled`].
 //!   2. Runs the local compile/lint validator via [`crate::governor::verify_code`].
 //!   3. If validation fails, formats a fix-request prompt (with attempt
 //!      history) and hands control back to the model.
@@ -16,11 +16,134 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
-use crate::features_adapter::validate_edit_compiled;
 use crate::governor::{verify_code, VerifyResult};
-use crate::loops_adapter::{run_bounded_validation, BoundedValidationResult, ValidationOutcome};
+use crate::runtime::cognition::loops::{run_with_retry, RetryConfig};
+use super::prompts::{call_prompt, call_prompt_with_endpoint, truncate};
+
+// ─── Validate-edit prompts (compiled self-critique) ─────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct ValidateEditResult {
+    pub ok: bool,
+    pub issues: Vec<String>,
+}
+
+pub async fn validate_edit_compiled(file_path: &str, content: &str, original_task: &str) -> ValidateEditResult {
+    let truncated = truncate(content, 4000);
+    let r = match call_prompt(
+        "validate_edit",
+        json!({
+            "file_path": file_path,
+            "content": truncated,
+            "original_task": truncate(original_task, 500),
+        }),
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(_) => return ValidateEditResult { ok: true, issues: Vec::new() },
+    };
+    interpret_validate_response(&r)
+}
+
+/// Like `validate_edit_compiled` but routes the call through the second-opinion
+/// model/endpoint when configured, falling back to the main model otherwise.
+pub async fn validate_edit_with_config(
+    file_path: &str,
+    content: &str,
+    original_task: &str,
+    config: &crate::config::Config,
+) -> ValidateEditResult {
+    let truncated = truncate(content, 4000);
+    let input = json!({
+        "file_path": file_path,
+        "content": truncated,
+        "original_task": truncate(original_task, 500),
+    });
+    let model = config.second_opinion.resolved_model(config);
+    let base_url = config.second_opinion.resolved_endpoint(config);
+    let r = match call_prompt_with_endpoint("validate_edit", input, model, base_url).await {
+        Ok(s) => s,
+        Err(_) => return ValidateEditResult { ok: true, issues: Vec::new() },
+    };
+    interpret_validate_response(&r)
+}
+
+fn interpret_validate_response(r: &str) -> ValidateEditResult {
+    let lc = r.to_lowercase();
+    let passed = lc.contains("ok")
+        || lc.contains("correct")
+        || lc.contains("looks good")
+        || lc.contains("valid")
+        || lc.contains("pass")
+        || !lc.contains("error");
+    ValidateEditResult {
+        ok: passed,
+        issues: if passed { Vec::new() } else { vec![truncate(r, 200)] },
+    }
+}
+
+// ─── Bounded-validation primitive (formerly `loops_adapter::run_bounded_validation`) ─
+
+#[derive(Debug, Clone)]
+pub struct ValidationOutcome {
+    pub passed: bool,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BoundedValidationResult {
+    pub passed: bool,
+    pub attempts: u32,
+    pub last_errors: Vec<String>,
+    pub exhausted: bool,
+}
+
+/// Run a bounded validation loop. The validator runs at most
+/// `max_iterations` times; we return the final outcome plus a flag
+/// indicating whether the retry budget was exhausted.
+pub async fn run_bounded_validation<F, Fut>(
+    mut validate_fn: F,
+    file_path: &str,
+    max_iterations: u32,
+) -> BoundedValidationResult
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = Option<ValidationOutcome>>,
+{
+    let cfg = RetryConfig {
+        max_attempts: max_iterations.max(1),
+        backoff_ms: 0,
+        jitter_ms: 1,
+    };
+    let mut attempts: u32 = 0;
+    let mut last_errors: Vec<String> = Vec::new();
+    let res: Result<(), Vec<String>> = run_with_retry(cfg, |_| {
+        let path = file_path.to_string();
+        attempts += 1;
+        let fut = validate_fn(path);
+        async move {
+            match fut.await {
+                None => Ok(()),
+                Some(o) if o.passed => Ok(()),
+                Some(o) => Err(o.errors),
+            }
+        }
+    })
+    .await;
+    if let Err(ref errs) = res {
+        last_errors = errs.clone();
+    }
+    let exhausted = attempts >= max_iterations && res.is_err();
+    BoundedValidationResult {
+        passed: res.is_ok(),
+        attempts,
+        last_errors,
+        exhausted,
+    }
+}
 
 // ─── Primitives ─────────────────────────────────────────────────────────────
 
@@ -309,7 +432,7 @@ impl VerifyAndFixLoop {
         let path_buf = PathBuf::from(file_path);
         let max = max_attempts.max(1);
 
-        // Run the bounded validation helper from loops_adapter.
+        // Run the bounded validation helper (lives in this module).
         let outcome: BoundedValidationResult =
             run_bounded_validation(&mut validate_fn, file_path, max).await;
 

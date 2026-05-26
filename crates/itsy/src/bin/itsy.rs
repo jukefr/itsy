@@ -20,10 +20,9 @@ use tokio::io::{AsyncBufReadExt, BufReader as TokioBufReader};
 use itsy::runtime::agent_loop::{AgentSession, AgentSessionReadOnly, AgentSessionShared, AgentSessionMutable, GuardAction};
 use itsy::commands::{handle_command, CommandCtx, CommandResult};
 use itsy::config::{check_endpoint, load_config, load_dotenv, Config, Flags};
-use itsy::cognition_adapter::classify_task_compiled;
+use itsy::runtime::cognition::router::classify_task_compiled;
 use itsy::eval_runner::{format_results, known_suite, EvalRunner};
 use itsy::executor::{execute_tool, ExecCtx};
-use itsy::features_adapter;
 use itsy::governor::{
     classify_task, pick_decompose_strategy, ToolScorer, VerificationHistory,
     HardFailAction,
@@ -213,7 +212,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
         && !itsy::runtime::tool_router::looks_like_option_ref(&user_msg)
         && !itsy::runtime::tool_router::is_affirmation(&user_msg)
     {
-        let needs = features_adapter::check_needs_clarification(&user_msg).await;
+        let needs = itsy::runtime::features::clarify::check_needs_clarification(&user_msg).await;
         if needs {
             let clarifier_idx = {
                 let mut locked = session.mutable.lock();
@@ -638,7 +637,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                     Ok(v) => v,
                     Err(_) => {
                         // Repair attempt via features adapter.
-                        let repair = features_adapter::repair_tool_call(
+                        let repair = itsy::runtime::features::repair::repair_tool_call(
                             args_str,
                             "Invalid JSON",
                             "",
@@ -983,7 +982,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                             if itsy::settings::get().validate_edits {
                                 if let Ok(content) = std::fs::read_to_string(&file_path) {
                                     let cfg_snapshot = session.shared.read().config.clone();
-                                    let result = features_adapter::validate_edit_with_config(
+                                    let result = itsy::runtime::features::verify_and_fix::validate_edit_with_config(
                                         &file_path,
                                         &content,
                                         &user_msg,
@@ -1050,7 +1049,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                             // Try LLM-based decompose first; fall back to the
                             // governor's regex strategy.
                             let cfg_snap = session.shared.read().config.clone();
-                            let strat = features_adapter::decompose_task(
+                            let strat = itsy::runtime::features::decompose::decompose_task(
                                 &user_msg,
                                 &errors.join("\n"),
                                 &file_content.chars().take(1000).collect::<String>(),
@@ -1117,7 +1116,7 @@ async fn handle_turn(prompt_in: &str, session: &AgentSession) {
                         }));
                     } else {
                         let cfg_snap = session.shared.read().config.clone();
-                        let strategy = features_adapter::decompose_task(
+                        let strategy = itsy::runtime::features::decompose::decompose_task(
                             &user_msg,
                             result
                                 .get("result")
@@ -1487,7 +1486,7 @@ async fn try_auto_commit(cwd: &Path, task: &str, edited: &[String]) {
         return;
     }
     let edited_vec: Vec<String> = edited.to_vec();
-    let msg = features_adapter::generate_commit_message(task, &edited_vec).await;
+    let msg = itsy::runtime::features::commit_message::generate_commit_message(task, &edited_vec).await;
     let _ = Command::new("git")
         .args(["add", "-A"])
         .current_dir(cwd)
@@ -1727,7 +1726,7 @@ Return ONLY the JSON. No prose.",
         current.passed,
     );
 
-    let raw = match itsy::features_adapter::direct_chat(&prompt, model, base_url, 120).await {
+    let raw = match itsy::runtime::providers::openai_compat::chat_oneshot(base_url, model, &prompt, None, 120).await {
         Ok(s) => s,
         Err(_) => return Some(ReviewResponse::Accept),
     };

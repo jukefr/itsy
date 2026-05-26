@@ -67,7 +67,7 @@ async fn negotiate_assertions_roundtrip() {
 
     let start = std::time::Instant::now();
     let (result, negotiated) =
-        itsy::features_adapter::negotiate_assertions(brief, title, main_assertions, &config).await;
+        itsy::runtime::features::contract_review::negotiate_assertions(brief, title, main_assertions, &config).await;
     let elapsed = start.elapsed();
 
     eprintln!("\nNegotiated: {negotiated}  ({:.1}s)", elapsed.as_secs_f64());

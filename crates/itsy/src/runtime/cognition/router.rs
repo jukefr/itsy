@@ -65,6 +65,42 @@ pub fn get_router(name: &str) -> Option<Router> {
     }
 }
 
+/// Classify a user message into a task type. Calls the `classify_task_type`
+/// prompt in the compiled cognition layer; on any failure, defers to the
+/// caller-supplied regex fallback (see [`crate::governor::classify_task`]).
+///
+/// The compiled-layer response is one of:
+/// `coding | editing | search | shell | explanation | multi_step | debugging | backend`.
+/// Anything else routes through `fallback`.
+pub async fn classify_task_compiled<F: Fn(&str) -> &'static str>(
+    user_message: &str,
+    fallback: F,
+) -> &'static str {
+    let result = super::prompts::call_prompt(
+        "classify_task_type",
+        serde_json::json!({ "user_message": user_message }),
+    )
+    .await;
+    let Ok(value) = result else { return fallback(user_message) };
+    let Some(text) = value.as_str() else { return fallback(user_message) };
+    let cleaned = text
+        .trim()
+        .to_lowercase()
+        .trim_end_matches(['.', ',', '!', '?'])
+        .to_string();
+    match cleaned.as_str() {
+        "coding" => "coding",
+        "editing" => "editing",
+        "search" => "search",
+        "shell" => "shell",
+        "explanation" => "explanation",
+        "multi_step" => "multi_step",
+        "debugging" => "debugging",
+        "backend" => "backend",
+        _ => fallback(user_message),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

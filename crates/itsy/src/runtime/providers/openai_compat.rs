@@ -145,6 +145,78 @@ impl OpenAICompatProvider {
     }
 }
 
+/// One-shot chat against an arbitrary OpenAI-compatible endpoint with custom
+/// (model, endpoint, thinking budget). Built for the third-evaluator path in
+/// `bin/itsy.rs::review_verdict`, where the second-opinion model is not the
+/// configured main model and the main [`crate::model_client`] would be the
+/// wrong shape.
+///
+/// Why the explicit `thinking_budget`: reasoning-enabled models
+/// (Qwen3, Gemma3+, DeepSeek-R1, …) spend `max_tokens` on `reasoning_content`
+/// first, then on output. With `max_tokens=1024` the whole budget gets eaten
+/// by thinking and the content field comes back empty — that's the bug we hit
+/// when the assertion-negotiation second-opinion call always returned `""`.
+/// Default headroom: `2048` for thinking + `4096` for the actual response.
+/// Sends `chat_template_kwargs` and the Anthropic-shape `thinking` knob too
+/// so llama-server-backed reasoning models pick it up correctly.
+pub async fn chat_oneshot(
+    endpoint: &str,
+    model: &str,
+    prompt: &str,
+    thinking_budget: Option<u32>,
+    timeout_secs: u64,
+) -> Result<String> {
+    assert_endpoint_allowed(endpoint).map_err(|e| anyhow!(e))?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_secs))
+        .build()?;
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    let api_key = env::var("OPENAI_API_KEY")
+        .or_else(|_| env::var("ANTHROPIC_API_KEY"))
+        .or_else(|_| env::var("DEEPSEEK_API_KEY"))
+        .ok()
+        .filter(|s| !s.is_empty());
+    if let Some(k) = api_key {
+        if let Ok(v) = HeaderValue::from_str(&format!("Bearer {k}")) {
+            headers.insert(AUTHORIZATION, v);
+        }
+    }
+    let thinking_budget = thinking_budget.unwrap_or(2048);
+    let max_tokens = thinking_budget + 4096;
+    let body = json!({
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.2,
+        "max_tokens": max_tokens,
+        "enable_thinking": true,
+        "thinking_budget": thinking_budget,
+        "chat_template_kwargs": {
+            "enable_thinking": true,
+            "thinking_budget": thinking_budget,
+        },
+        "thinking": {"type": "enabled", "budget_tokens": thinking_budget},
+    });
+    let url = format!("{}/chat/completions", endpoint.trim_end_matches('/'));
+    let res = client
+        .post(&url)
+        .headers(headers)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| anyhow!("POST {url}: {e}"))?;
+    if !res.status().is_success() {
+        let status = res.status().as_u16();
+        let text = res.text().await.unwrap_or_default();
+        return Err(anyhow!("API {status}: {}", &text[..text.len().min(200)]));
+    }
+    let data: Value = res.json().await?;
+    data.pointer("/choices/0/message/content")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .ok_or_else(|| anyhow!("empty response"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

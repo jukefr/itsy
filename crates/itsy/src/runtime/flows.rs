@@ -1,9 +1,9 @@
 //! Saga runtime — implements flow declarations with backward compensation.
 //!
 //! On step failure, executes compensations for ALL completed steps in reverse
-//! order. The synchronous (non-`async`) variant lives here so the cognition
-//! layer can register flows without dragging an executor into scope; the async
-//! sibling lives in `loops_adapter::execute_flow`.
+//! order. Two variants live here: a synchronous [`execute_flow`] used by the
+//! cognition layer (registry-driven, no async runtime needed), and an
+//! `async` [`execute_async_flow`] used by the agent loop for I/O-bound steps.
 
 use std::collections::HashMap;
 
@@ -247,5 +247,162 @@ mod tests {
         r.register("my_flow", steps.clone());
         assert_eq!(r.get("my_flow"), Some(&steps));
         assert!(r.get("unknown").is_none());
+    }
+}
+
+// ============================================================================
+// Async saga — one I/O-bound step at a time, compensate on failure in reverse.
+// ============================================================================
+
+use std::future::Future;
+use std::pin::Pin;
+
+/// One step of an async flow: an `action` future plus an optional
+/// `compensate` future. Both are dyn-boxed so a heterogeneous list can be
+/// passed to [`execute_flow`].
+pub type StepFuture<'a> = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'a>>;
+pub type StepFn<C> = Box<dyn for<'a> FnMut(&'a mut C) -> StepFuture<'a> + Send>;
+
+pub struct AsyncFlowStep<C> {
+    pub name: String,
+    pub action: StepFn<C>,
+    pub compensate: Option<StepFn<C>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FlowResult {
+    pub ok: bool,
+    pub failed_step: Option<String>,
+    pub compensated: Vec<String>,
+    pub error: Option<String>,
+}
+
+/// Execute a saga-style flow. Each step runs sequentially; if any step
+/// returns an error, prior steps are compensated in reverse order.
+pub async fn execute_async_flow<C>(_name: &str, mut steps: Vec<AsyncFlowStep<C>>, ctx: &mut C) -> FlowResult {
+    let mut completed: Vec<(String, Option<StepFn<C>>)> = Vec::new();
+    for step in &mut steps {
+        let name = step.name.clone();
+        let action_res = (step.action)(ctx).await;
+        match action_res {
+            Ok(()) => {
+                completed.push((name, step.compensate.take()));
+            }
+            Err(e) => {
+                let mut compensated_names = Vec::new();
+                while let Some((cname, cmp)) = completed.pop() {
+                    if let Some(mut cfn) = cmp {
+                        if (cfn)(ctx).await.is_ok() {
+                            compensated_names.push(cname);
+                        }
+                    }
+                }
+                return FlowResult {
+                    ok: false,
+                    failed_step: Some(name),
+                    compensated: compensated_names,
+                    error: Some(e.to_string()),
+                };
+            }
+        }
+    }
+    FlowResult {
+        ok: true,
+        failed_step: None,
+        compensated: Vec::new(),
+        error: None,
+    }
+}
+
+#[cfg(test)]
+mod async_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    /// `execute_flow` runs all steps in order and reports ok=true on success.
+    #[tokio::test]
+    async fn flow_runs_all_steps_in_order_on_success() {
+        let order: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        fn step(label: &str, order: Arc<std::sync::Mutex<Vec<String>>>) -> AsyncFlowStep<()> {
+            let label_owned = label.to_string();
+            AsyncFlowStep {
+                name: label.to_string(),
+                action: Box::new(move |_ctx| {
+                    let l = label_owned.clone();
+                    let o = order.clone();
+                    Box::pin(async move {
+                        o.lock().unwrap().push(l);
+                        Ok::<(), anyhow::Error>(())
+                    })
+                }),
+                compensate: None,
+            }
+        }
+
+        let steps = vec![
+            step("a", order.clone()),
+            step("b", order.clone()),
+            step("c", order.clone()),
+        ];
+        let mut ctx = ();
+        let r = execute_async_flow("test", steps, &mut ctx).await;
+        assert!(r.ok);
+        assert!(r.failed_step.is_none());
+        assert_eq!(*order.lock().unwrap(), vec!["a", "b", "c"]);
+    }
+
+    /// When a step fails, prior steps are compensated in REVERSE order.
+    #[tokio::test]
+    async fn flow_compensates_in_reverse_on_failure() {
+        let compensated: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        fn ok_step(name: &str, compensated: Arc<std::sync::Mutex<Vec<String>>>) -> AsyncFlowStep<()> {
+            let n = name.to_string();
+            AsyncFlowStep {
+                name: name.to_string(),
+                action: Box::new(|_ctx| Box::pin(async { Ok(()) })),
+                compensate: Some(Box::new(move |_ctx| {
+                    let n = n.clone();
+                    let c = compensated.clone();
+                    Box::pin(async move {
+                        c.lock().unwrap().push(n);
+                        Ok::<(), anyhow::Error>(())
+                    })
+                })),
+            }
+        }
+
+        fn bad_step(name: &str) -> AsyncFlowStep<()> {
+            let n = name.to_string();
+            AsyncFlowStep {
+                name: n.clone(),
+                action: Box::new(move |_ctx| {
+                    let err = format!("{n}-failed");
+                    Box::pin(async move { Err(anyhow::anyhow!(err)) })
+                }),
+                compensate: None,
+            }
+        }
+
+        let steps = vec![
+            ok_step("step1", compensated.clone()),
+            ok_step("step2", compensated.clone()),
+            bad_step("step3"),
+        ];
+        let mut ctx = ();
+        let r = execute_async_flow("test", steps, &mut ctx).await;
+        assert!(!r.ok);
+        assert_eq!(r.failed_step.as_deref(), Some("step3"));
+        assert_eq!(*compensated.lock().unwrap(), vec!["step2", "step1"]);
+        assert!(r.error.unwrap().contains("step3-failed"));
+    }
+
+    /// Empty flow trivially succeeds.
+    #[tokio::test]
+    async fn empty_flow_returns_ok() {
+        let mut ctx = ();
+        let r: FlowResult = execute_async_flow("nothing", Vec::<AsyncFlowStep<()>>::new(), &mut ctx).await;
+        assert!(r.ok);
     }
 }

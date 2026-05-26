@@ -1,7 +1,8 @@
 //! Features-layer prompt dispatcher — ported from
 //! upstream JS `features/prompts.js`. Self-contained: uses env config +
 //! direct OpenAI-compatible HTTP, with an in-memory TTL cache. The 9 prompts
-//! here back the [`crate::features_adapter`] surface.
+//! here back the per-feature modules under
+//! [`crate::runtime::features`] (`repair`, `summarize`, `clarify`, …).
 
 use std::collections::HashMap;
 use std::env;
@@ -253,6 +254,31 @@ pub fn known_prompts() -> &'static [&'static str] {
     ]
 }
 
+// ─── Helpers shared by the runtime::features::* prompt modules ──────────────
+
+/// Truncate `s` to at most `n` bytes, respecting UTF-8 char boundaries.
+pub(crate) fn truncate(s: &str, n: usize) -> String {
+    if s.len() <= n {
+        return s.to_string();
+    }
+    let mut end = n;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
+}
+
+/// Strip surrounding markdown code fences (```json … ``` or ``` … ```) from a
+/// model response.
+pub(crate) fn strip_fences(s: &str) -> String {
+    s.trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim()
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,5 +448,50 @@ mod tests {
         std::thread::sleep(Duration::from_millis(10));
         assert!(cache_get(&key).is_none(),
             "expired entry must NOT be returned");
+    }
+
+    // ── strip_fences ────────────────────────────────────────────────────────
+
+    #[test]
+    fn strip_fences_handles_json_fence() {
+        assert_eq!(strip_fences("```json\n{\"a\":1}\n```"), "{\"a\":1}");
+    }
+
+    #[test]
+    fn strip_fences_handles_bare_fence() {
+        assert_eq!(strip_fences("```\ndata\n```"), "data");
+    }
+
+    #[test]
+    fn strip_fences_passes_through_unfenced() {
+        assert_eq!(strip_fences("plain text"), "plain text");
+        assert_eq!(strip_fences("{\"a\":1}"), "{\"a\":1}");
+    }
+
+    #[test]
+    fn strip_fences_handles_empty() {
+        assert_eq!(strip_fences(""), "");
+        assert_eq!(strip_fences("   "), "");
+    }
+
+    // ── truncate ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn truncate_short_strings_pass_through() {
+        assert_eq!(truncate("hello", 10), "hello");
+    }
+
+    #[test]
+    fn truncate_long_strings_cap_at_n() {
+        let s = "x".repeat(100);
+        assert_eq!(truncate(&s, 20).len(), 20);
+    }
+
+    #[test]
+    fn truncate_respects_utf8_boundaries() {
+        // 'é' is 2 bytes; cutting at 5 in "héllo" needs to land on a char boundary.
+        let r = truncate("héllo wörld", 5);
+        assert!(r.len() <= 5);
+        assert!(r.chars().count() > 0);
     }
 }
